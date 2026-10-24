@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>CFBundleIdentifier</key><string>io.github.hermes-ddots-p.ddots</string>
+<key>CFBundleExecutable</key><string>ddots</string>
+<key>CFBundleName</key><string>ddots</string>
+<key>CFBundleDisplayName</key><string>ddots</string>
+<key>CFBundlePackageType</key><string>APPL</string>
+<key>CFBundleShortVersionString</key><string>1.6.98</string>
+<key>CFBundleVersion</key><string>136</string>
+<key>CFBundleIconFile</key><string>ddots</string>
+<key>LSMinimumSystemVersion</key><string>13.0</string>
+<key>SUEnableAutomaticChecks</key><false/>
+<key>SUAllowsAutomaticUpdates</key><false/>
+<key>SUVerifyUpdateBeforeExtraction</key><true/>
+<key>SURequireSignedFeed</key><true/>
+<key>SUSignedFeedFailureExpirationInterval</key><real>0</real>
+<key>SUSendProfileInfo</key><false/>
+<key>LSUIElement</key><true/>
+<key>NSHighResolutionCapable</key><true/>
+<key>NSAppTransportSecurity</key><dict><key>NSAllowsArbitraryLoadsInWebContent</key><true/></dict>
+<key>NSAppleEventsUsageDescription</key><string>Hermes 대화창에서 입력한 글을 메시지 앱으로 보냅니다.</string>
+<key>NSCalendarsUsageDescription</key><string>Mac 캘린더의 실제 일정을 조회하고, 대화와 관련된 일정의 상세 내용을 보여줍니다.</string>
+<key>NSCalendarsFullAccessUsageDescription</key><string>Mac 캘린더의 실제 일정을 조회하고, 대화와 관련된 일정의 상세 내용을 보여줍니다.</string>
+<key>SUPublicEDKey</key><string>jlowJFTiyGoxXw+3O9ETpzHk9sieW73c4NfoYq/vfNI=</string>
+</dict></plist>

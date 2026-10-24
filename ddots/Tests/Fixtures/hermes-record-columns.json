@@ -1,0 +1,12 @@
+{
+  "note": "ddots가 Hermes 기록(state.db)에서 읽는 표와 열입니다. required가 없으면 대화를 읽지 못하고, optional이 없으면 그 기능만 빠집니다. Hermes 쪽에서 이 열의 이름이나 뜻을 바꾸면 ddots도 함께 고쳐야 합니다.",
+  "required": {
+    "sessions": ["id", "source"],
+    "messages": ["id", "session_id", "role", "content", "timestamp", "tool_calls"]
+  },
+  "optional": {
+    "sessions": ["chat_id", "thread_id"],
+    "messages": ["display_kind"],
+    "session_turn_leases": ["conversation_id", "holder", "acquired_at", "expires_at"]
+  }
+}

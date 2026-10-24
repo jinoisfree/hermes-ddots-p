@@ -1,0 +1,31 @@
+{
+  "display_information": {
+    "name": "ddots",
+    "description": "ddots 대화창에서 슬랙 스레드를 읽고 내 이름으로 답글을 답니다."
+  },
+  "oauth_config": {
+    "scopes": {
+      "user": [
+        "chat:write",
+        "channels:history",
+        "groups:history",
+        "im:history",
+        "channels:read",
+        "channels:write",
+        "groups:read",
+        "groups:write",
+        "im:read",
+        "im:write",
+        "users:read",
+        "search:read",
+        "files:read",
+        "files:write"
+      ]
+    }
+  },
+  "settings": {
+    "org_deploy_enabled": false,
+    "socket_mode_enabled": false,
+    "token_rotation_enabled": false
+  }
+}

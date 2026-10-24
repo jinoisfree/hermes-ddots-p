@@ -1,0 +1,75 @@
+{
+  "gateway": {
+    "common_router": {
+      "enabled": true,
+      "profiles": {
+        "wiki": "guide",
+        "personal_operations": "helper",
+        "personal_review": "helper",
+        "company_operations": "support",
+        "data_operations": "helper",
+        "coordination": "helper",
+        "audit": "doctor",
+        "fallback": "assistant"
+      },
+      "aliases": {
+        "guide": [
+          "Wiki"
+        ],
+        "helper": [
+          "Assistant"
+        ],
+        "support": [
+          "Support"
+        ],
+        "doctor": [
+          "Doctor"
+        ],
+        "assistant": [
+          "General"
+        ]
+      },
+      "patterns": {
+        "wiki_target": "위키|wiki|memory",
+        "personal_target": "일정|메일|메모|캘린더",
+        "personal_write": "등록|수정|보내|작성",
+        "company_target": "인스타|DM",
+        "company_action": "확인|읽어|보내|있",
+        "coordination": "우선순위|현황",
+        "cross_owner_connector": "각각|함께|같이|그리고"
+      },
+      "cross_owner": {
+        "profile": "helper"
+      },
+      "address_prefixes": {
+        "enabled": true,
+        "profiles": {
+          "ㅎ": "helper"
+        }
+      },
+      "typo_correction": {
+        "enabled": true,
+        "max_distance": 1,
+        "min_term_length": 3,
+        "terms": {
+          "personal_target": [
+            "캘린더"
+          ]
+        }
+      },
+      "project_hub": {
+        "enabled": true,
+        "channel_id": "C_EXAMPLE",
+        "staff_user_ids": {
+          "guide": "B_GUIDE",
+          "helper": "B_HELPER"
+        },
+        "patterns": {
+          "data_target": "파일|보고서|노션|문서",
+          "data_action": "찾아|작성|정리|수정",
+          "document_conversion": "PDF로 변환"
+        }
+      }
+    }
+  }
+}

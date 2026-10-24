@@ -1,0 +1,56 @@
+[
+  {
+    "name": "mixed",
+    "text": "'가짜새' 검색 결과\n\n연락표.xlsx\n   가짜팀\n1. → 안내 시트 → 가짜새\n2. → 둘째 시트 → 가짜새\n\n아주 긴 파일 이름이 붙은 합성 업무 자료.xlsx\n   가짜/깊은/폴더\n3. → 시험 시트 → 가짜새 (142행)\n4. → 시험 시트 → 가짜새 (143행)\n\n최상위.pdf\n5. → 7페이지\n\n합성.md\n   노트\n6. → 12번째 줄\n\n7. 자료.zip\n\n— 유사 결과 —\n\n가짜.txt\n8. → 3번째 줄\n\n다음 목록으로 더 볼 수 있어요.\n\n어느 항목인가요?",
+    "expected": [
+      {
+        "number": 1,
+        "file": "연락표.xlsx",
+        "folder": "가짜팀",
+        "location": "안내 시트 → 가짜새"
+      },
+      {
+        "number": 2,
+        "file": "연락표.xlsx",
+        "folder": "가짜팀",
+        "location": "둘째 시트 → 가짜새"
+      },
+      {
+        "number": 3,
+        "file": "아주 긴 파일 이름이 붙은 합성 업무 자료.xlsx",
+        "folder": "가짜/깊은/폴더",
+        "location": "시험 시트 → 가짜새 (142행)"
+      },
+      {
+        "number": 4,
+        "file": "아주 긴 파일 이름이 붙은 합성 업무 자료.xlsx",
+        "folder": "가짜/깊은/폴더",
+        "location": "시험 시트 → 가짜새 (143행)"
+      },
+      {
+        "number": 5,
+        "file": "최상위.pdf",
+        "folder": "",
+        "location": "7페이지"
+      },
+      {
+        "number": 6,
+        "file": "합성.md",
+        "folder": "노트",
+        "location": "12번째 줄"
+      },
+      {
+        "number": 7,
+        "file": "자료.zip",
+        "folder": "",
+        "location": ""
+      },
+      {
+        "number": 8,
+        "file": "가짜.txt",
+        "folder": "",
+        "location": "3번째 줄"
+      }
+    ]
+  }
+]

@@ -1,0 +1,335 @@
+{
+  "asking-attachment": {
+    "ts": "100.0",
+    "user": "UCOWBOT",
+    "text": "검토할까요?",
+    "blocks": [
+      {
+        "type": "section",
+        "text": {
+          "type": "mrkdwn",
+          "text": "검토할까요?"
+        }
+      }
+    ],
+    "attachments": [
+      {
+        "color": "#E01E5A",
+        "blocks": [
+          {
+            "type": "actions",
+            "block_id": "hermes_reply_buttons",
+            "elements": [
+              {
+                "type": "button",
+                "action_id": "hermes_reply_button_0",
+                "text": {
+                  "type": "plain_text",
+                  "text": "진행해"
+                },
+                "value": "진행해"
+              },
+              {
+                "type": "button",
+                "action_id": "hermes_reply_button_1",
+                "text": {
+                  "type": "plain_text",
+                  "text": "보류"
+                },
+                "value": "보류"
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "asking-top": {
+    "ts": "100.0",
+    "user": "UCOWBOT",
+    "text": "검토할까요?",
+    "blocks": [
+      {
+        "type": "section",
+        "text": {
+          "type": "mrkdwn",
+          "text": "검토할까요?"
+        }
+      },
+      {
+        "type": "actions",
+        "block_id": "hermes_reply_buttons",
+        "elements": [
+          {
+            "type": "button",
+            "action_id": "hermes_reply_button_0",
+            "text": {
+              "type": "plain_text",
+              "text": "진행해"
+            },
+            "value": "진행해"
+          },
+          {
+            "type": "button",
+            "action_id": "hermes_reply_button_1",
+            "text": {
+              "type": "plain_text",
+              "text": "보류"
+            },
+            "value": "보류"
+          }
+        ]
+      }
+    ],
+    "attachments": [
+      {
+        "color": "#E01E5A",
+        "blocks": []
+      }
+    ]
+  },
+  "working-attachment": {
+    "ts": "100.0",
+    "user": "UCOWBOT",
+    "text": "검토할까요?",
+    "blocks": [
+      {
+        "type": "section",
+        "text": {
+          "type": "mrkdwn",
+          "text": "검토할까요?"
+        }
+      }
+    ],
+    "attachments": [
+      {
+        "color": "#ECB22E",
+        "blocks": [
+          {
+            "type": "context",
+            "block_id": "hermes_report_status",
+            "elements": [
+              {
+                "type": "mrkdwn",
+                "text": "⏳ 답변 받음 · <@UME> `진행해` · 10:00 KST · 처리 중"
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "working-top": {
+    "ts": "100.0",
+    "user": "UCOWBOT",
+    "text": "검토할까요?",
+    "blocks": [
+      {
+        "type": "section",
+        "text": {
+          "type": "mrkdwn",
+          "text": "검토할까요?"
+        }
+      },
+      {
+        "type": "context",
+        "block_id": "hermes_report_status",
+        "elements": [
+          {
+            "type": "mrkdwn",
+            "text": "⏳ 답변 받음 · <@UME> `진행해` · 10:00 KST · 처리 중"
+          }
+        ]
+      }
+    ],
+    "attachments": [
+      {
+        "color": "#ECB22E",
+        "blocks": []
+      }
+    ]
+  },
+  "closed-attachment": {
+    "ts": "100.0",
+    "user": "UCOWBOT",
+    "text": "검토할까요?",
+    "blocks": [
+      {
+        "type": "section",
+        "text": {
+          "type": "mrkdwn",
+          "text": "검토할까요?"
+        }
+      }
+    ],
+    "attachments": [
+      {
+        "color": "#2EB67D",
+        "blocks": [
+          {
+            "type": "context",
+            "block_id": "hermes_report_status",
+            "elements": [
+              {
+                "type": "mrkdwn",
+                "text": "✅ 처리 완료 · 종결 · 10:01 KST"
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "closed-top": {
+    "ts": "100.0",
+    "user": "UCOWBOT",
+    "text": "검토할까요?",
+    "blocks": [
+      {
+        "type": "section",
+        "text": {
+          "type": "mrkdwn",
+          "text": "검토할까요?"
+        }
+      },
+      {
+        "type": "context",
+        "block_id": "hermes_report_status",
+        "elements": [
+          {
+            "type": "mrkdwn",
+            "text": "✅ 처리 완료 · 종결 · 10:01 KST"
+          }
+        ]
+      }
+    ],
+    "attachments": [
+      {
+        "color": "#2EB67D",
+        "blocks": []
+      }
+    ]
+  },
+  "working-close-label-attachment": {
+    "ts": "100.0",
+    "user": "UCOWBOT",
+    "text": "검토할까요?",
+    "blocks": [
+      {
+        "type": "section",
+        "text": {
+          "type": "mrkdwn",
+          "text": "검토할까요?"
+        }
+      }
+    ],
+    "attachments": [
+      {
+        "color": "#ECB22E",
+        "blocks": [
+          {
+            "type": "context",
+            "block_id": "hermes_report_status",
+            "elements": [
+              {
+                "type": "mrkdwn",
+                "text": "⏳ 답변 받음 · <@U1> `종결` · 10:00 KST · 처리 중"
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "working-complete-label-attachment": {
+    "ts": "100.0",
+    "user": "UCOWBOT",
+    "text": "검토할까요?",
+    "blocks": [
+      {
+        "type": "section",
+        "text": {
+          "type": "mrkdwn",
+          "text": "검토할까요?"
+        }
+      }
+    ],
+    "attachments": [
+      {
+        "color": "#ECB22E",
+        "blocks": [
+          {
+            "type": "context",
+            "block_id": "hermes_report_status",
+            "elements": [
+              {
+                "type": "mrkdwn",
+                "text": "⏳ 답변 받음 · <@U1> `처리 완료` · 10:00 KST · 처리 중"
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "working-close-label-top": {
+    "ts": "100.0",
+    "user": "UCOWBOT",
+    "text": "검토할까요?",
+    "blocks": [
+      {
+        "type": "section",
+        "text": {
+          "type": "mrkdwn",
+          "text": "검토할까요?"
+        }
+      },
+      {
+        "type": "context",
+        "block_id": "hermes_report_status",
+        "elements": [
+          {
+            "type": "mrkdwn",
+            "text": "⏳ 답변 받음 · <@U1> `종결` · 10:00 KST · 처리 중"
+          }
+        ]
+      }
+    ],
+    "attachments": [
+      {
+        "color": "#ECB22E",
+        "blocks": []
+      }
+    ]
+  },
+  "working-complete-label-top": {
+    "ts": "100.0",
+    "user": "UCOWBOT",
+    "text": "검토할까요?",
+    "blocks": [
+      {
+        "type": "section",
+        "text": {
+          "type": "mrkdwn",
+          "text": "검토할까요?"
+        }
+      },
+      {
+        "type": "context",
+        "block_id": "hermes_report_status",
+        "elements": [
+          {
+            "type": "mrkdwn",
+            "text": "⏳ 답변 받음 · <@U1> `처리 완료` · 10:00 KST · 처리 중"
+          }
+        ]
+      }
+    ],
+    "attachments": [
+      {
+        "color": "#ECB22E",
+        "blocks": []
+      }
+    ]
+  }
+}

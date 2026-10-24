@@ -1,0 +1,673 @@
+{
+  "ddots_overrides": {
+    "fallback": "assistant"
+  },
+  "defaults": {
+    "recipient": "assistant"
+  },
+  "features": {
+    "homeRoom": "C_EXAMPLE"
+  },
+  "members": [
+    {
+      "aliases": [],
+      "displayName": "Example",
+      "profile": "default",
+      "slackUserID": ""
+    },
+    {
+      "aliases": [
+        "General"
+      ],
+      "displayName": "Assistant",
+      "profile": "assistant",
+      "slackUserID": ""
+    },
+    {
+      "aliases": [
+        "Doctor"
+      ],
+      "displayName": "Doctor",
+      "profile": "doctor",
+      "slackUserID": ""
+    },
+    {
+      "aliases": [
+        "Wiki"
+      ],
+      "displayName": "Guide",
+      "profile": "guide",
+      "slackUserID": "B_GUIDE"
+    },
+    {
+      "aliases": [
+        "Assistant"
+      ],
+      "displayName": "Helper",
+      "profile": "helper",
+      "slackUserID": "B_HELPER"
+    },
+    {
+      "aliases": [
+        "Support"
+      ],
+      "displayName": "Support",
+      "profile": "support",
+      "slackUserID": ""
+    }
+  ],
+  "rooms": {},
+  "routing": {
+    "base": {
+      "address_prefixes": {
+        "enabled": true,
+        "profiles": {
+          "ㅎ": "helper"
+        }
+      },
+      "alias_order": [
+        "guide",
+        "helper",
+        "support",
+        "doctor",
+        "assistant"
+      ],
+      "aliases": {
+        "assistant": [
+          "General"
+        ],
+        "doctor": [
+          "Doctor"
+        ],
+        "guide": [
+          "Wiki"
+        ],
+        "helper": [
+          "Assistant"
+        ],
+        "support": [
+          "Support"
+        ]
+      },
+      "cross_owner": {
+        "profile": "helper"
+      },
+      "hub_request_routing": false,
+      "patterns": {
+        "company_action": "확인|읽어|보내|있",
+        "company_target": "인스타|DM",
+        "coordination": "우선순위|현황",
+        "cross_owner_connector": "각각|함께|같이|그리고",
+        "personal_target": "일정|메일|메모|캘린더",
+        "personal_write": "등록|수정|보내|작성",
+        "wiki_target": "위키|wiki|memory"
+      },
+      "profiles": {
+        "audit": "doctor",
+        "company_operations": "support",
+        "coordination": "helper",
+        "data_operations": "helper",
+        "fallback": "assistant",
+        "personal_operations": "helper",
+        "personal_review": "helper",
+        "wiki": "guide"
+      },
+      "typo_correction": {
+        "enabled": true,
+        "max_distance": 1,
+        "min_term_length": 3,
+        "terms": {
+          "personal_target": [
+            "캘린더"
+          ]
+        }
+      }
+    },
+    "hub": {
+      "address_prefixes": {
+        "enabled": true,
+        "profiles": {
+          "ㅎ": "helper"
+        }
+      },
+      "alias_order": [
+        "guide",
+        "helper",
+        "support",
+        "doctor",
+        "assistant"
+      ],
+      "aliases": {
+        "assistant": [
+          "General"
+        ],
+        "doctor": [
+          "Doctor"
+        ],
+        "guide": [
+          "Wiki"
+        ],
+        "helper": [
+          "Assistant"
+        ],
+        "support": [
+          "Support"
+        ]
+      },
+      "cross_owner": {
+        "profile": "helper"
+      },
+      "hub_request_routing": true,
+      "patterns": {
+        "company_action": "확인|읽어|보내|있",
+        "company_target": "인스타|DM",
+        "coordination": "우선순위|현황",
+        "cross_owner_connector": "각각|함께|같이|그리고",
+        "data_action": "찾아|작성|정리|수정",
+        "data_target": "파일|보고서|노션|문서",
+        "document_conversion": "PDF로 변환",
+        "personal_target": "일정|메일|메모|캘린더",
+        "personal_write": "등록|수정|보내|작성",
+        "wiki_target": "위키|wiki|memory"
+      },
+      "profiles": {
+        "audit": "doctor",
+        "company_operations": "support",
+        "coordination": "helper",
+        "data_operations": "helper",
+        "fallback": "assistant",
+        "personal_operations": "helper",
+        "personal_review": "helper",
+        "wiki": "guide"
+      },
+      "typo_correction": {
+        "enabled": true,
+        "max_distance": 1,
+        "min_term_length": 3,
+        "terms": {
+          "personal_target": [
+            "캘린더"
+          ]
+        }
+      }
+    }
+  },
+  "routing_samples": [
+    {
+      "base": "assistant",
+      "hub": "assistant",
+      "text": ""
+    },
+    {
+      "base": "assistant",
+      "hub": "assistant",
+      "text": "안녕"
+    },
+    {
+      "base": "assistant",
+      "hub": "assistant",
+      "text": "고마워"
+    },
+    {
+      "base": "helper",
+      "hub": "helper",
+      "text": "내일 일정 알려줘"
+    },
+    {
+      "base": "guide",
+      "hub": "guide",
+      "text": "위키에서 지난 회의록 찾아줘"
+    },
+    {
+      "base": "assistant",
+      "hub": "assistant",
+      "text": "오늘 토큰 얼마나 썼어?"
+    },
+    {
+      "base": "support",
+      "hub": "support",
+      "text": "인스타 DM 온 거 있어?"
+    },
+    {
+      "base": "assistant",
+      "hub": "assistant",
+      "text": "네이버 톡톡 문의 확인해줘"
+    },
+    {
+      "base": "guide",
+      "hub": "guide",
+      "text": "위키"
+    },
+    {
+      "base": "guide",
+      "hub": "guide",
+      "text": "memory 검색"
+    },
+    {
+      "base": "helper",
+      "hub": "helper",
+      "text": "일정 등록해줘"
+    },
+    {
+      "base": "helper",
+      "hub": "helper",
+      "text": "메일 읽어줘"
+    },
+    {
+      "base": "helper",
+      "hub": "helper",
+      "text": "메일 보내줘"
+    },
+    {
+      "base": "helper",
+      "hub": "helper",
+      "text": "메모 수정하지 마"
+    },
+    {
+      "base": "helper",
+      "hub": "helper",
+      "text": "메모 수정 여부 확인"
+    },
+    {
+      "base": "helper",
+      "hub": "helper",
+      "text": "캘린더 확인해줘"
+    },
+    {
+      "base": "helper",
+      "hub": "helper",
+      "text": "캘린다 확인해줘"
+    },
+    {
+      "base": "assistant",
+      "hub": "helper",
+      "text": "파일 찾아줘"
+    },
+    {
+      "base": "assistant",
+      "hub": "helper",
+      "text": "보고서 작성해줘"
+    },
+    {
+      "base": "assistant",
+      "hub": "helper",
+      "text": "노션 정리해줘"
+    },
+    {
+      "base": "assistant",
+      "hub": "helper",
+      "text": "PDF로 변환해줘"
+    },
+    {
+      "base": "helper",
+      "hub": "helper",
+      "text": "위키와 일정 각각 확인해줘"
+    },
+    {
+      "base": "assistant",
+      "hub": "helper",
+      "text": "문서와 인스타 DM 같이 찾아줘"
+    },
+    {
+      "base": "helper",
+      "hub": "helper",
+      "text": "우선순위 정해줘"
+    },
+    {
+      "base": "assistant",
+      "hub": "assistant",
+      "text": "헤르메스 오류 진단해줘"
+    },
+    {
+      "base": "assistant",
+      "hub": "assistant",
+      "text": "게이트웨이 작업 시간 확인"
+    },
+    {
+      "base": "assistant",
+      "hub": "assistant",
+      "text": "토큰"
+    },
+    {
+      "base": "assistant",
+      "hub": "assistant",
+      "text": "인스타그램"
+    },
+    {
+      "base": "assistant",
+      "hub": "assistant",
+      "text": "> 메일 보내줘\n안녕"
+    },
+    {
+      "base": "assistant",
+      "hub": "assistant",
+      "text": "`메일 보내줘` 안녕"
+    },
+    {
+      "base": "guide",
+      "hub": "guide",
+      "text": "```\n일정 등록\n```\n위키 찾아줘"
+    },
+    {
+      "base": "helper",
+      "hub": "assistant",
+      "text": "기존 메모 연동만 해줘"
+    },
+    {
+      "base": "assistant",
+      "hub": "helper",
+      "text": "노션 내용을 참고해서 파일 찾아줘"
+    },
+    {
+      "base": "helper",
+      "hub": "helper",
+      "text": "메일이라는 열 수정해줘"
+    },
+    {
+      "base": "helper",
+      "hub": "assistant",
+      "text": "자료 검색\n---\n메일 보내줘"
+    },
+    {
+      "base": "helper",
+      "hub": "helper",
+      "text": "일정 안 바꿔"
+    },
+    {
+      "base": "helper",
+      "hub": "helper",
+      "text": "만든 메모 읽어줘"
+    },
+    {
+      "base": "assistant",
+      "hub": "assistant",
+      "text": "회의 알려줘"
+    },
+    {
+      "base": "helper",
+      "hub": "helper",
+      "text": "전체 현황 알려줘"
+    },
+    {
+      "base": "assistant",
+      "hub": "assistant",
+      "text": "첨부 파일 요약해줘"
+    },
+    {
+      "base": "helper",
+      "hub": "helper",
+      "text": "내일 일정 등록해줘"
+    },
+    {
+      "base": "helper",
+      "hub": "helper",
+      "text": "내일 일정 확인해줘"
+    },
+    {
+      "base": "helper",
+      "hub": "helper",
+      "text": "메일 보내지 말고 내용만 요약해줘"
+    },
+    {
+      "base": "helper",
+      "hub": "helper",
+      "text": "메일 발송 여부 확인하고 일정 등록해줘"
+    },
+    {
+      "base": "helper",
+      "hub": "helper",
+      "text": "수정된 메모 읽어줘"
+    },
+    {
+      "base": "helper",
+      "hub": "helper",
+      "text": "메일 안 보내고 내용만 확인해줘"
+    },
+    {
+      "base": "assistant",
+      "hub": "assistant",
+      "text": "계약서 검토해줘"
+    },
+    {
+      "base": "assistant",
+      "hub": "assistant",
+      "text": "Hermes에 저장한 계약서 검토해줘"
+    },
+    {
+      "base": "assistant",
+      "hub": "assistant",
+      "text": "Hermes 오류 진단해줘"
+    },
+    {
+      "base": "guide",
+      "hub": "guide",
+      "text": "위키 찾아줘"
+    },
+    {
+      "base": "support",
+      "hub": "support",
+      "text": "인스타 답장 확인"
+    },
+    {
+      "base": "helper",
+      "hub": "helper",
+      "text": "내일 오전 일정 알려줘"
+    },
+    {
+      "base": "assistant",
+      "hub": "assistant",
+      "text": "헤이"
+    },
+    {
+      "base": "guide",
+      "hub": "guide",
+      "text": "위키에 지난 회의 내용 있어?"
+    },
+    {
+      "base": "helper",
+      "hub": "helper",
+      "text": "메모리에서 그 자료 찾아줘"
+    },
+    {
+      "base": "helper",
+      "hub": "helper",
+      "text": "메모리 부족하다던데"
+    },
+    {
+      "base": "assistant",
+      "hub": "assistant",
+      "text": "아까 작업 시간 왜 그렇게 걸렸어"
+    },
+    {
+      "base": "assistant",
+      "hub": "assistant",
+      "text": "점거 시간 알려줘"
+    },
+    {
+      "base": "assistant",
+      "hub": "assistant",
+      "text": "게이트웨이 오류 진단해줘"
+    },
+    {
+      "base": "support",
+      "hub": "support",
+      "text": "인스타 새로 온 거 있어?"
+    },
+    {
+      "base": "support",
+      "hub": "support",
+      "text": "DM 답장 보내줘"
+    },
+    {
+      "base": "assistant",
+      "hub": "assistant",
+      "text": "피드 올릴 거 정리해줘"
+    },
+    {
+      "base": "assistant",
+      "hub": "assistant",
+      "text": "random 값"
+    },
+    {
+      "base": "assistant",
+      "hub": "assistant",
+      "text": "네이버 톡톡 확인해줘"
+    },
+    {
+      "base": "assistant",
+      "hub": "assistant",
+      "text": "톡톡 답장 수정해줘"
+    },
+    {
+      "base": "assistant",
+      "hub": "assistant",
+      "text": "naver talk 확인"
+    },
+    {
+      "base": "assistant",
+      "hub": "assistant",
+      "text": "인스타 DM 처리에 토큰 얼마나 들었어"
+    },
+    {
+      "base": "helper",
+      "hub": "helper",
+      "text": "오늘 뭐부터 할지 우선순위 정해줘"
+    },
+    {
+      "base": "helper",
+      "hub": "helper",
+      "text": "위키 찾아보고 그리고 일정도 등록해줘"
+    },
+    {
+      "base": "helper",
+      "hub": "helper",
+      "text": "```\n위키 찾아줘\n```\n내일 일정 알려줘"
+    },
+    {
+      "base": "assistant",
+      "hub": "assistant",
+      "text": "> 인스타 확인해줘\n고마워"
+    },
+    {
+      "base": "assistant",
+      "hub": "assistant",
+      "text": "`토큰` 이라는 단어"
+    },
+    {
+      "base": "guide",
+      "hub": "guide",
+      "text": "Wiki, 안녕"
+    },
+    {
+      "base": "guide",
+      "hub": "guide",
+      "text": "Wiki에게 확인해줘"
+    },
+    {
+      "base": "guide",
+      "hub": "guide",
+      "text": "이제 Wiki 맡아줘"
+    },
+    {
+      "base": "guide",
+      "hub": "guide",
+      "text": "@guide 안녕"
+    },
+    {
+      "base": "helper",
+      "hub": "helper",
+      "text": "Assistant, 안녕"
+    },
+    {
+      "base": "helper",
+      "hub": "helper",
+      "text": "Assistant에게 확인해줘"
+    },
+    {
+      "base": "helper",
+      "hub": "helper",
+      "text": "이제 Assistant 맡아줘"
+    },
+    {
+      "base": "helper",
+      "hub": "helper",
+      "text": "@helper 안녕"
+    },
+    {
+      "base": "support",
+      "hub": "support",
+      "text": "Support, 안녕"
+    },
+    {
+      "base": "support",
+      "hub": "support",
+      "text": "Support에게 확인해줘"
+    },
+    {
+      "base": "support",
+      "hub": "support",
+      "text": "이제 Support 맡아줘"
+    },
+    {
+      "base": "support",
+      "hub": "support",
+      "text": "@support 안녕"
+    },
+    {
+      "base": "doctor",
+      "hub": "doctor",
+      "text": "Doctor, 안녕"
+    },
+    {
+      "base": "doctor",
+      "hub": "doctor",
+      "text": "Doctor에게 확인해줘"
+    },
+    {
+      "base": "doctor",
+      "hub": "doctor",
+      "text": "이제 Doctor 맡아줘"
+    },
+    {
+      "base": "doctor",
+      "hub": "doctor",
+      "text": "@doctor 안녕"
+    },
+    {
+      "base": "assistant",
+      "hub": "assistant",
+      "text": "General, 안녕"
+    },
+    {
+      "base": "assistant",
+      "hub": "assistant",
+      "text": "General에게 확인해줘"
+    },
+    {
+      "base": "assistant",
+      "hub": "assistant",
+      "text": "이제 General 맡아줘"
+    },
+    {
+      "base": "assistant",
+      "hub": "assistant",
+      "text": "@assistant 안녕"
+    },
+    {
+      "base": "helper",
+      "hub": "helper",
+      "text": "ㅎ일정 알려줘"
+    },
+    {
+      "base": "helper",
+      "hub": "helper",
+      "text": "ㅎ 메일 읽어줘"
+    }
+  ],
+  "schemaVersion": 1,
+  "solo": {
+    "excluded_rooms": [],
+    "listener_bots": [],
+    "team_bots": []
+  }
+}

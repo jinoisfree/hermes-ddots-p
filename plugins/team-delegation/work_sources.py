@@ -1,0 +1,242 @@
+"""Company-only adapters for the owner's linked-work synchronization exception."""
+from __future__ import annotations
+import json
+import re
+import subprocess
+from datetime import datetime, timedelta
+
+import work_content as content
+import deadline_time as dates
+
+TEXT_BLOCKS = {'paragraph', 'heading_1', 'heading_2', 'heading_3', 'bulleted_list_item',
+               'numbered_list_item', 'quote', 'callout', 'toggle', 'code', 'table_row'}
+
+
+def ordered_blocks(blocks):
+    """NotionReader fetches descendants in batches; recover document order from their parents."""
+    ids = {row['id'] for row in blocks}
+    children = {}
+    for row in blocks:
+        parent = row.get('parent', {}).get('block_id')
+        children.setdefault(parent if parent in ids else None, []).append(row)
+    def visit(parent):
+        for row in children.get(parent, []):
+            yield row
+            yield from visit(row['id'])
+    return list(visit(None))
+
+
+def body_text(block):
+    if block['type'] == 'table_row':
+        return '\t'.join(content.rich_text({'rich_text': cell}) for cell in block['table_row']['cells']).rstrip('\t')
+    return content.rich_text(block[block['type']])
+
+
+def rich(value):
+    return [{'type': 'text', 'text': {'content': value[i:i+1900]}} for i in range(0, len(value), 1900)]
+
+
+class Sources:
+    def __init__(self, home, *, reader=None, notes=None, calendar=None):
+        import notion_completion_sync as sync
+        self.home = home
+        self.reader = reader or sync.NotionReader(home)
+        self.notes = notes or sync.Notes()
+        self.calendar = calendar or sync.Calendar()
+        self.guard = sync.company_scope_guard
+        self.database = sync.DATABASE
+        self.aliases = {}
+
+    def references(self, item):
+        refs = [('notion', r['external_id']) for r in item.get('knowledge_refs', []) if r['ref_type'] == 'notion_page']
+        refs += [(s['domain'], s['source_id']) for s in item.get('sources', []) if s['domain'] in {'notes', 'calendar'}]
+        if len(refs) != len({kind for kind, _ in refs}):
+            raise ValueError('single_original_per_domain_required')
+        return refs
+
+    def read(self, kind, identifier):
+        identifier = self.aliases.get(identifier, identifier)
+        if kind == 'notion':
+            page = self.reader.page(identifier)
+            if str(page.get('parent', {}).get('database_id', '')).replace('-', '').lower() != self.database:
+                raise ValueError('company_notion_database_required')
+            from notion_completion_sync import page_title
+            blocks = ordered_blocks(self.reader.blocks(identifier))
+            tasks, lines = [], []
+            for block in blocks:
+                key = block.get('type')
+                if block.get('archived') or block.get('in_trash'):
+                    continue
+                if key == 'to_do':
+                    tasks.append(content.task(content.rich_text(block[key]), done=block[key].get('checked'), identifier=block['id']))
+                elif key in TEXT_BLOCKS:
+                    line = body_text(block)
+                    if key != 'table_row' or line.strip():
+                        lines.append(line)
+            props = page.get('properties', {})
+            status = props.get('상태', {})
+            status_name = (status.get('status') or status.get('select') or {}).get('name')
+            if status_name == 'Done':
+                for row in tasks:
+                    row['done'] = True
+            due = (props.get('다음 마감', {}).get('date') or {}).get('start')
+            if len(tasks) == 1 and not tasks[0].get('due') and due:
+                tasks[0]['due'] = dates.canonical(due)
+            closed = bool(page.get('in_trash') or page.get('archived') or status_name == 'Cancelled')
+            result = {'content': {'title': page_title(page)[1], 'body': '\n'.join(lines).strip(), 'tasks': tasks},
+                      'raw': {'page': page, 'blocks': blocks}, 'closed': closed}
+        elif kind == 'notes':
+            self.guard('notes', {'action': 'update', 'note_id': identifier}, strict=True)
+            raw = self.notes.current(identifier)
+            if not raw:
+                raise ValueError('note_missing_no_work_delete_propagation')
+            try:
+                _, summary, _ = self.notes.tools()._linked_note_sections(raw['body_html'])
+                lines = []
+                for line in summary.splitlines():
+                    hit = re.match(r'\s*- ([^:]+):\s*(.*?)\s*\|\s*(.*)', line)
+                    if not hit:
+                        raise ValueError('note_summary_incomplete')
+                    section, label, value = hit.groups()
+                    label = re.sub(r'^(\[[ xX]\]\s*)?\{fmt:[^}]+\}\s*', lambda m: m[1] or '', label)
+                    if section == '할 일':
+                        mark = re.match(r'^(\[[ xX]\])\s*(.*)', label)
+                        lines.append((mark[1]+' '+mark[2] if mark else '[ ] '+label)+' | '+value)
+                    else:
+                        lines.append(value if section == '본문' else label+': '+value)
+                parsed = content.from_text(raw['title'], '\n'.join(lines))
+            except (KeyError, ValueError):
+                text = str(raw.get('plaintext') or '')
+                text = text.partition('\n')[2] if text.splitlines()[:1] == [raw.get('title')] else text
+                parsed = content.from_text(raw['title'], text)
+            result = {'content': parsed, 'raw': raw, 'closed': False}
+        elif kind == 'calendar':
+            raw = self.calendar.get(identifier)
+            if not raw or raw.get('recurring'):
+                raise ValueError('single_nonrecurring_calendar_original_required')
+            self.guard('calendar', {'action': 'update', 'event_id': identifier, 'expected_start': raw['start']}, strict=True)
+            parsed = content.from_text(raw['title'], raw.get('notes') or '')
+            due = content.next_due(parsed)
+            if due and dates.canonical(raw['start'], all_day=raw.get('isAllDay', raw.get('allDay')) is True) != due:
+                # A calendar move changes only tasks that shared the earliest deadline.
+                start = dates.canonical(raw['start'], all_day=raw.get('isAllDay', raw.get('allDay')) is True)
+                for row in parsed['tasks']:
+                    if row.get('due') == due:
+                        row['due'] = start
+            result = {'content': parsed, 'raw': raw, 'closed': False}
+        else:
+            raise ValueError('unsupported_work_source')
+        result['revision'] = content.digest(result['raw'])
+        return result
+
+    def preflight(self, kind, identifier, before, desired):
+        current = self.read(kind, identifier)
+        if current['closed'] or current['revision'] != before['revision']:
+            raise ValueError('work_original_changed_before_write')
+        if kind == 'notes':
+            # Existing structured summary/source and original attachment export are prerequisites.
+            self.notes.tools()._linked_note_sections(before['raw']['body_html'])
+        if any(row.get('ambiguous') for row in desired['tasks']):
+            raise ValueError('ambiguous_task_deadline')
+
+    def apply(self, kind, identifier, before, desired):
+        self.preflight(kind, identifier, before, desired)
+        if kind == 'notion':
+            self._notion(identifier, before, desired)
+        elif kind == 'calendar':
+            self._calendar(identifier, before, desired)
+        else:
+            self._notes(identifier, before, desired)
+        after = self.read(kind, identifier)
+        if content.semantic(after['content']) != content.semantic(desired):
+            raise RuntimeError('work_content_write_unverified')
+        return after
+
+    def _notion(self, identifier, before, desired):
+        from notion_completion_sync import page_title
+        name, old_title = page_title(before['raw']['page'])
+        tasks_changed = content.semantic(before['content'])['tasks'] != desired['tasks']
+        props = {}
+        if tasks_changed:
+            props['다음 마감'] = {'date': {'start': content.next_due(desired)} if content.next_due(desired) else None}
+        if old_title != desired['title']:
+            props[name] = {'title': rich(desired['title'])}
+        if props:
+            self.reader.request('PATCH', f'pages/{identifier}', {'properties': props})
+        old_tasks = before['content']['tasks'] if tasks_changed else []
+        desired_tasks = content.reconcile([dict(r, key=r['source_id']) for r in old_tasks], desired['tasks']) if tasks_changed else []
+        wanted = {r['key'] for r in desired_tasks}
+        for row in old_tasks:
+            if row['source_id'] not in wanted:
+                self.reader.request('DELETE', 'blocks/'+row['source_id'])
+        append = []
+        for row in desired_tasks:
+            text = row['text'] + (' | '+row['due'] if row.get('due') else '')
+            block = {'rich_text': rich(text), 'checked': row['done']}
+            if any(r['source_id'] == row['key'] for r in old_tasks):
+                self.reader.request('PATCH', 'blocks/'+row['key'], {'to_do': block})
+            else:
+                append.append({'object': 'block', 'type': 'to_do', 'to_do': block})
+        if before['content']['body'] != desired['body']:
+            old = [b for b in before['raw']['blocks'] if b.get('type') in TEXT_BLOCKS and not b.get('archived')
+                   and (b['type'] != 'table_row' or body_text(b).strip())]
+            lines = desired['body'].splitlines()
+            for i, block in enumerate(old):
+                if block['type'] == 'table_row':
+                    width = len(block['table_row']['cells'])
+                    cells = lines[i].split('\t') if i < len(lines) else []
+                    if len(cells) > width:
+                        cells = [lines[i]]
+                    cells += [''] * (width-len(cells))
+                    self.reader.request('PATCH', 'blocks/'+block['id'], {'table_row': {'cells': [rich(cell) for cell in cells]}})
+                elif i < len(lines):
+                    data = {'rich_text': rich(lines[i])}
+                    if block['type'] == 'code':
+                        data['language'] = block['code'].get('language', 'plain text')
+                    self.reader.request('PATCH', 'blocks/'+block['id'], {block['type']: data})
+                else:
+                    self.reader.request('DELETE', 'blocks/'+block['id'])
+            append += [{'object': 'block', 'type': 'paragraph', 'paragraph': {'rich_text': rich(line)}} for line in lines[len(old):]]
+        for offset in range(0, len(append), 100):
+            self.reader.request('PATCH', f'blocks/{identifier}/children', {'children': append[offset:offset+100]})
+
+    def _calendar(self, identifier, before, desired):
+        tools, event = self.calendar.tools(), before['raw']
+        args = {'action': 'update', 'event_id': identifier, 'expected_title': event['title'],
+                'expected_start': event['start'], 'title': desired['title'], 'notes': content.render(desired), 'span': 'this'}
+        if all(before['content'][field] == desired[field] for field in ('body', 'tasks')):
+            args['notes'] = event.get('notes') or ''
+        due = content.next_due(desired)
+        if due:
+            start = due if len(due) > 10 else due+'T00:00:00+09:00'
+            delta = datetime.fromisoformat(event['end']) - datetime.fromisoformat(event['start'])
+            args.update(start=start, end=(datetime.fromisoformat(start)+delta).isoformat(), all_day=len(due)==10)
+        binary = tools._calendar_cache_root(tools.PERSONAL_PROFILE)/'eventkit_calendar_mutation-v1'
+        result = subprocess.run([str(binary), json.dumps(args, ensure_ascii=False)], capture_output=True, text=True, timeout=30)
+        if result.returncode or json.loads(result.stdout).get('ok') is not True:
+            raise RuntimeError('calendar_work_write_uncertain')
+
+    def _notes(self, identifier, before, desired):
+        tools = self.notes.tools()
+        preview, original_summary, original = tools._linked_note_sections(before['raw']['body_html'])
+        summary = [f'- 본문: 줄 {i+1} | {line}' for i, line in enumerate(desired['body'].splitlines())]
+        summary += ['- 할 일: '+('[x] ' if r['done'] else '[ ] ')+r['text']+' | '+(r.get('due') or '') for r in desired['tasks']]
+        if not summary:
+            summary = ['- 본문: 내용 | ']
+        if all(before['content'][field] == desired[field] for field in ('body', 'tasks')):
+            summary = original_summary.splitlines()
+        result = json.loads(tools._apple_notes_direct_mutation({
+            'action': 'update', 'note_id': identifier, 'title': desired['title'], 'rename_title': True,
+            'preview_summary': preview, 'summary': '\n'.join(summary), 'approved': True,
+            '_skip_common_work': True, 'mixed_mode': 'rebuild'},
+            _linked_title_authority=tools._LINKED_TITLE_AUTHORITY, _linked_title_before=before['raw']))
+        if not result.get('ok') or result.get('result', {}).get('content_loss'):
+            raise RuntimeError('note_work_write_uncertain')
+        actual_id = result.get('target_id') or result.get('result', {}).get('note_id') or identifier
+        if actual_id != identifier:
+            self.aliases[identifier] = actual_id
+        after = self.notes.current(actual_id)
+        if not after or sorted(after.get('attachment_names') or []) != sorted(before['raw'].get('attachment_names') or []):
+            raise RuntimeError('note_attachment_preservation_unverified')
+        if tools._linked_note_sections(after['body_html'])[2] != original:
+            raise RuntimeError('note_original_preservation_unverified')
