@@ -83,7 +83,7 @@ class Native:
         self.scopes = hermes_yaml.safe_load((self.root / 'config.yaml').read_text())['plugins']['entries']['team-kit']['settings']['personal_scopes']
         if self.scopes.get('enabled') is not True:
             raise ValueError('company_scope_required')
-        self.store = CommonWorkStore(self.root / 'shared/common-work-links.sqlite3')
+        self.store = CommonWorkStore.production(self.root / 'shared/common-work-links.sqlite3')
 
     def guard(self, domain, args):
         self.td.personal_scopes.authorize_mutation(self.td, domain, args, {}, scope_config=self.scopes, owner_scope='company')
@@ -148,12 +148,12 @@ class Native:
         raise ValueError('source_kind_required')
 
     def all(self):
-        result = subprocess.run(['remindctl', 'show', 'all', '--json', '--no-input', '--no-color'], capture_output=True, text=True, timeout=30)
-        if result.returncode: raise ValueError('reminder_read_failed')
-        rows = json.loads(result.stdout)
-        if not isinstance(rows, list) or any(not isinstance(r, dict) or not r.get('id') for r in rows):
-            raise ValueError('reminder_read_invalid')
-        return rows
+        import reminder_reads
+        return reminder_reads.all(subprocess.run)
+
+    def current_reminder(self, identifier):
+        import reminder_reads
+        return reminder_reads.one(identifier, subprocess.run)
 
     def create(self, task, due, marker, source, list_name):
         self.guard('todo', {'action': 'create', 'list': list_name})

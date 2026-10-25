@@ -93,7 +93,8 @@ class Native(old.Native):
         if cid:
             if args.get('source_id') or args.get('source_kind'):
                 raise ValueError('common_id_or_source_required')
-            item = self.store.get(cid)
+            candidate = getattr(self, 'watcher_item', None)
+            item = candidate if candidate is not None and candidate['common_id']==cid else self.store.get(cid)
             refs = [r for r in self.sources.references(item) if r[0] in {'notion', 'notes'}]
             if not refs:
                 kind, identifier = 'work', cid
@@ -127,7 +128,7 @@ class Native(old.Native):
             if self.sources.read(ref_kind, ref_id).get('closed'):
                 raise ValueError('linked_work_closed')
         for linked in item.get('sources', []):
-            if linked['domain'] == 'todo':
+            if linked['domain'] == 'todo' and linked.get('metadata',{}).get('link_state',{}).get('status','ok')=='ok':
                 self.guard('todo', {'action': 'update', 'reminder_id': linked['source_id']})
         return item, {'kind': kind, 'id': identifier, 'url': identifier, **source}
 
@@ -151,7 +152,8 @@ class Native(old.Native):
     def mutate(self, action, row, task, due):
         identifier = row['id']
         self.guard('todo', {'action': action, 'reminder_id': identifier})
-        current = [r for r in self.all() if r['id'] == identifier]
+        latest = self.current_reminder(identifier)
+        current = [latest] if latest else []
         if len(current) != 1 or fingerprint(current[0]) != fingerprint(row) or current[0].get('isCompleted') != row.get('isCompleted'):
             raise ValueError('reminder_changed_before_write')
         if action == 'delete':
@@ -308,7 +310,11 @@ def sync(home, args, *, native=None, config=None, now=None, serialized=False):
                     else:
                         identifier = row['id']; native.mutate(action, row, task['text'], task.get('due'))
                     result['mutation_calls'] += 1
-                    after = [r for r in native.all() if r['id'] == identifier]
+                    if hasattr(native, 'current_reminder'):
+                        latest = native.current_reminder(identifier)
+                        after = [latest] if latest else []
+                    else:
+                        after = [r for r in native.all() if r['id'] == identifier]
                     if action == 'delete':
                         if after: raise RuntimeError('reminder_delete_unverified')
                         native.unlink(item, row)

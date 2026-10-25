@@ -24,12 +24,15 @@ class Engine:
         work_deadline = len(refs) == 1 and refs[0][0] == 'calendar'
         if (item.get('status') != 'active' and not work_deadline) or not refs:
             return {'handled': False, 'messages': []}
-        if len(refs) == 1:
+        duplicate_domains = len(refs) != len({kind for kind, _ in refs})
+        if len(refs) == 1 or duplicate_domains:
             if self.reminders:
                 result = self.reminders(item, self.dry)
                 messages = [f'• 할 일 미리알림 {key}: {len(result[key])}개' for key in
                             ('created', 'moved', 'completed', 'deleted', 'past_due', 'skipped') if result.get(key)]
-            return {'handled': True, 'messages': messages}
+            return {'handled': True, 'messages': messages,
+                    **({'connection_status': 'unsupported', 'connection_reason': 'single_original_per_domain_required'}
+                       if duplicate_domains else {})}
         with content.ledger(self.home, 'work-sync') as (path, state):
             work = state['works'].get(cid)
             current = {kind+'|'+identifier: self.sources.read(kind, identifier) for kind, identifier in refs}

@@ -3871,18 +3871,11 @@ def _seoul_stamp() -> str:
 
 def _reminder_current(reminder_id: str, runner: Any) -> dict[str, Any] | None:
     """Current native fields (incl. notes) of one reminder via remindctl JSON, or None."""
+    import reminder_reads
     try:
-        proc = runner(["remindctl", "show", "all", "--json", "--no-input", "--no-color"],
-                      capture_output=True, text=True, timeout=20, check=False)
-        items = json.loads(str(proc.stdout or "[]")) if proc.returncode == 0 else []
-    except (OSError, subprocess.TimeoutExpired, ValueError, TypeError):
+        return reminder_reads.one(reminder_id, runner)
+    except reminder_reads.ReminderReadError:
         return None
-    if isinstance(items, dict):
-        items = items.get("reminders") or items.get("items") or []
-    for item in items if isinstance(items, list) else []:
-        if isinstance(item, dict) and str(item.get("id") or "").lower().startswith(reminder_id.lower()):
-            return item
-    return None
 
 
 def _open_reminder_with_title(title: str, list_name: str, runner: Any) -> str | None:
@@ -6008,8 +6001,14 @@ def _calendar_identity_error(args: dict[str, Any], action: str) -> str | None:
     return None
 
 
-def _calendar_event_get(event_id: str, runner: Any = subprocess.run) -> dict[str, Any] | None:
-    """Read one event by its EventKit identifier (linked-work watcher); None when unreadable."""
+def _calendar_event_lookup(event_id: str, runner: Any = subprocess.run) -> dict[str, Any]:
+    """Typed read-only outcome; never interpret a denied/failed read as deletion."""
+    try:
+        from . import source_lookup
+    except ImportError:
+        import source_lookup
+    if str(event_id).startswith('google:'):
+        return source_lookup.result('out_of_scope', 'google_calendar_source')
     source = Path(__file__).with_name("eventkit_calendar_mutation.swift")
     binary = _calendar_cache_root(PERSONAL_PROFILE) / "eventkit_calendar_mutation-v1"
     try:
@@ -6017,15 +6016,26 @@ def _calendar_event_get(event_id: str, runner: Any = subprocess.run) -> dict[str
             compiled = runner(["/usr/bin/swiftc", "-parse-as-library", str(source), "-o", str(binary)],
                               capture_output=True, text=True, timeout=120, check=False)
             if compiled.returncode != 0:
-                return None
+                return source_lookup.result('transient', 'calendar_executor_compile_failed')
         proc = runner([str(binary), json.dumps({"action": "get", "event_id": event_id})],
                       capture_output=True, text=True, timeout=30, check=False)
-        data = json.loads(proc.stdout) if proc.returncode == 0 else None
-    except (OSError, subprocess.TimeoutExpired, ValueError):
-        return None
+        if proc.returncode:
+            return source_lookup.calendar_failure(proc.returncode, proc.stderr or '')
+        data = json.loads(proc.stdout)
+    except subprocess.TimeoutExpired:
+        return source_lookup.result('transient', 'calendar_read_timeout')
+    except (OSError, ValueError):
+        return source_lookup.result('transient', 'calendar_read_failed')
     if not isinstance(data, dict) or not isinstance(data.get("before"), dict):
-        return None
-    return {**data["before"], "recurring": data.get("action") == "get_recurring"}
+        return source_lookup.result('transient', 'calendar_read_invalid')
+    row = {**data["before"], "recurring": data.get("action") == "get_recurring"}
+    return source_lookup.result('unsupported' if row['recurring'] else 'ok',
+                                'recurring_calendar' if row['recurring'] else 'read_ok', row)
+
+
+def _calendar_event_get(event_id: str, runner: Any = subprocess.run) -> dict[str, Any] | None:
+    """Compatibility wrapper: preserve snapshots (including recurring) or None."""
+    return _calendar_event_lookup(event_id, runner)['row']
 
 
 def _calendar_event_move(event: dict[str, Any], start: str, end: str, runner: Any = subprocess.run) -> dict[str, Any] | None:
@@ -7898,7 +7908,7 @@ def _require_common_work_access(*domains: str, completion: bool = False) -> str 
 
 
 def _common_work_store() -> CommonWorkStore:
-    return CommonWorkStore(COMMON_WORK_DB)
+    return CommonWorkStore.production(COMMON_WORK_DB)
 
 
 _KNOWLEDGE_REF_MUTATION_TYPES = {
@@ -8691,6 +8701,11 @@ def register(ctx) -> None:
     register_middleware("llm_request", _personal_direct_llm_request)
     register_middleware("llm_execution", _llm_execution_guard)
     register_middleware("tool_execution", _tool_execution_guard)
+    if str(getattr(ctx, 'profile_name', '') or '') == 'work-assistant':
+        from functools import partial
+        from hermes_constants import get_hermes_home
+        import link_decisions
+        register_hook('pre_gateway_dispatch', partial(link_decisions.dispatch, Path(get_hermes_home())))
     register_hook("pre_tool_call", _personal_mutation_approval)
     register_hook("post_approval_response", _lead_skill_approval_response)
     register_hook('post_approval_response', request_approvals.response)

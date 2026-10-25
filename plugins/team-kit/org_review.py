@@ -43,7 +43,7 @@ NOT_A_FAULT = {'웹 검색 결과 없음', '게이트웨이 종료 신호 기록
 COMMON_EVENT_TYPES = {'work_sync', 'task_reminder_deleted', 'auto_linked', 'note_source_replaced', 'created', 'linked', 'rollback_unlinked', 'knowledge_ref_linked',
                       'knowledge_ref_unlinked', 'completed', 'reminder_completion_started',
                       'reminder_completed', 'reminder_completion_failed', 'notion_completion_sync',
-                      'calendar_source_migrated'}
+                      'calendar_source_migrated', 'owner_relinked', 'relinked', 'source_state_changed'}
 CHANNEL = 'REPLACE_SLACK_ID'  # owner's DM with 진단담당 (2026-10-18; #maintenance REPLACE_SLACK_ID retired)
 # 2026-10-25 소유자 결정: 시스템 최적화 하위 업무(코드 리뷰·방치된 작업·도구 다이어트·스킬 정리).
 OPTIMIZATION_DEFAULTS = dict(code_review=False, stale_work=False, tool_diet=False, skill_hygiene=False)

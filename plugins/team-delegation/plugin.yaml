@@ -36,6 +36,7 @@ provides_tools:
   - personal_report
   - limit_report
 provides_hooks:
+  - pre_gateway_dispatch
   - post_llm_call
   - pre_tool_call
   - post_approval_response

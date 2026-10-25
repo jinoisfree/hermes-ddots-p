@@ -7,6 +7,7 @@ from datetime import datetime, timedelta
 
 import work_content as content
 import deadline_time as dates
+import source_lookup
 
 TEXT_BLOCKS = {'paragraph', 'heading_1', 'heading_2', 'heading_3', 'bulleted_list_item',
                'numbered_list_item', 'quote', 'callout', 'toggle', 'code', 'table_row'}
@@ -48,10 +49,8 @@ class Sources:
         self.aliases = {}
 
     def references(self, item):
-        refs = [('notion', r['external_id']) for r in item.get('knowledge_refs', []) if r['ref_type'] == 'notion_page']
-        refs += [(s['domain'], s['source_id']) for s in item.get('sources', []) if s['domain'] in {'notes', 'calendar'}]
-        if len(refs) != len({kind for kind, _ in refs}):
-            raise ValueError('single_original_per_domain_required')
+        refs = [('notion', r['external_id']) for r in item.get('knowledge_refs', []) if r['ref_type'] == 'notion_page' and r.get('metadata',{}).get('link_state',{}).get('status','ok')=='ok']
+        refs += [(s['domain'], s['source_id']) for s in item.get('sources', []) if s['domain'] in {'notes', 'calendar'} and s.get('metadata',{}).get('link_state',{}).get('status','ok')=='ok']
         return refs
 
     def read(self, kind, identifier):
@@ -59,7 +58,7 @@ class Sources:
         if kind == 'notion':
             page = self.reader.page(identifier)
             if str(page.get('parent', {}).get('database_id', '')).replace('-', '').lower() != self.database:
-                raise ValueError('company_notion_database_required')
+                raise source_lookup.SourceReadError('out_of_scope', 'company_notion_database_required')
             from notion_completion_sync import page_title
             blocks = ordered_blocks(self.reader.blocks(identifier))
             tasks, lines = [], []
@@ -89,7 +88,7 @@ class Sources:
             self.guard('notes', {'action': 'update', 'note_id': identifier}, strict=True)
             raw = self.notes.current(identifier)
             if not raw:
-                raise ValueError('note_missing_no_work_delete_propagation')
+                raise source_lookup.SourceReadError('transient', 'note_read_unclassified')
             try:
                 _, summary, _ = self.notes.tools()._linked_note_sections(raw['body_html'])
                 lines = []
@@ -111,9 +110,16 @@ class Sources:
                 parsed = content.from_text(raw['title'], text)
             result = {'content': parsed, 'raw': raw, 'closed': False}
         elif kind == 'calendar':
-            raw = self.calendar.get(identifier)
-            if not raw or raw.get('recurring'):
-                raise ValueError('single_nonrecurring_calendar_original_required')
+            if identifier.startswith('google:'):
+                raise source_lookup.SourceReadError('out_of_scope', 'google_calendar_source')
+            if hasattr(self.calendar, 'lookup'):
+                raw = source_lookup.require(self.calendar.lookup(identifier))
+            else:
+                raw = self.calendar.get(identifier)
+                if not raw:
+                    raise source_lookup.SourceReadError('transient', 'calendar_read_unclassified')
+                if raw.get('recurring'):
+                    raise source_lookup.SourceReadError('unsupported', 'recurring_calendar')
             self.guard('calendar', {'action': 'update', 'event_id': identifier, 'expected_start': raw['start']}, strict=True)
             parsed = content.from_text(raw['title'], raw.get('notes') or '')
             due = content.next_due(parsed)
@@ -125,7 +131,7 @@ class Sources:
                         row['due'] = start
             result = {'content': parsed, 'raw': raw, 'closed': False}
         else:
-            raise ValueError('unsupported_work_source')
+            raise source_lookup.SourceReadError('unsupported', 'unsupported_work_source')
         result['revision'] = content.digest(result['raw'])
         return result
 
