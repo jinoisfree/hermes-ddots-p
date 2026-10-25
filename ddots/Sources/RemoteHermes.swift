@@ -14,6 +14,9 @@ final class RemoteHermes: HermesSource {
     private let lock = NSLock()
     private var latest = HermesBridge.PollResult(status: .unavailable(RemoteHermes.connecting), messages: [])
     private var lastStateAt: Date?
+    /// True while the sharing Mac has accepted this one and is still heard from.
+    var linked: Bool { lock.lock(); defer { lock.unlock() }; return isLinked }
+    private var isLinked = false
     var lastReceivedAt: Date? { lock.lock(); defer { lock.unlock() }; return lastStateAt }
     private var relayedUsage: RelayUsage?
     /// Paseo usage of the sharing Mac. Kept across a lost link; each value expires by its own observation time.
@@ -36,6 +39,9 @@ final class RemoteHermes: HermesSource {
     private var stopped = false
     /// Called on an arbitrary queue whenever the picture changed.
     var onChange: (() -> Void)?
+    /// Shared screen choices from the keeping Mac, and the moment the link is up again. Called on an arbitrary queue.
+    var onSync: ((String, [String: SyncEntry]) -> Void)?
+    var onLinked: (() -> Void)?
 
     init(host: String, port: UInt16, token: String, portraits: RelayPortraits? = nil, includeMessages: Bool = true) {
         self.host = host; self.port = port; self.token = token; self.portraits = portraits
@@ -57,6 +63,7 @@ final class RemoteHermes: HermesSource {
         }
     }
     func stop() {
+        lock.lock(); isLinked = false; lock.unlock()
         queue.sync { startupTapFailure = nil; stopped = true; watchdog?.cancel(); watchdog = nil; connection?.cancel(); connection = nil; welcomed = false }
         lock.lock(); let waiting = Array(pending.values); pending = [:]; lock.unlock()
         waiting.forEach { $0.done.signal() }
@@ -87,7 +94,7 @@ final class RemoteHermes: HermesSource {
         guard let old = connection else { return }
         startupTapFailure = nil; connection = nil; welcomed = false; old.cancel()
         lock.lock()
-        latest.status = .unavailable(wasDenied ? Self.denied : Self.lost); latest.typing = []; relayedSlack.writers = []
+        latest.status = .unavailable(wasDenied ? Self.denied : Self.lost); latest.typing = []; relayedSlack.writers = []; isLinked = false
         let waiting = Array(pending.values); pending = [:]
         lock.unlock()
         waiting.forEach { $0.done.signal() }
@@ -117,7 +124,11 @@ final class RemoteHermes: HermesSource {
         case "denied": startupTapFailure = nil; wasDenied = true
         case "welcome":
             welcomed = true; wasDenied = false; attempts = 0
+            lock.lock(); isLinked = true; lock.unlock()
             if let failure = startupTapFailure { startupTapFailure = nil; reportTapFailure(failure) }
+            onLinked?()
+        case "sync":
+            if let user = frame.user, let entries = frame.entries { onSync?(user, entries) }
         case "result":
             lock.lock()
             let waiter = frame.id.flatMap { pending.removeValue(forKey: $0) }
@@ -163,6 +174,15 @@ final class RemoteHermes: HermesSource {
                     if self?.startupTapFailure?.key == failure.key { self?.startupTapFailure = nil }
                 }
             }
+        }
+    }
+    /// Passes on choices made here. Dropped while the link is down; everything is sent again once it is back.
+    func sendSync(user: String, entries: [String: SyncEntry], replace: Bool) {
+        let parts = entries.isEmpty ? [[:]] : SettingsSync.chunks(entries)
+        for part in parts {
+            var frame = RelayFrame(op: "sync"); frame.user = user; frame.entries = part
+            if replace { frame.replace = true }
+            send(frame)
         }
     }
     private func send(_ frame: RelayFrame) {

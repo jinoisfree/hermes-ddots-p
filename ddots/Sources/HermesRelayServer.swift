@@ -20,6 +20,9 @@ final class HermesRelayServer {
         var avatars: [String: ProfileAvatar] = [:]
         var usage: RelayUsage?
         var slack: SlackActivity?
+        /// The Slack account whose shared choices this Mac follows, and what of them it already has.
+        var syncUser: String?
+        var syncSent: [String: SyncEntry] = [:]
         var lastSent = Date.distantPast
         init(_ fd: Int32) { self.fd = fd }
     }
@@ -29,6 +32,9 @@ final class HermesRelayServer {
     private let token: String
     private let queue = DispatchQueue(label: AppIdentity.bundleID + ".relay", qos: .utility)
     private var listener: DispatchSourceRead?
+    /// Shared screen choices, one file per Slack account, kept on this Mac. See `SettingsSync.swift`.
+    private let syncFolder: URL
+    private var syncStores: [String: SettingsStore] = [:]
     private var clients: [Int32: Client] = [:]
     private var timer: DispatchSourceTimer?
     private let interval: TimeInterval
@@ -42,8 +48,9 @@ final class HermesRelayServer {
     private var usageBusy = false
     private var nextUsage = Date.distantPast
 
-    init(home: URL? = nil, token: String, interval: TimeInterval = 0.5,
+    init(home: URL? = nil, token: String, interval: TimeInterval = 0.5, syncFolder: URL = SettingsStore.folder,
          usageInterval: TimeInterval = 60, readUsage: @escaping () -> (codex: ServiceUsage?, claude: ServiceUsage?)? = UsageSources.paseo) {
+        self.syncFolder = syncFolder
         followsLocation = home == nil
         bridge = HermesBridge(home: home, makesImages: false); self.token = token; self.interval = interval
         self.usageInterval = usageInterval; self.readUsage = readUsage
@@ -112,7 +119,7 @@ final class HermesRelayServer {
                 guard let frame, self.clients[fd] === client else { self.drop(client); return }
                 self.handle(frame, from: client)
             }
-            if client.buffer.count > RelayFrame.maximumLine { self.drop(client) }
+            if client.buffer.count > (client.authorized ? RelayFrame.maximumAuthorizedLine : RelayFrame.maximumLine) { self.drop(client) }
         }
         source.setCancelHandler { close(fd) }
         client.source = source
@@ -171,6 +178,9 @@ final class HermesRelayServer {
         case "watch":
             client.unread = frame.unread.map(Date.init(timeIntervalSince1970:)); client.unreadChanged = true
             return
+        case "sync":
+            receiveSync(frame, from: client)
+            return
         case "search":
             reply.messages = bridge.search(String((frame.text ?? "").prefix(200))).map(RelayFrame.Message.init)
         case "older":
@@ -182,6 +192,39 @@ final class HermesRelayServer {
         send(reply, to: client)
     }
 
+    private func syncStore(_ user: String) -> SettingsStore? {
+        if let store = syncStores[user] { return store }
+        guard let store = SettingsStore(user: user, folder: syncFolder) else { return nil }
+        syncStores[user] = store
+        return store
+    }
+    /// Choices made on the other Mac go into this Mac's file; the pet here reads them from it.
+    private func receiveSync(_ frame: RelayFrame, from client: Client) {
+        guard let user = frame.user, let store = syncStore(user) else { return }
+        if client.syncUser != user { client.syncUser = user; client.syncSent = [:] }
+        let entries = frame.entries ?? [:]
+        guard !entries.isEmpty else { return }
+        let at = entries.values.map(\.at).max() ?? Date().timeIntervalSince1970, by = entries.values.first?.by ?? ""
+        store.merge(entries, replacing: frame.replace == true, at: at, by: by)
+        // What the other Mac sent and what now stands are the same; it need not hear them back.
+        for (key, entry) in entries where store.entries[key] == entry { client.syncSent[key] = entry }
+    }
+    /// Each Mac is sent what it does not have yet of its account's choices.
+    private func sendSync(to watchers: [Client]) {
+        var refreshed = Set<String>()
+        for client in watchers {
+            guard let user = client.syncUser, let store = syncStore(user) else { continue }
+            if refreshed.insert(user).inserted { _ = store.refresh() }
+            let missing = SettingsSync.difference(store.entries, from: client.syncSent)
+            guard !missing.isEmpty else { continue }
+            for part in SettingsSync.chunks(missing) {
+                var frame = RelayFrame(op: "sync"); frame.user = user; frame.entries = part
+                send(frame, to: client)
+            }
+            client.syncSent.merge(missing) { _, latest in latest }
+        }
+    }
+
     /// File stamps make an unchanged poll a handful of stat calls; frames go out only when something differs.
     private func tick() {
         let watchers = clients.values.filter(\.authorized)
@@ -190,6 +233,7 @@ final class HermesRelayServer {
         polls += 1
         refreshUsage()
         let usage = usageCodex == nil && usageClaude == nil ? nil : RelayUsage(codex: usageCodex, claude: usageClaude)
+        sendSync(to: watchers)
         let result = bridge.poll(unreadSince: nil)
         // Who is writing in which Slack thread; the other Mac shows the dots under its own Slack view.
         let slack = bridge.slackActivity()

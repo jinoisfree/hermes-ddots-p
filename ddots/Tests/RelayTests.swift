@@ -49,6 +49,10 @@ import SQLite3
         check(RelaySettings.tailnetAddress(among: [("en0", "100.70.1.2"), ("utun3", "10.0.0.2"), ("utun4", "100.79.1.2")]) == "100.79.1.2"
               && RelaySettings.tailnetAddress(among: [("en0", "100.70.1.2"), ("pdp_ip0", "100.100.1.1")]) == nil, "only an address on a tunnel interface is taken for Tailscale's")
         check(RelaySettings.validHost("mini.tail-net.ts.net") == "mini.tail-net.ts.net" && RelaySettings.validHost("a b") == nil && RelaySettings.validHost("x/y") == nil && RelaySettings.validHost("") == nil, "host name form")
+        check(RelaySettings.parseAddress("mini.ts.net:47811")! == ("mini.ts.net", 47811) && RelaySettings.parseAddress(" mini ")! == ("mini", RelaySettings.defaultPort)
+              && RelaySettings.parseAddress("mini-2.tail-net.ts.net:47810")! == ("mini-2.tail-net.ts.net", 47810), "name:port is read, a bare name takes the default port")
+        check(RelaySettings.parseAddress("mini:80") == nil && RelaySettings.parseAddress("mini:abc") == nil && RelaySettings.parseAddress(":47811") == nil && RelaySettings.parseAddress("a b:47811") == nil, "bad ports and names are refused")
+        check(RelaySettings.address("mini", port: 47811) == "mini:47811", "the address shown is name:port")
         let plist = RelayAgent.plist(executable: "/x/ddots", port: 5, log: "/x/relay.log")
         check(plist["StandardOutPath"] as? String == "/x/relay.log" && plist["StandardErrorPath"] as? String == "/x/relay.log", "launch agent keeps a log")
         check(plist["ProgramArguments"] as? [String] == ["/x/ddots", "--relay", "--relay-port", "5"] && plist["Label"] as? String == AppIdentity.bundleID + ".relay", "launch agent runs the relay mode")
@@ -313,6 +317,62 @@ import SQLite3
         check((try? server.start(host: "127.0.0.1", port: port)) == port, "late server binds the temporary port")
         check(wait(15) { late.poll(unreadSince: nil).avatars["default"]?.image != nil && !late.poll(unreadSince: nil).characters.isEmpty } != nil, "(d) client automatically connects when server appears")
         late.stop(); server.stop()
-        print("PASS: \(passed) relay wire, code, live delivery, request and reconnect checks")
+        try syncChecks(home: home, token: token)
+        print("PASS: \(passed) relay wire, code, live delivery, request, reconnect and shared settings checks")
+    }
+
+    static func syncChecks(home: URL, token: String) throws {
+        func entry(_ v: String?, _ at: Double, _ by: String = "a") -> SyncEntry { SyncEntry(v: v, at: at, by: by) }
+        // Merge rules
+        var doc: [String: SyncEntry] = ["r:last:C1": entry("50", 9), "zone:C1": entry("2", 5)]
+        SettingsSync.merge(["r:last:C1": entry("40", 20), "zone:C1": entry("3", 4)], into: &doc)
+        check(doc["r:last:C1"]?.v == "50" && doc["zone:C1"]?.v == "2", "an older read or an older choice does not win")
+        SettingsSync.merge(["r:last:C1": entry("60", 1), "zone:C1": entry(nil, 6)], into: &doc)
+        check(doc["r:last:C1"]?.v == "60" && doc["zone:C1"] == entry(nil, 6), "a later read and a later removal win")
+        check(SettingsSync.wins(entry("x", 5, "b"), over: entry("y", 5, "a"), key: "pins") && !SettingsSync.wins(entry("x", 5, "a"), over: entry("y", 5, "b"), key: "pins"), "the same moment is settled the same way on every Mac")
+        let changes = SettingsSync.changes(from: ["zone:C1": "2", "dismissed:t": "4", "sections": "1,2"], to: ["sections": "1,2,5"], at: 7, by: "a")
+        check(changes == ["zone:C1": entry(nil, 7), "sections": entry("1,2,5", 7)], "a removed section choice is passed on; a trimmed bell list is not")
+        let replaced = SettingsSync.replacing(["zone:C2": entry("2", 8)], in: ["zone:C1": entry("3", 1), "dismissed:t": entry("4", 1), "picture:C9": entry("png", 1)], at: 8, by: "m")
+        check(replaced == ["zone:C2": entry("2", 8), "zone:C1": entry(nil, 8, "m"), "picture:C9": entry(nil, 8, "m")], "the standard Mac takes away layout the others had, and leaves bells alone")
+        var many = Dictionary(uniqueKeysWithValues: (0..<3010).map { ("r:thread:t\($0)", entry(String($0), 1)) })
+        SettingsSync.prune(&many)
+        check(many.count == 3000 && many["r:thread:t0"] == nil && many["r:thread:t3009"] != nil, "long read lists keep their newest")
+        let big = Dictionary(uniqueKeysWithValues: (0..<5).map { ("picture:P\($0)", entry(String(repeating: "x", count: 300_000), 1)) })
+        check(SettingsSync.chunks(big).count >= 3 && SettingsSync.chunks(big).allSatisfy { !$0.isEmpty } && SettingsSync.chunks(big).reduce(0) { $0 + $1.count } == 5, "pictures are split over several lines")
+        check(SettingsSync.validUser("U012AB") && !SettingsSync.validUser("../x") && !SettingsSync.validUser(""), "account names are Slack ids")
+
+        // Two writers on one file
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent("ddots-sync-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let pet = SettingsStore(user: "U1", folder: folder)!, relay = SettingsStore(user: "U1", folder: folder)!
+        pet.merge(["sections": entry("1,2", 3)])
+        let fromRelay = relay.merge(["zone:C1": entry("2", 4)])
+        check(fromRelay.keys.sorted() == ["sections", "zone:C1"], "a writer takes up what the other wrote before it")
+        check(pet.refresh() == ["zone:C1": entry("2", 4)] && pet.refresh().isEmpty, "the other writer's change is read once")
+        let mode = (try FileManager.default.attributesOfItem(atPath: pet.url.path)[.posixPermissions] as? NSNumber)?.intValue
+        check(mode == 0o600, "the shared choices are readable by this user only")
+        check(SettingsStore(user: "../U1", folder: folder) == nil, "no file outside the folder")
+
+        // Over the relay: the other Mac sends a change and hears the original's
+        let server = HermesRelayServer(home: home, token: token, interval: 0.1, syncFolder: folder, readUsage: { nil })
+        let port = try server.start(host: "127.0.0.1", port: 0)
+        defer { server.stop() }
+        let client = RemoteHermes(host: "127.0.0.1", port: port, token: token)
+        let lock = NSLock(); var heard: [String: SyncEntry] = [:]
+        client.onSync = { user, entries in lock.lock(); if user == "U1" { heard.merge(entries) { _, b in b } }; lock.unlock() }
+        client.onLinked = { client.sendSync(user: "U1", entries: ["muted:C7": entry("1", 9, "book")], replace: false) }
+        client.start()
+        defer { client.stop() }
+        check(wait(5) { pet.refresh(); return pet.entries["muted:C7"] == entry("1", 9, "book") } != nil, "a choice made on the other Mac reaches this Mac's file")
+        check(wait(5) { lock.lock(); defer { lock.unlock() }; return heard["sections"] == entry("1,2", 3) && heard["zone:C1"] != nil } != nil, "the other Mac hears what this Mac already had")
+        lock.lock(); let echoed = heard["muted:C7"] != nil; lock.unlock()
+        check(!echoed, "its own choice is not sent back to it")
+        pet.merge(["zone:C1": entry("3", 10, "mini")])
+        check(wait(5) { lock.lock(); defer { lock.unlock() }; return heard["zone:C1"]?.v == "3" } != nil, "a later change on this Mac is passed on")
+        client.sendSync(user: "U1", entries: ["sections": entry("1", 11, "book")], replace: true)
+        check(wait(5) { pet.refresh(); return pet.entries["zone:C1"]?.v == nil && pet.entries["sections"]?.v == "1" } != nil, "the standard Mac's screen replaces the layout")
+        let picture = Data(repeating: 7, count: 400_000).base64EncodedString()
+        client.sendSync(user: "U1", entries: ["picture:C1": entry(picture, 12, "book")], replace: false)
+        check(wait(5) { pet.refresh(); return pet.entries["picture:C1"]?.v == picture } != nil, "a picture longer than a plain relay line arrives")
     }
 }

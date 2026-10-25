@@ -437,7 +437,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         restorePosition()
         panel.orderFrontRegardless()
         NotificationCenter.default.addObserver(self, selector: #selector(screensChanged), name: NSApplication.didChangeScreenParametersNotification, object: nil)
-        if !CommandLine.arguments.contains("--ui-smoke") { connectHermesSource(); slack.restore(); refresh() }
+        if !CommandLine.arguments.contains("--ui-smoke") {
+            connectHermesSource(); slack.restore(); refresh()
+            // A `relayPort` changed since the share was turned on takes effect without turning it off and on.
+            DispatchQueue.global(qos: .utility).async { RelayAgent.followPort() }
+        }
         threeTap.start()
         usage.onChange = { [weak self] in self?.updatePet(); self?.paseoStatusLabel?.stringValue = self?.usage.paseoStatus ?? "" }
         usage.fixture = isSmoke
@@ -1215,6 +1219,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         addMenu("수정 요청문 복사", #selector(copyThreeTapRequest), to: view); tapCopyItem = view.items.last
         refreshThreeTapMenu()
         addMenu("위치 초기화", #selector(resetPosition), to: view)
+        addMenu("이 Mac 화면을 다른 Mac에도 맞추기…", #selector(makeSyncStandard), to: view)
         view.addItem(.separator())
         addMenu("옵션…", #selector(showOptions), to: view)
         let links = addSubmenu("연결")
@@ -1505,13 +1510,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         var source: HermesSource = HermesBridge(); var remote: RemoteHermes?
         if let host = defaults.string(forKey: RelaySettings.hostKey).flatMap(RelaySettings.validHost),
            let token = RelaySettings.readToken(RelaySettings.clientTokenURL) {
-            let client = RemoteHermes(host: host, port: RelaySettings.port, token: token, portraits: relayPortraits, includeMessages: IMessageFeature.enabled)
+            let client = RemoteHermes(host: host, port: RelaySettings.remotePort, token: token, portraits: relayPortraits, includeMessages: IMessageFeature.enabled)
             client.onChange = { [weak self] in DispatchQueue.main.async { self?.refresh() } }
+            // Screen choices shared with this Slack account's other Macs travel on the same link.
+            client.onSync = { [weak self] user, entries in DispatchQueue.main.async { self?.slack.receiveSynced(user: user, entries: entries) } }
+            client.onLinked = { [weak self] in DispatchQueue.main.async { self?.slack.syncSendAll() } }
             source = client; remote = client
         }
         let old = remoteHermes
         replaceHermesSource(source)
         remoteHermes = remote
+        slack.syncSend = remote.map { client in { entries, user, replace in client.sendSync(user: user, entries: entries, replace: replace) } }
         old?.stop()
         if hermesEnabled { remote?.start() }
     }
@@ -1525,6 +1534,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         pendingMessages = []; nudges.dismiss()
         applyChat(nil); chat.resetPage(); updatePet()
     }
+    /// Sections, order, folds, mutes and pictures of this Mac become what every Mac on the same Slack account shows.
+    @objc func makeSyncStandard() {
+        let alert = NSAlert()
+        alert.messageText = "이 Mac 화면을 다른 Mac에도 맞출까요?"
+        alert.informativeText = "같은 Slack 계정으로 로그인한 다른 Mac의 섹션·채널 순서·접힘·숨김·알림 끄기·사진이 이 Mac과 같아져요. 읽음 표시는 어느 Mac에서 읽었든 그대로 합쳐져요."
+        alert.addButton(withTitle: "맞추기"); alert.addButton(withTitle: "취소")
+        NSApp.activate(ignoringOtherApps: true)
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        let done = NSAlert()
+        if !slack.makeSyncStandard() {
+            done.messageText = "아직 맞출 수 없어요"; done.informativeText = "Slack에 연결된 뒤 다시 해 주세요."
+        } else if let remote = remoteHermes, !remote.linked {
+            done.messageText = "이 Mac에 저장했어요"; done.informativeText = "공유하는 Mac에 연결되지 않았어요. 연결되면 다른 Mac에도 반영되도록 다시 한 번 해 주세요."
+        } else {
+            done.messageText = "맞췄어요"; done.informativeText = "다른 Mac에는 몇 초 안에 반영돼요."
+        }
+        done.runModal()
+    }
     @objc func configureRelay() {
         let alert = NSAlert()
         alert.messageText = "다른 Mac과 캐릭터 공유"
@@ -1533,6 +1560,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         var lines = ["이 Mac의 Hermes 캐릭터 이름·사진을 Tailscale로 연결된 내 다른 Mac의 ddots에 공유합니다. 받는 ddots는 대화 메시지를 표시하지 않습니다. 읽기 전용이며 연결 코드를 아는 Mac만 받을 수 있습니다. 펫을 종료해도 공유는 계속됩니다.", ""]
         lines.append(loaded ? "상태: 공유 중" : "상태: 꺼짐")
         lines.append(address.map { "주소: \($0) · 포트 \(RelaySettings.port)" } ?? "주소: Tailscale 주소를 찾지 못했어요. Tailscale을 켜 주세요.")
+        // Each macOS account sharing from this Mac has its own fixed port, set as `relayPort`; the other Mac types it after the name.
+        lines.append("받는 Mac의 ‘Hermes 연결’에 입력: \(RelaySettings.address(address ?? "이 Mac의 Tailscale 이름", port: RelaySettings.port))")
+        if loaded, let installed = RelayAgent.installedPort, installed != RelaySettings.port { lines.append("포트를 \(RelaySettings.port)로 바꾸는 중이에요. 잠시 뒤 다시 열어 확인해 주세요.") }
         if !LoginLaunch.isInstalled() { lines.append("응용 프로그램 폴더에 설치한 뒤 켤 수 있어요.") }
         alert.informativeText = lines.joined(separator: "\n")
         alert.addButton(withTitle: loaded ? "공유 끄기" : "공유 켜기")
@@ -1569,8 +1599,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let choose = NSButton(title: "폴더 직접 고르기", target: self, action: #selector(chooseHermesHome))
         let savedHost = UserDefaults.standard.string(forKey: RelaySettings.hostKey) ?? ""
         let hostField = NSTextField(frame: NSRect(x: 0, y: 0, width: 260, height: 24))
-        hostField.placeholderString = "공유하는 Mac의 Tailscale 이름 (선택)"; hostField.stringValue = savedHost
-        hostField.setAccessibilityLabel("공유하는 Mac의 Tailscale 이름")
+        hostField.placeholderString = "공유하는 Mac 이름:포트 (예: mac-mini:47810)"
+        hostField.stringValue = savedHost.isEmpty ? "" : RelaySettings.address(savedHost, port: RelaySettings.remotePort)
+        hostField.setAccessibilityLabel("공유하는 Mac의 Tailscale 이름과 포트")
         let codeField = NSSecureTextField(frame: NSRect(x: 0, y: 0, width: 260, height: 24))
         codeField.placeholderString = savedHost.isEmpty ? "연결 코드 (선택)" : "연결 코드 (바꿀 때만 입력)"
         codeField.setAccessibilityLabel("연결 코드")
@@ -1588,16 +1619,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 // An emptied name would throw away the other Mac's name and code, so that is asked first.
                 if savedHost.isEmpty || confirmForgetRelay(savedHost) {
                     UserDefaults.standard.removeObject(forKey: RelaySettings.hostKey)
+                    UserDefaults.standard.removeObject(forKey: RelaySettings.remotePortKey)
                     try? FileManager.default.removeItem(at: RelaySettings.clientTokenURL)
                 }
-            } else if let host = RelaySettings.validHost(hostInput) {
+            } else if let (host, port) = RelaySettings.parseAddress(hostInput) {
                 let typed = codeField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+                func keep() { UserDefaults.standard.set(host, forKey: RelaySettings.hostKey); UserDefaults.standard.set(Int(port), forKey: RelaySettings.remotePortKey) }
                 if let token = RelaySettings.validToken(typed), (try? RelaySettings.writeToken(token, to: RelaySettings.clientTokenURL)) != nil {
-                    UserDefaults.standard.set(host, forKey: RelaySettings.hostKey)
+                    keep()
                 } else if typed.isEmpty, RelaySettings.readToken(RelaySettings.clientTokenURL) != nil {
-                    UserDefaults.standard.set(host, forKey: RelaySettings.hostKey)
+                    keep()
                 } else { sendNotice = "연결 코드를 확인해 주세요. 공유하는 Mac에서 복사한 64자리 코드입니다." }
-            } else { sendNotice = "Mac 이름 형식을 확인해 주세요." }
+            } else { sendNotice = "Mac 이름:포트 형식을 확인해 주세요. 예: mac-mini:47810" }
             UserDefaults.standard.set(true, forKey: "hermesChatEnabled")
             connectHermesSource()
         case .alertSecondButtonReturn:

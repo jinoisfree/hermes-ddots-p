@@ -11,6 +11,9 @@ import difflib
 import fcntl
 import importlib.util
 import json
+import logging
+from logging.handlers import RotatingFileHandler
+import traceback
 import os
 from pathlib import Path
 import re
@@ -27,6 +30,52 @@ import title_link_sync
 DATABASE = ''
 DUE = '다음 마감'
 SEOUL = None  # set lazily (zoneinfo import is slow in tests)
+
+
+# Only these fixed codes may leave the exception boundary; never log exception text.
+WORK_ERROR_REASONS = {
+    'single_original_per_domain_required': '같은 종류의 원본이 여러 개 연결돼 있어요',
+    'single_nonrecurring_calendar_original_required': '일정이 없거나 반복 일정이라 처리 대상이 아니에요',
+    'PERSONAL_SCOPE_UNVERIFIED': '회사 범위인지 확인할 수 없어요',
+    'personal_scope_denied': '개인 범위는 개인비서 담당이에요',
+    'company_notion_database_required': '회사 업무 노션 데이터베이스가 아니에요',
+    'unsupported_work_source': '지원하지 않는 원본 종류예요',
+    'linked_task_sources_conflict': '연결된 원본의 할 일 내용이 서로 달라요',
+    'reminder_read_failed': '미리알림을 읽지 못했어요',
+    'title_write_pending': '제목 반영 확인이 필요해 멈췄어요. 자동 재실행하지 않아요',
+    'unknown_error': '분류되지 않은 오류가 반복됐어요. 로컬 로그 확인이 필요해요',
+}
+NON_TARGET_REASONS = frozenset(WORK_ERROR_REASONS) - {
+    'linked_task_sources_conflict', 'reminder_read_failed', 'unknown_error', 'title_write_pending'}
+TRANSIENT_REASONS = {'reminder_read_failed', 'unknown_error'}
+
+
+def work_error_reason(exc):
+    message = str(exc)
+    if message == "개인 범위는 개인비서 담당('ㅈ'으로 요청)":
+        return 'personal_scope_denied'
+    code = message.split(':', 1)[0].strip()
+    return code if code in WORK_ERROR_REASONS else 'unknown_error'
+
+
+def log_work_error(home, cid, reason, exc):
+    # Frames only: format_exception would expose messages, source lines and chained data.
+    frames = [{'file': Path(frame.filename).name, 'line': frame.lineno, 'function': frame.name}
+              for frame in traceback.extract_tb(exc.__traceback__)]
+    record = json.dumps({'cid': cid, 'reason': reason, 'exception': type(exc).__name__,
+                         'traceback': frames}, ensure_ascii=False)
+    try:
+        path = home / 'logs/notion-completion-sync.log'
+        path.parent.mkdir(parents=True, exist_ok=True)
+        handler = RotatingFileHandler(path, maxBytes=1024 * 1024, backupCount=3, encoding='utf-8')
+        try:
+            handler.setFormatter(logging.Formatter('%(asctime)s %(message)s'))
+            handler.emit(logging.LogRecord('work-sync', logging.ERROR, '', 0, record, (), None))
+        finally:
+            handler.close()
+    except OSError:
+        # Logging must not stop other work or send sensitive data to cron stdout.
+        pass
 
 
 def seoul():
@@ -387,7 +436,7 @@ class Sync:
         self.store, self.reader, self.reminders = store, reader, reminders
         self.path, self.dry = state_path, dry_run
         self.state = json.loads(state_path.read_text()) if state_path.exists() else {}
-        for key, default in [('pages', {}), ('actions', {}), ('notices', []), ('works', {})]:
+        for key, default in [('pages', {}), ('actions', {}), ('notices', []), ('works', {}), ('work_failures', {})]:
             self.state.setdefault(key, default)
         # The DB journal survives a crash between an external write and state replacement.
         self.rollback_path = state_path.with_name(state_path.stem + "-rollback.json")
@@ -731,6 +780,7 @@ class Sync:
                     AND NOT EXISTS (SELECT 1 FROM knowledge_refs k WHERE k.common_id=common_work.common_id
                                     AND k.ref_type='notion_page' AND k.unlinked_at IS NULL))
             """)]
+        errors = []
         for cid in ids:
             item = self.store.get(cid)
             kinds = {s['domain'] for s in item['sources']} | ({'notion'} if any(
@@ -747,14 +797,35 @@ class Sync:
                     for line in outcome['messages']:
                         self.say(line)
                     if outcome['handled']:
+                        self.state['work_failures'].pop(cid, None)
+                        self.persist()
                         continue
                 if item['status'] != 'active':
                     continue
                 self.sync_work(item)
                 self.flush_notes()
+                self.state['work_failures'].pop(cid, None)
+                self.persist()
             except Exception as exc:
-                # Keep the previous snapshot so the change is seen again next run; other works continue.
-                self.report(f'work-error:{cid}:{type(exc).__name__}', (f'• ⚠️ 제목 반영 확인이 필요해 멈췄어요({type(exc).__name__}). 자동 재실행하지 않아요.' if title_link_sync.pending(self, cid) else f'• ⚠️ 이 업무를 맞추다 멈췄어요({type(exc).__name__}). 다음 확인 때 다시 시도해요.'))
+                reason = ('title_write_pending' if title_link_sync.pending(self, cid)
+                          else work_error_reason(exc))
+                log_work_error(self.path.parent.parent, cid, reason, exc)
+                previous = self.state['work_failures'].get(cid, {})
+                count = previous.get('count', 0) + 1 if previous.get('reason') == reason else 1
+                self.state['work_failures'][cid] = {'reason': reason, 'count': count}
+                # Same originals as Sources.references; count before its duplicate-domain guard.
+                originals = sum(s['domain'] in {'notes', 'calendar'} for s in item['sources']) + sum(
+                    r.get('ref_type') == 'notion_page' for r in item.get('knowledge_refs', []))
+                skip = self.content_engine is not None and originals == 1 and reason in NON_TARGET_REASONS
+                prefix = f'work-error:{cid}:'
+                # Preserve old exception-type keys, without suppressing future distinct coded reasons.
+                already = prefix + reason in self.state['notices'] or any(
+                    key.startswith(prefix) and key[len(prefix):] not in WORK_ERROR_REASONS
+                    for key in self.state['notices'])
+                if not skip and not already and (reason not in TRANSIENT_REASONS or count >= 3):
+                    errors.append(f'• ⚠️ 「{item.get("title") or "제목 확인 불가"}」 — {WORK_ERROR_REASONS[reason]}')
+                    self.state['notices'].append(prefix + reason)
+                self.persist()
             finally:
                 self.batch = None
                 lines, self.lines = self.lines, None
@@ -764,6 +835,14 @@ class Sync:
                     url = next((r.get('metadata', {}).get('url') for r in item.get('knowledge_refs', []) if r.get('ref_type') == 'notion_page'), None)
                     self.reports.append({'title': item.get('title') or '제목 확인 불가', 'url': url, 'subtitle': '연결된 업무 반영',
                                          'lines': lines, 'when': datetime.now(seoul()).strftime('%-m/%-d %H:%M'), 'fallback': head})
+
+        if errors:
+            head = '*🟡 연결된 업무 확인 필요*'
+            text = '\n'.join([head, *errors])
+            self.messages.append(text)
+            self.reports.append({'title': '연결된 업무 확인 필요', 'url': None,
+                                 'subtitle': '연결 업무 감시 오류 요약', 'lines': errors,
+                                 'when': datetime.now(seoul()).strftime('%-m/%-d %H:%M'), 'fallback': text})
 
     def sync_work(self, item):
         cid = item['common_id']

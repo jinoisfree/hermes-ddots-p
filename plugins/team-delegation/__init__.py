@@ -38,9 +38,9 @@ except ImportError:
 
 
 try:
-    from . import deadline_time, task_reminders_sync, request_approvals
+    from . import deadline_time, task_reminders_sync, request_approvals, mail_work
 except ImportError:
-    import deadline_time, task_reminders_sync, request_approvals
+    import deadline_time, task_reminders_sync, request_approvals, mail_work
 
 
 # The profile that owns personal work: calendar, reminders, notes, mail and message lookups.
@@ -1781,6 +1781,20 @@ def _task_reminders_sync(args, **context):
         return _error(str(exc) if isinstance(exc, ValueError) else type(exc).__name__, mutation_calls=0)
     except Exception as exc:
         return _error(type(exc).__name__, execution_uncertain=True)
+
+
+def _mail_work(args, **_):
+    action = str(args.get('action') or '')
+    if error := mail_work.role_problem(sys.modules[__name__], action):
+        return _error(error)
+    try:
+        if action == 'match':
+            return json.dumps(mail_work.match(COMMON_WORK_DB, args), ensure_ascii=False)
+        if action == 'link':
+            return json.dumps(mail_work.link(_common_work_store(), args), ensure_ascii=False)
+        return _error('action must be match or link')
+    except (mail_work.MailWorkError, CommonWorkError, sqlite3.Error) as exc:
+        return _error(str(exc))
 
 
 def _error(message: str, /, **fields: Any) -> str:
@@ -6044,6 +6058,38 @@ def _calendar_event_rename(event, title, runner=subprocess.run):
     return after if after.get('title') == title and all(after.get(k) == before.get(k) for k in ('start', 'end', 'calendarIdentifier', 'notes')) else None
 
 
+def _calendar_event_add_alarm(event, minutes, runner=subprocess.run):
+    """Watcher-only (zoom_alarm_sync): add one relative alarm to one occurrence, keeping the others.
+
+    span stays "this" so a recurring series is never split; absolute alarms are left untouched by refusing.
+    """
+    details = event.get('alarmDetails') or []
+    if any(row.get('absoluteDate') for row in details):
+        return None
+    current = sorted({int(round(-float(row['relativeOffset']) / 60)) for row in details})
+    if minutes in current or len(current) >= 5:
+        return None
+    binary = _calendar_cache_root(PERSONAL_PROFILE) / 'eventkit_calendar_mutation-v1'
+    source = Path(__file__).with_name('eventkit_calendar_mutation.swift')
+    if not binary.exists() or binary.stat().st_mtime_ns < source.stat().st_mtime_ns:
+        compiled = runner(['/usr/bin/swiftc', '-parse-as-library', str(source), '-o', str(binary)],
+                          capture_output=True, text=True, timeout=120, check=False)
+        if compiled.returncode != 0:
+            return None
+    payload = {'action': 'update', 'event_id': event['calendarItemIdentifier'], 'expected_title': event['title'],
+               'expected_start': event['start'], 'alarms': current + [minutes], 'span': 'this'}
+    try:
+        proc = runner([str(binary), json.dumps(payload, ensure_ascii=False)], capture_output=True, text=True, timeout=30, check=False)
+        data = json.loads(proc.stdout) if proc.returncode == 0 else {}
+    except (OSError, subprocess.TimeoutExpired, ValueError):
+        return None
+    before, after = data.get('before') or {}, data.get('after') or {}
+    kept = ('title', 'start', 'end', 'calendarIdentifier', 'location', 'notes', 'url')
+    if not before or any(after.get(k) != before.get(k) for k in kept):
+        return None
+    return after if minutes in [int(round(v)) for v in after.get('alarms') or []] else None
+
+
 def _calendar_direct_mutation(args: dict[str, Any], **context: Any) -> str:
     if error := _personal_owner_error("calendar_direct_mutation"):
         return error
@@ -7756,6 +7802,7 @@ COMMON_WORK_COMPLETE_SCHEMA = {
 }
 
 KNOWLEDGE_REF_TYPES = [
+    "notion_page",
     "gmail_message",
     "gmail_thread",
     "wiki_page",
@@ -8638,6 +8685,9 @@ def register(ctx) -> None:
         )
     register_tool(name='task_reminders_sync', toolset='team-delegation', schema=task_reminders_sync.SCHEMA,
                   handler=_task_reminders_sync, description=task_reminders_sync.SCHEMA['description'], emoji='☑️')
+    if str(getattr(ctx, 'profile_name', '') or '').strip() == 'work-assistant':
+        register_tool(name='mail_work', toolset='team-delegation', schema=mail_work.SCHEMA,
+                      handler=_mail_work, description=mail_work.SCHEMA['description'], emoji='📬')
     register_middleware("llm_request", _personal_direct_llm_request)
     register_middleware("llm_execution", _llm_execution_guard)
     register_middleware("tool_execution", _tool_execution_guard)

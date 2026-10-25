@@ -81,9 +81,15 @@ struct RelayFrame: Codable {
     var projects: [ThreadProject]?
     var usage: RelayUsage?
     var slack: SlackActivity?
+    /// Shared screen choices of one Slack account (`sync`), and whether they make the sender's screen the standard.
+    var user: String?
+    var entries: [String: SyncEntry]?
+    var replace: Bool?
     init(op: String) { self.op = op }
 
     static let maximumLine = 64 * 1024
+    /// Shared choices may carry a picture, so a Mac that presented the code may send longer lines.
+    static let maximumAuthorizedLine = 2 << 20
     func line() -> Data { ((try? JSONEncoder().encode(self)) ?? Data()) + Data([0x0A]) }
     /// Splits complete lines off the front of a receive buffer. Undecodable lines are reported as nil.
     static func take(from buffer: inout Data) -> [RelayFrame?] {
@@ -99,13 +105,31 @@ struct RelayFrame: Codable {
 
 enum RelaySettings {
     static let defaultPort: UInt16 = 47810
-    static let hostKey = "hermesRemoteHost", portKey = "relayPort"
+    /// `relayPort` is the port this Mac shares on. Each macOS account sharing from the same Mac keeps its own fixed one
+    /// (2026-10-25: mac-mini-m4-homeserver 47810, moyo 47811). `hermesRemotePort` is the port of the Mac this one reads from.
+    static let hostKey = "hermesRemoteHost", portKey = "relayPort", remotePortKey = "hermesRemotePort"
     static var support: URL { FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(AppIdentity.supportFolder) }
     static var serverTokenURL: URL { support.appendingPathComponent("relay-token") }
     static var clientTokenURL: URL { support.appendingPathComponent("relay-peer-token") }
     static var port: UInt16 {
         let saved = UserDefaults.standard.integer(forKey: portKey)
         return (1024...65535).contains(saved) ? UInt16(saved) : defaultPort
+    }
+    static var remotePort: UInt16 {
+        let saved = UserDefaults.standard.integer(forKey: remotePortKey)
+        return (1024...65535).contains(saved) ? UInt16(saved) : defaultPort
+    }
+    /// What another Mac enters to read this one: `name:port`.
+    static func address(_ host: String, port: UInt16) -> String { host + ":" + String(port) }
+    /// `name` or `name:port` as typed on the reading Mac. A missing port is the default one.
+    static func parseAddress(_ input: String) -> (host: String, port: UInt16)? {
+        let text = input.trimmingCharacters(in: .whitespacesAndNewlines)
+        var host = text, port = defaultPort
+        if let colon = text.lastIndex(of: ":") {
+            guard let number = Int(text[text.index(after: colon)...]), (1024...65535).contains(number) else { return nil }
+            host = String(text[..<colon]); port = UInt16(number)
+        }
+        return validHost(host).map { ($0, port) }
     }
     static func validToken(_ text: String) -> String? {
         let token = text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
@@ -190,6 +214,19 @@ enum RelayAgent {
         process.waitUntilExit(); return process.terminationStatus
     }
     static var isLoaded: Bool { launchctl(["print", "gui/\(getuid())/\(label)"]) == 0 }
+    /// The port the installed share was started with, read from its launch item.
+    static var installedPort: UInt16? {
+        guard let data = try? Data(contentsOf: plistURL),
+              let plist = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any],
+              let arguments = plist["ProgramArguments"] as? [String], let index = arguments.firstIndex(of: "--relay-port"),
+              arguments.count > index + 1 else { return nil }
+        return UInt16(arguments[index + 1])
+    }
+    /// A share started before `relayPort` was changed is started again on the port now chosen.
+    static func followPort() {
+        guard isLoaded, let installed = installedPort, installed != RelaySettings.port else { return }
+        try? setEnabled(true)
+    }
     static func setEnabled(_ enabled: Bool, executable: String? = Bundle.main.executablePath) throws {
         // A build run from elsewhere must not take down the share the installed app keeps.
         guard LoginLaunch.isInstalled(), let executable else {

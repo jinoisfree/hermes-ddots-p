@@ -16,6 +16,9 @@ from urllib.parse import quote
 # Not "in:inbox": filters file mail under a label without it reaching the inbox, and that mail
 # matters just as much. Search already leaves out spam and trash.
 QUERY = "newer_than:2d -in:sent -in:draft -in:chats -category:promotions -category:social"
+# Mail the owner sent: only offered when it belongs to a linked work (mail_watch filters it).
+SENT_QUERY = "newer_than:2d in:sent -in:chats"
+SENT_STATE = "mail-watch-sent.json"
 MAX_PASSES = 2
 BATCH_SIZE = 20
 # Gmail ids are hex; the Mail app stand-in uses "m" + its own number.
@@ -106,10 +109,10 @@ def _save(path: Path, state: dict) -> None:
 
 
 @contextmanager
-def locked_state(home: Path):
-    path = home / "state" / "mail-watch.json"
+def locked_state(home: Path, name: str = "mail-watch.json"):
+    path = home / "state" / name
     path.parent.mkdir(parents=True, exist_ok=True)
-    with (path.parent / "mail-watch.lock").open("a") as lock:
+    with (path.parent / (Path(name).stem + ".lock")).open("a") as lock:
         fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
         try:
             yield path, _load(path)
@@ -143,6 +146,14 @@ def acknowledge(home: Path, ids: list[str]) -> list[str]:
             or not all(valid_id(value) for value in ids)):
         raise WatchError("GMAIL_INVALID_IDS")
     ids = list(dict.fromkeys(ids))
+    if (home / "state" / SENT_STATE).exists():
+        # One ack call covers both watches; sent mail is only marked where the sent watch offered it.
+        with locked_state(home, SENT_STATE) as (path, state):
+            known = [value for value in ids if state and value in state["messages"]]
+            for message_id in known:
+                state["messages"][message_id] = _entry(True, state["messages"][message_id].get("passes", 0), "agent_ack")
+            if known:
+                _save(path, state)
     with locked_state(home) as (path, state):
         if state is None:
             state = {"version": 1, "account": "", "messages": {}}
@@ -154,13 +165,14 @@ def acknowledge(home: Path, ids: list[str]) -> list[str]:
     return ids
 
 
-def poll(home: Path, fetch, account: str = "", *, mailbox: str = "", source: str = "gmail") -> dict:
+def poll(home: Path, fetch, account: str = "", *, mailbox: str = "", source: str = "gmail",
+         state_name: str = "mail-watch.json") -> dict:
     """source names where fetch reads from ("gmail" or "mail_app"); the two give one mail different ids."""
     mailbox = normalized_account(mailbox)
     account = normalized_account(account)
     if account and account != mailbox:
         return {"wakeAgent": False, "reason": "account_mismatch", "items": []}
-    with locked_state(home) as (path, state):
+    with locked_state(home, state_name) as (path, state):
         # Validate before contacting Gmail. Fetch is GET/list only.
         items = fetch()
         if not isinstance(items, list) or not all(
@@ -200,7 +212,7 @@ def poll(home: Path, fetch, account: str = "", *, mailbox: str = "", source: str
             state["messages"][item["id"]] = _entry(
                 passes >= MAX_PASSES, passes, "pass_limit" if passes >= MAX_PASSES else "offered")
             pending.append({key: item[key] for key in
-                            ("id", "threadId", "from", "subject", "date", "snippet", "link")
+                            ("id", "threadId", "from", "to", "subject", "date", "snippet", "link", "work_matches")
                             if key in item})
         prune_messages(state)
         _save(path, state)
@@ -227,24 +239,25 @@ def mailbox_address(service) -> str:
     return account
 
 
-def fetch_recent(root: Path, *, client=None) -> list[dict]:
+def fetch_recent(root: Path, *, client=None, query: str = QUERY) -> list[dict]:
     """Page metadata using the same OAuth client whose mailbox was already verified."""
     api, service = client if client is not None else gmail_client(root)
     messages = service.users().messages()
     items, page = [], None
     while True:
-        parameters = {"userId": "me", "q": QUERY, "maxResults": 100}
+        parameters = {"userId": "me", "q": query, "maxResults": 100}
         if page:
             parameters["pageToken"] = page
         response = messages.list(**parameters).execute()
         for entry in response.get("messages", []):
             message = messages.get(userId="me", id=entry["id"], format="metadata",
-                                   metadataHeaders=["From", "Subject", "Date"]).execute()
+                                   metadataHeaders=["From", "To", "Subject", "Date"]).execute()
             headers = api._headers_dict(message)
             received = str(message.get("internalDate") or "")
             items.append({"id": message["id"], "threadId": message["threadId"],
                           **({"ts": int(received) // 1000} if received.isdigit() else {}),
                           "from": headers.get("from", ""), "subject": headers.get("subject", ""),
+                          **({"to": headers["to"]} if query == SENT_QUERY and headers.get("to") else {}),
                           "date": headers.get("date", ""), "snippet": message.get("snippet", "")})
         page = response.get("nextPageToken")
         if not page:

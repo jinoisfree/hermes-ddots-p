@@ -120,6 +120,14 @@ final class SlackController {
     private var ddotsNewest: Date?
     /// Off in smoke runs, which neither touch the real settings nor send anything.
     var persists = true
+    // Screen choices shared with this account's other Macs. See `SlackSettingsSync.swift`.
+    var settings: SettingsStore?
+    var syncObserved: [String: String] = [:]
+    var syncExplicit: [String: SyncEntry] = [:]
+    var syncedThreadRead: [String: Double] = [:]
+    var syncObservedAt = Date.distantPast
+    /// Sends shared choices to the Mac that keeps them: entries, Slack user, and whether they make this Mac the standard.
+    var syncSend: (([String: SyncEntry], String, Bool) -> Void)?
     var characters: [ChatCharacter] = []
     /// The characters as Hermes names them, or as the record's keeper wrote them down when this Mac has no Hermes to ask.
     var cast: [ChatCharacter] {
@@ -284,7 +292,7 @@ final class SlackController {
             let name = self.model.groupName(zone), count = self.model.groups[zone]?.count ?? 0
             let moved = count > 0 ? " 안에 있는 채널 \(count)개는 ‘\(self.model.groupName(first))’로 옮겨져요." : ""
             guard SlackRoomDialogs.confirm("‘\(name)’ 섹션을 삭제할까요?", "섹션만 없어지고 슬랙 채널은 그대로예요." + moved, button: "삭제") else { return }
-            if self.persists { SlackRoomPictures.remove(Ddots.sectionPicture(zone)) }
+            if self.persists { SlackRoomPictures.remove(Ddots.sectionPicture(zone)); self.syncPicture(Ddots.sectionPicture(zone)) }
             self.model.roomPictures[Ddots.sectionPicture(zone)] = nil
             self.model.removeSection(zone)
         }
@@ -296,7 +304,7 @@ final class SlackController {
         model.onPicture = { [weak self] room in self?.choosePicture(room) }
         model.onClearPicture = { [weak self] room in
             guard let self, self.persists else { return }
-            SlackRoomPictures.remove(room); self.model.roomPictures[room] = nil
+            SlackRoomPictures.remove(room); self.model.roomPictures[room] = nil; self.syncPicture(room)
         }
         model.onDelete = { [weak self] thread in
             guard let self, !self.closing, let bridge = self.bridge, self.persists else { return }
@@ -308,7 +316,7 @@ final class SlackController {
         }
         model.onBell = { [weak self] thread in
             guard let self else { return }
-            if (self.dismissed[thread.id] ?? -.infinity) >= thread.latest { self.dismissed[thread.id] = nil } else { self.dismissed[thread.id] = thread.latest; self.markRead(thread) }
+            if (self.dismissed[thread.id] ?? -.infinity) >= thread.latest { self.dismissed[thread.id] = nil; self.syncUndismiss(thread.id) } else { self.dismissed[thread.id] = thread.latest; self.markRead(thread) }
             // Only the most recent marks are kept.
             if self.dismissed.count > 300 { self.dismissed = Dictionary(uniqueKeysWithValues: self.dismissed.sorted { $0.value > $1.value }.prefix(200).map { ($0.key, $0.value) }) }
             if self.persists { UserDefaults.standard.set(self.retention.filtered(self.dismissed), forKey: "slackDismissed") }
@@ -503,7 +511,7 @@ final class SlackController {
     }
     /// Threads deleted from Slack through this window, by id with when. One of them that the record or a
     /// late listing still holds is not shown again.
-    private(set) var deletedThreads: [String: Double] = UserDefaults.standard.dictionary(forKey: "slackDeletedThreads") as? [String: Double] ?? [:]
+    var deletedThreads: [String: Double] = UserDefaults.standard.dictionary(forKey: "slackDeletedThreads") as? [String: Double] ?? [:]
     /// Deletions asked for that the reading has not taken up yet; they show as under way from the press.
     private var askedDelete = Set<String>()
     /// How a deleting ended: done, and the thread stays away; or stopped, and the reason is said.
@@ -602,6 +610,7 @@ final class SlackController {
     }
 
     func tick() {
+        syncSettings()
         guard !closing, let bridge, !syncing else { return }
         syncing = true
         let folder = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(AppIdentity.supportFolder)
@@ -824,6 +833,7 @@ final class SlackController {
             SlackRoomDialogs.tell("사진을 넣지 못했어요", "이미지 파일을 읽을 수 없어요."); return
         }
         model.roomPictures[room] = kept
+        syncPicture(room)
     }
 
     /// Slack lets only its own app, and only an admin there, delete a channel; this opens the room in Slack for that.
@@ -1058,11 +1068,13 @@ final class SlackController {
         }
         if changedRead && persists { UserDefaults.standard.set(retention.filtered(lastRead), forKey: "slackLastRead") }
         readRooms = []; readThreads = []
+        // Threads read on another Mac of this account count as read here too.
+        let threadRead = syncedThreadRead.isEmpty ? snapshot.threadRead : snapshot.threadRead.merging(syncedThreadRead, uniquingKeysWith: max)
         var unread: [String: Int] = [:]
         for (room, threads) in snapshot.threads where !model.hidden.contains(room) || together.contains(room) {
             var count = 0
             for thread in threads {
-                let fresh = unreadCache.count(thread, lastRead: lastRead[room] ?? now, roomRead: snapshot.roomRead[room] ?? 0, threadRead: snapshot.threadRead)
+                let fresh = unreadCache.count(thread, lastRead: lastRead[room] ?? now, roomRead: snapshot.roomRead[room] ?? 0, threadRead: threadRead)
                 count += fresh
                 if fresh > 0 {
                     readRooms.insert(room)

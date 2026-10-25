@@ -4,6 +4,7 @@ description: "Governed workflow budgets, EventKit calendar executor, canonical o
 author: starter_user
 provides_tools:
   - task_reminders_sync
+  - mail_work
   - contacts_direct_lookup
   - contacts_direct_mutation
   - diagnosis_health_read

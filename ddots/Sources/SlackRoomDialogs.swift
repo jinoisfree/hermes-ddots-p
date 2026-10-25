@@ -237,6 +237,21 @@ enum SlackRoomPictures {
         return small
     }
 
+    /// The kept picture as it is stored, to share with this account's other Macs.
+    static func data(_ room: String) -> Data? { file(room).flatMap { try? Data(contentsOf: $0) } }
+    static func keys() -> [String] {
+        ((try? FileManager.default.contentsOfDirectory(at: folder, includingPropertiesForKeys: nil)) ?? [])
+            .filter { $0.pathExtension == "png" }.map { $0.deletingPathExtension().lastPathComponent }
+    }
+    /// A picture another Mac of this account chose, kept as it came. Nil when it is no picture or could not be written.
+    static func save(data: Data, room: String) -> NSImage? {
+        guard data.count <= 2 << 20, let url = file(room), let image = NSImage(data: data), image.isValid else { return nil }
+        do {
+            try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+            try data.write(to: url, options: .atomic)
+        } catch { return nil }
+        return image
+    }
     static func remove(_ room: String) {
         if let url = file(room) { try? FileManager.default.removeItem(at: url) }
     }
