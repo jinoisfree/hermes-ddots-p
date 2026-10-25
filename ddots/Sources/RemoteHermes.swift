@@ -15,6 +15,12 @@ final class RemoteHermes: HermesSource {
     private var latest = HermesBridge.PollResult(status: .unavailable(RemoteHermes.connecting), messages: [])
     private var lastStateAt: Date?
     var lastReceivedAt: Date? { lock.lock(); defer { lock.unlock() }; return lastStateAt }
+    private var relayedUsage: RelayUsage?
+    /// Paseo usage of the sharing Mac. Kept across a lost link; each value expires by its own observation time.
+    var usage: RelayUsage? { lock.lock(); defer { lock.unlock() }; return relayedUsage }
+    private var relayedSlack = SlackActivity()
+    /// Slack threads the sharing Mac's characters are writing in. Cleared when the link is lost so no dots linger.
+    var slackActivity: SlackActivity { lock.lock(); defer { lock.unlock() }; return relayedSlack }
     private var unread: Date?
     private var pending: [Int: Pending] = [:]
     private var nextID = 0
@@ -81,7 +87,7 @@ final class RemoteHermes: HermesSource {
         guard let old = connection else { return }
         startupTapFailure = nil; connection = nil; welcomed = false; old.cancel()
         lock.lock()
-        latest.status = .unavailable(wasDenied ? Self.denied : Self.lost); latest.typing = []
+        latest.status = .unavailable(wasDenied ? Self.denied : Self.lost); latest.typing = []; relayedSlack.writers = []
         let waiting = Array(pending.values); pending = [:]
         lock.unlock()
         waiting.forEach { $0.done.signal() }
@@ -130,12 +136,14 @@ final class RemoteHermes: HermesSource {
             if includeMessages, let session = frame.session { latest.sessionToken = session }
             if let characters = frame.characters { latest.characters = characters.map { ChatCharacter(id: $0.id, name: $0.name) } }
             if let projects = frame.projects { latest.projects = projects }
+            if let usage = frame.usage { relayedUsage = usage }
+            if let slack = frame.slack { relayedSlack = slack }
             if let avatars = frame.avatars { latest.avatars = avatars.mapValues(\.avatar) }
             if includeMessages, let receipts = frame.receipts {
                 latest.receipts = receipts.map { ChatReceipt(id: $0.id, fromUser: $0.fromUser, date: Date(timeIntervalSince1970: $0.date)) }
             }
             let changed = before.status != latest.status || before.messages != latest.messages || before.typing != latest.typing
-                || before.characters != latest.characters || frame.avatars != nil || frame.receipts != nil || frame.projects != nil
+                || before.characters != latest.characters || frame.avatars != nil || frame.receipts != nil || frame.projects != nil || frame.usage != nil || frame.slack != nil
             lock.unlock()
             if changed { onChange?() }
         default: break

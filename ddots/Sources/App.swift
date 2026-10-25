@@ -441,6 +441,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         threeTap.start()
         usage.onChange = { [weak self] in self?.updatePet(); self?.paseoStatusLabel?.stringValue = self?.usage.paseoStatus ?? "" }
         usage.fixture = isSmoke
+        usage.relayed = { [weak self] in self?.remoteHermes?.usage }
         timer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
             let began = ProcessInfo.processInfo.systemUptime
             defer { self?.recordTransitionWork("poll2s", since: began) }
@@ -587,8 +588,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             // Disabling local chat must not let remote backups replace this Mac's own profiles.
             let localDisabled = !readsChat && (source as? HermesBridge)?.stores().isEmpty == false
             let portraits = localDisabled ? empty : self.relayPortraits.merging(conversation ?? empty)
-            // Only this Mac's own Hermes record says who is writing in a Slack thread.
-            let activity = readsSlack ? (source as? HermesBridge)?.slackActivity() : nil
+            // This Mac's Hermes record, or the sharing Mac's relayed one, says who is writing in a Slack thread.
+            let activity = readsSlack ? ((source as? HermesBridge)?.slackActivity() ?? (source as? RemoteHermes)?.slackActivity) : nil
             DispatchQueue.main.async {
                 self.finishRefresh(snapshot: snapshot, conversation: conversation, portraits: portraits, activity: activity, localHermesFound: localDisabled || located != nil, revision: revision)
             }

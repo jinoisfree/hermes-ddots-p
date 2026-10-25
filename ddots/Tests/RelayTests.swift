@@ -144,7 +144,15 @@ import SQLite3
         portraits.receive(clear, fromRelay: true)
         check(RelayPortraits(url: portraitFile).merging(empty).avatars.isEmpty, "explicit empty relay fields clear old portraits")
 
-        var server = HermesRelayServer(home: home, token: token, interval: 0.1)
+        // Synthetic Paseo usage: the relay test never reads this Mac's real Paseo.
+        let usageNow = Date()
+        let usageLock = NSLock(); var usageReads = 0
+        let fakeUsage: () -> (codex: ServiceUsage?, claude: ServiceUsage?)? = {
+            usageLock.lock(); usageReads += 1; usageLock.unlock()
+            return (ServiceUsage(observedAt: usageNow, maxAge: 3600, windows: [UsageWindow(weekly: true, usedPercent: 15, resetAt: usageNow.addingTimeInterval(86400))]),
+                    ServiceUsage(observedAt: usageNow, maxAge: 3600, windows: [UsageWindow(weekly: false, usedPercent: 2), UsageWindow(weekly: true, usedPercent: 41)]))
+        }
+        var server = HermesRelayServer(home: home, token: token, interval: 0.1, readUsage: fakeUsage)
         let maintenanceLock = NSLock()
         var maintenance: [ThreeTapFailure] = []
         server.onTapFailure = { failure in maintenanceLock.lock(); maintenance.append(failure); maintenanceLock.unlock() }
@@ -160,6 +168,7 @@ import SQLite3
         check(intruder.poll(unreadSince: nil).messages.isEmpty && intruder.search("합성").isEmpty, "wrong code receives no conversation")
         intruder.stop()
         check(server.polls == 0, "wrong code never triggers a read")
+        check({ usageLock.lock(); defer { usageLock.unlock() }; return usageReads == 0 }(), "usage is not read before a Mac is authorized")
 
         // Oversized and malformed input
         for payload in [Data(repeating: 0x41, count: RelayFrame.maximumLine + 4096), Data("not json\n".utf8)] {
@@ -185,6 +194,14 @@ import SQLite3
         let tapFailure = ThreeTapFailure(mac: "합성 Mac", os: "27.0.1", build: "TEST", app: "1", appBuild: "1", stage: "합성 고장")
         client.start(); client.start(); client.reportTapFailure(tapFailure)
         check(wait(3) { client.poll(unreadSince: nil).messages.count == 3 } != nil, "conversation arrives after connecting")
+        check(wait(3) { client.usage != nil } != nil, "sharing Mac's Paseo usage arrives with the state")
+        if let relayed = client.usage?.services {
+            check(relayed.codex?.label(now: usageNow) == "주 85%" && relayed.claude?.label(now: usageNow) == "주 59%", "relayed usage keeps windows and labels")
+            check(UsageRetention.label(local: nil, relayed: relayed.claude, now: usageNow) == "주 59%", "relayed value fills in when this Mac has no Paseo")
+            let own = ServiceUsage(observedAt: usageNow, maxAge: 3600, windows: [UsageWindow(weekly: false, usedPercent: 10)])
+            check(UsageRetention.label(local: own, relayed: relayed.claude, now: usageNow) == "90%", "this Mac's own Paseo wins over the relayed value")
+        }
+        check({ usageLock.lock(); defer { usageLock.unlock() }; return usageReads == 1 }(), "usage is read at most once a minute")
         check(wait(2) { maintenanceLock.lock(); defer { maintenanceLock.unlock() }; return maintenance == [tapFailure] } != nil, "authorized maintenance facts reach the server without sending a Slack message")
         let oldFrame = try JSONDecoder().decode(RelayFrame.self, from: Data("{\"op\":\"watch\"}".utf8))
         check(oldFrame.tapFailure == nil, "old relay frames still decode")
@@ -218,6 +235,22 @@ import SQLite3
         execute(home.appendingPathComponent("state.db"), ["INSERT INTO messages VALUES (11, 's1', 'assistant', '새 답변', NULL, \(Date().timeIntervalSince1970))"])
         check(wait(2) { let r = client.poll(unreadSince: nil); return r.messages.last?.body == "새 답변" && r.typing.isEmpty } != nil, "answer clears typing")
 
+        // A character writing in a Slack thread on the sharing Mac shows its dots on this Mac's Slack view.
+        check(client.slackActivity.writers.isEmpty, "no Slack writer before a lease")
+        let leaseAt = Date().timeIntervalSince1970
+        execute(home.appendingPathComponent("state.db"), [
+            "ALTER TABLE sessions ADD COLUMN chat_id TEXT", "ALTER TABLE sessions ADD COLUMN thread_id TEXT",
+            "UPDATE sessions SET chat_id='C1', thread_id='100.1' WHERE id='s2'",
+            "CREATE TABLE session_turn_leases (conversation_id TEXT, holder TEXT, acquired_at REAL, expires_at REAL)",
+            "INSERT INTO session_turn_leases VALUES ('s2', 'w', \(leaseAt), \(leaseAt + 600))"])
+        let slackDelay = wait(3) { client.slackActivity.writers == [SlackActivity.Writer(profile: "default", name: "위키담당", room: "C1", thread: "100.1", since: leaseAt)] }
+        check(slackDelay != nil, "sharing Mac's Slack writer arrives: \(client.slackActivity)")
+        check(client.slackActivity.recent.first.map { $0.room + ":" + $0.thread } == "C1:100.1", "recent Slack threads arrive too")
+        execute(home.appendingPathComponent("state.db"), ["DELETE FROM session_turn_leases"])
+        check(wait(3) { client.slackActivity.writers.isEmpty } != nil, "an ended lease clears the relayed writer")
+        let oldServerFrame = try JSONDecoder().decode(RelayFrame.self, from: Data("{\"op\":\"state\"}".utf8))
+        check(oldServerFrame.slack == nil, "an older sharing Mac's frame leaves Slack activity unchanged")
+
         // Unread marks follow the mark this Mac asks for.
         let mark = Date(timeIntervalSince1970: now - 595)
         check(wait(2) { client.poll(unreadSince: mark).receipts.count == 4 } != nil, "unread receipts are counted from this Mac's own mark")
@@ -245,14 +278,19 @@ import SQLite3
         check(requests.wait(timeout: .now() + 8) == .success && correctResults == 12, "concurrent searches retain their own results")
 
         // Link loss and recovery
+        let lostLeaseAt = Date().timeIntervalSince1970
+        execute(home.appendingPathComponent("state.db"), ["INSERT INTO session_turn_leases VALUES ('s2', 'w', \(lostLeaseAt), \(lostLeaseAt + 600))"])
+        check(wait(3) { client.slackActivity.writers.count == 1 } != nil, "a Slack writer is shown before the link drops")
         server.stop()
         check(wait(3) { client.poll(unreadSince: nil).status == .unavailable(RemoteHermes.lost) } != nil, "lost link is reported")
+        check(client.slackActivity.writers.isEmpty, "a lost link leaves no Slack dots behind")
+        execute(home.appendingPathComponent("state.db"), ["DELETE FROM session_turn_leases"])
         check(client.poll(unreadSince: nil).messages.count == 5, "conversation stays on screen while reconnecting")
         check(client.lastReceivedAt != nil, "disconnect preserves the last received time")
         check(client.search("답변").isEmpty, "requests fail fast while disconnected")
         check(client.poll(unreadSince: nil).avatars["default"]?.image != nil && client.poll(unreadSince: nil).characters == first.characters, "(c) disconnection preserves received names and images")
         execute(home.appendingPathComponent("state.db"), ["INSERT INTO messages VALUES (12, 's1', 'assistant', '끊긴 동안', NULL, \(Date().timeIntervalSince1970))"])
-        server = HermesRelayServer(home: home, token: token, interval: 0.1)
+        server = HermesRelayServer(home: home, token: token, interval: 0.1, readUsage: fakeUsage)
         check((try? server.start(host: "127.0.0.1", port: port)) == port, "relay comes back on the same port")
         check(wait(15) { let r = client.poll(unreadSince: nil); return r.status == .connected(stores: 2) && r.messages.last?.body == "끊긴 동안" } != nil, "client reconnects and catches up")
 
@@ -271,7 +309,7 @@ import SQLite3
         let late = RemoteHermes(host: "127.0.0.1", port: port, token: token)
         late.start()
         check(wait(3) { late.poll(unreadSince: nil).status == .unavailable(RemoteHermes.lost) } != nil, "(d) starting without a server reports retrying")
-        server = HermesRelayServer(home: home, token: token, interval: 0.1)
+        server = HermesRelayServer(home: home, token: token, interval: 0.1, readUsage: fakeUsage)
         check((try? server.start(host: "127.0.0.1", port: port)) == port, "late server binds the temporary port")
         check(wait(15) { late.poll(unreadSince: nil).avatars["default"]?.image != nil && !late.poll(unreadSince: nil).characters.isEmpty } != nil, "(d) client automatically connects when server appears")
         late.stop(); server.stop()

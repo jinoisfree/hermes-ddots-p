@@ -82,4 +82,36 @@ enum UsageText {
 
 enum UsageRetention {
     static func next(previous: ServiceUsage?, incoming: ServiceUsage?) -> ServiceUsage? { incoming ?? previous }
+    /// This Mac's own Paseo wins; the sharing Mac's value fills in only where this Mac has nothing current.
+    static func label(local: ServiceUsage?, relayed: ServiceUsage?, now: Date = Date()) -> String {
+        let own = local?.label(now: now) ?? "—"
+        return own != "—" ? own : relayed?.label(now: now) ?? "—"
+    }
+}
+
+/// Usage read by the Mac that runs Paseo, sent over the conversation relay. Times are seconds since 1970.
+struct RelayUsage: Codable, Equatable {
+    struct Window: Codable, Equatable { var weekly: Bool; var used: Double; var reset: Double? }
+    struct Service: Codable, Equatable { var observed: Double; var windows: [Window] }
+    var codex: Service?, claude: Service?
+
+    init(codex: ServiceUsage?, claude: ServiceUsage?) {
+        func service(_ usage: ServiceUsage?) -> Service? {
+            usage.map { Service(observed: $0.observedAt.timeIntervalSince1970,
+                                windows: $0.windows.map { Window(weekly: $0.weekly, used: $0.usedPercent, reset: $0.resetAt?.timeIntervalSince1970) }) }
+        }
+        self.codex = service(codex); self.claude = service(claude)
+    }
+    /// Values from the wire are checked again; anything malformed is treated as unknown.
+    var services: (codex: ServiceUsage?, claude: ServiceUsage?) {
+        func usage(_ service: Service?) -> ServiceUsage? {
+            guard let service, service.observed.isFinite, service.windows.count <= 8 else { return nil }
+            let windows = service.windows.compactMap { window -> UsageWindow? in
+                guard window.used.isFinite, (0...100).contains(window.used), window.reset?.isFinite ?? true else { return nil }
+                return UsageWindow(weekly: window.weekly, usedPercent: window.used, resetAt: window.reset.map(Date.init(timeIntervalSince1970:)))
+            }
+            return ServiceUsage(observedAt: Date(timeIntervalSince1970: service.observed), maxAge: 3600, windows: windows)
+        }
+        return (usage(codex), usage(claude))
+    }
 }

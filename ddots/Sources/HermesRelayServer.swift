@@ -18,6 +18,8 @@ final class HermesRelayServer {
         var characters: [ChatCharacter]?
         var projects: [ThreadProject]?
         var avatars: [String: ProfileAvatar] = [:]
+        var usage: RelayUsage?
+        var slack: SlackActivity?
         var lastSent = Date.distantPast
         init(_ fd: Int32) { self.fd = fd }
     }
@@ -32,10 +34,19 @@ final class HermesRelayServer {
     private let interval: TimeInterval
     private(set) var polls = 0
     var onTapFailure: ((ThreeTapFailure) -> Void)?
+    // Paseo usage of this Mac, read off the relay queue at most once a minute while another Mac is connected.
+    private let usageQueue = DispatchQueue(label: AppIdentity.bundleID + ".relay-usage", qos: .utility)
+    private let readUsage: () -> (codex: ServiceUsage?, claude: ServiceUsage?)?
+    private let usageInterval: TimeInterval
+    private var usageCodex: ServiceUsage?, usageClaude: ServiceUsage?
+    private var usageBusy = false
+    private var nextUsage = Date.distantPast
 
-    init(home: URL? = nil, token: String, interval: TimeInterval = 0.5) {
+    init(home: URL? = nil, token: String, interval: TimeInterval = 0.5,
+         usageInterval: TimeInterval = 60, readUsage: @escaping () -> (codex: ServiceUsage?, claude: ServiceUsage?)? = UsageSources.paseo) {
         followsLocation = home == nil
         bridge = HermesBridge(home: home, makesImages: false); self.token = token; self.interval = interval
+        self.usageInterval = usageInterval; self.readUsage = readUsage
     }
 
     private static func failure(_ text: String) -> NSError {
@@ -177,7 +188,11 @@ final class HermesRelayServer {
         guard !watchers.isEmpty else { return }
         if followsLocation, let home = HermesLocator.shared.locate(), home != bridge.home { bridge = HermesBridge(home: home, makesImages: false) }
         polls += 1
+        refreshUsage()
+        let usage = usageCodex == nil && usageClaude == nil ? nil : RelayUsage(codex: usageCodex, claude: usageClaude)
         let result = bridge.poll(unreadSince: nil)
+        // Who is writing in which Slack thread; the other Mac shows the dots under its own Slack view.
+        let slack = bridge.slackActivity()
         var receipts: [Double: [RelayFrame.Receipt]] = [:]
         for client in watchers {
             var frame = RelayFrame(op: "state"); var changed = false
@@ -201,6 +216,8 @@ final class HermesRelayServer {
                 frame.characters = result.characters.map { RelayFrame.Character(id: $0.id, name: $0.name) }
             }
             if client.avatars != result.avatars { client.avatars = result.avatars; frame.avatars = result.avatars.mapValues(RelayFrame.Avatar.init); changed = true }
+            if let usage, client.usage != usage { client.usage = usage; frame.usage = usage; changed = true }
+            if client.slack != slack { client.slack = slack; frame.slack = slack; changed = true }
             if let unread = client.unread, messagesChanged || client.unreadChanged {
                 let key = unread.timeIntervalSince1970
                 if receipts[key] == nil {
@@ -210,6 +227,20 @@ final class HermesRelayServer {
             }
             // A quiet line still says it is alive, so the other Mac can tell silence from a dead link.
             if changed || Date().timeIntervalSince(client.lastSent) >= 10 { send(frame, to: client) }
+        }
+    }
+
+    private func refreshUsage() {
+        guard !usageBusy, Date() >= nextUsage else { return }
+        usageBusy = true
+        usageQueue.async { [weak self] in
+            guard let self else { return }
+            let read = self.readUsage()
+            self.queue.async {
+                self.usageBusy = false; self.nextUsage = Date().addingTimeInterval(self.usageInterval)
+                self.usageCodex = UsageRetention.next(previous: self.usageCodex, incoming: read?.codex)
+                self.usageClaude = UsageRetention.next(previous: self.usageClaude, incoming: read?.claude)
+            }
         }
     }
 

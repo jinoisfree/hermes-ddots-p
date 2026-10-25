@@ -6,8 +6,8 @@
 <key>CFBundleName</key><string>ddots</string>
 <key>CFBundleDisplayName</key><string>ddots</string>
 <key>CFBundlePackageType</key><string>APPL</string>
-<key>CFBundleShortVersionString</key><string>1.6.99</string>
-<key>CFBundleVersion</key><string>137</string>
+<key>CFBundleShortVersionString</key><string>1.6.100</string>
+<key>CFBundleVersion</key><string>138</string>
 <key>CFBundleIconFile</key><string>ddots</string>
 <key>LSMinimumSystemVersion</key><string>13.0</string>
 <key>SUEnableAutomaticChecks</key><false/>

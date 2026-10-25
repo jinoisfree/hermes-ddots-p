@@ -107,6 +107,25 @@ import Foundation
         }
         check(status(codex: "72%", claude: "주 48%", timeZone: TimeZone(secondsFromGMT: 9 * 3600)!) == "Paseo 사용 중 · 마지막 조회 12:33", "status respects time zone")
         check(status(ok: false, codex: retained.label(now: now.addingTimeInterval(3601))) == "Paseo 조회 실패 · 마지막 조회 03:33", "expired value is not claimed visible")
+        let wire = RelayUsage(codex: retained, claude: snapshot([short, UsageWindow(weekly: true, usedPercent: 52, resetAt: now.addingTimeInterval(60))], maxAge: 3600))
+        let decoded = try! JSONDecoder().decode(RelayUsage.self, from: JSONEncoder().encode(wire))
+        check(decoded == wire && decoded.services.claude?.label(now: now) == "주 48%", "relayed usage round trips")
+        check(RelayUsage(codex: nil, claude: nil).services.codex == nil, "missing relayed service stays unknown")
+        var bad = wire; bad.codex?.windows = [RelayUsage.Window(weekly: true, used: 140, reset: nil)]; bad.claude?.observed = .infinity
+        check(bad.services.codex?.label(now: now) == "—" && bad.services.claude == nil, "malformed relayed values are rejected")
+        check(UsageRetention.label(local: nil, relayed: nil, now: now) == "—", "no source shows unknown")
+        check(UsageRetention.label(local: retained, relayed: replacement, now: now.addingTimeInterval(3621)) == "—", "both expired shows unknown")
+        check(UsageRetention.label(local: retained.label(now: now.addingTimeInterval(3601)) == "—" ? retained : nil,
+                                   relayed: ServiceUsage(observedAt: now.addingTimeInterval(3000), maxAge: 3600, windows: [week]),
+                                   now: now.addingTimeInterval(3601)) == "주 48%", "expired own value falls back to a fresh relayed value")
+        let current = Date()
+        let live = RelayUsage(codex: ServiceUsage(observedAt: current, maxAge: 3600, windows: [UsageWindow(weekly: true, usedPercent: 15)]),
+                              claude: ServiceUsage(observedAt: current, maxAge: 3600, windows: [short, UsageWindow(weekly: true, usedPercent: 41)]))
+        let relayMonitor = UsageMonitor()
+        check(relayMonitor.subtitle == "Codex — · Claude Code —", "monitor without any source")
+        relayMonitor.relayed = { live }
+        check(relayMonitor.subtitle == "Codex 주 85% · Claude Code 주 59%", "monitor shows the sharing Mac's usage")
+        check(relayMonitor.paseoStatus == "공유하는 Mac의 Paseo 사용량 표시", "status names the relayed source")
         let fixture = UsageMonitor()
         fixture.fixture = true
         fixture.tick(paused: false, smoke: true)

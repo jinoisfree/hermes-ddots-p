@@ -79,6 +79,8 @@ struct RelayFrame: Codable {
     var avatars: [String: Avatar]?
     var receipts: [Receipt]?
     var projects: [ThreadProject]?
+    var usage: RelayUsage?
+    var slack: SlackActivity?
     init(op: String) { self.op = op }
 
     static let maximumLine = 64 * 1024

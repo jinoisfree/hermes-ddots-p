@@ -4,9 +4,10 @@ import AppKit
 import Carbon
 
 /// What Hermes records about Slack threads: who is writing a reply now, and which threads it worked in lately.
-struct SlackActivity: Equatable {
-    struct Writer: Equatable { var profile: String; var name: String; var room: String; var thread: String; var since: Double }
-    struct Recent: Equatable { var room: String; var thread: String; var at: Double }
+/// Only room and thread identifiers, names and times, so the relay can carry it to a Mac without Hermes.
+struct SlackActivity: Equatable, Codable {
+    struct Writer: Equatable, Codable { var profile: String; var name: String; var room: String; var thread: String; var since: Double }
+    struct Recent: Equatable, Codable { var room: String; var thread: String; var at: Double }
     var writers: [Writer] = []
     var recent: [Recent] = []
 }

@@ -19,9 +19,10 @@ enum UsageSources {
             init(from decoder: Decoder) throws {
                 let fields = try decoder.container(keyedBy: CodingKeys.self)
                 type = try fields.decode(String.self, forKey: .type)
-                payload = type == "provider.usage.list.response" ? try fields.decodeIfPresent(Payload.self, forKey: .payload) : nil
+                payload = type == "provider.usage.list.response" || type == "status"
+                    ? try fields.decodeIfPresent(Payload.self, forKey: .payload) : nil
             }
-            struct Payload: Decodable { let requestId: String? }
+            struct Payload: Decodable { let requestId: String?; let status: String? }
         }
     }
     private final class PaseoSessionDelegate: NSObject, URLSessionTaskDelegate {
@@ -68,8 +69,8 @@ enum UsageSources {
                 }
                 try await socket.send(json(["type": "hello", "clientId": "ddots-usage", "clientType": "cli", "protocolVersion": 1,
                                             "auth": ["kind": "localCredential", "token": token]]))
-                try await socket.send(json(["type": "session", "message": ["type": "provider.usage.list.request", "requestId": requestID]]))
-                var bytes = 0
+                // Paseo closes the socket (4002) if a session message arrives before its hello reply.
+                var bytes = 0, ready = false
                 for _ in 0..<500 {
                     let data: Data
                     switch try await socket.receive() {
@@ -79,8 +80,15 @@ enum UsageSources {
                     }
                     bytes += data.count
                     guard bytes <= 64 * 1024 * 1024, !Task.isCancelled else { return }
-                    guard let envelope = try? JSONDecoder().decode(PaseoEnvelope.self, from: data),
-                          envelope.type == "session", envelope.message?.type == "provider.usage.list.response",
+                    guard let envelope = try? JSONDecoder().decode(PaseoEnvelope.self, from: data) else { continue }
+                    if !ready {
+                        guard envelope.type == "session", envelope.message?.type == "status",
+                              envelope.message?.payload?.status == "server_info" else { continue }
+                        ready = true
+                        try await socket.send(json(["type": "session", "message": ["type": "provider.usage.list.request", "requestId": requestID]]))
+                        continue
+                    }
+                    guard envelope.type == "session", envelope.message?.type == "provider.usage.list.response",
                           envelope.message?.payload?.requestId == requestID else { continue }
                     result.put(UsageParser.paseo(data)); return
                 }
@@ -103,11 +111,19 @@ final class UsageMonitor {
     private var nextPaseo = Date.distantPast
     var fixture = false
     var onChange: (() -> Void)?
+    /// Usage relayed by the Mac this one shares the conversation with, if any. Read on the main thread.
+    var relayed: (() -> RelayUsage?)?
 
+    private var labels: (codex: String, claude: String) {
+        let remote = relayed?()?.services
+        return (UsageRetention.label(local: paseoCodex, relayed: remote?.codex),
+                UsageRetention.label(local: paseoClaude, relayed: remote?.claude))
+    }
     var paseoStatus: String {
         if fixture { return "Paseo 사용 중" }
-        return UsageText.paseoStatus(at: lastAt, ok: lastOK,
-                                    codex: paseoCodex?.label() ?? "—", claude: paseoClaude?.label() ?? "—")
+        let own = (paseoCodex?.label() ?? "—", paseoClaude?.label() ?? "—"), shown = labels
+        if own.0 == "—", own.1 == "—", shown.codex != "—" || shown.claude != "—" { return "공유하는 Mac의 Paseo 사용량 표시" }
+        return UsageText.paseoStatus(at: lastAt, ok: lastOK, codex: own.0, claude: own.1)
     }
     var subtitle: String {
         if fixture {
@@ -116,7 +132,8 @@ final class UsageMonitor {
             let h = ServiceUsage(observedAt: now, maxAge: 1800, windows: [UsageWindow(weekly: true, usedPercent: 52)])
             return UsageText.subtitle(codex: c.label(now: now), claude: h.label(now: now))
         }
-        return UsageText.subtitle(codex: paseoCodex?.label() ?? "—", claude: paseoClaude?.label() ?? "—")
+        let shown = labels
+        return UsageText.subtitle(codex: shown.codex, claude: shown.claude)
     }
     func tick(paused: Bool, smoke: Bool) {
         let wasSuspended = suspended
