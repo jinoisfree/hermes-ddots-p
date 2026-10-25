@@ -971,6 +971,17 @@ def _register_report_status(ctx):
                       description='Repaint an approval report after its work is done.', emoji='🟢')
 
 
+def _register_prompt_probe(ctx):
+    """Sizes of each turn's first request by toolset, read by diagnosis_prompt_overhead_read."""
+    import importlib.util
+    from functools import partial
+    from hermes_constants import get_hermes_home
+    spec = importlib.util.spec_from_file_location('team_kit_prompt_probe', Path(__file__).with_name('prompt_probe.py'))
+    probe = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(probe)
+    ctx.register_middleware('llm_request', partial(probe.record, Path(get_hermes_home())))
+
+
 def register(ctx) -> None:
     global _PLUGIN_CONTEXT, _LEARNING, _MORNING_REPORT, _OWNER_PRESENTATION, _PROJECTS, _PROJECT_LEARNING, _PROJECT_ERROR, _PROMPT_GUIDANCE, _TOOL_GUIDANCE
     _PLUGIN_CONTEXT = ctx
@@ -1046,6 +1057,10 @@ def register(ctx) -> None:
             logger.exception("team-kit %s registration failed", name)
     ctx.flush()
     ctx = ctx.ctx
+    try:
+        _register_prompt_probe(ctx)
+    except Exception:
+        logger.exception('team-kit prompt probe registration failed')
     ctx.register_hook("pre_llm_call", _pre_llm_call)
     ctx.register_hook("pre_tool_call", _pre_tool_call)
     if _NOTION is not None:

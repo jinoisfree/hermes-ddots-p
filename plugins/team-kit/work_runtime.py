@@ -302,7 +302,7 @@ def _write_problem(tool_name, args, receipts, learning):
     # Rollback's own consumed/remaining journal governs retries, including old unknown receipts.
     if uncertain and (tool_name != "personal_work_rollback"
                       or any(r["tool"] != "personal_work_rollback" for r in uncertain)):
-        return {"action":"block", "message":"앞선 쓰기의 반영 여부가 불명확하다. 원본 조회로 상태를 확인하고 A에 보고한다. 자동 재실행하지 않는다."}
+        return {"action":"block", "message":"앞선 쓰기의 반영 여부가 불명확하다. 원본 조회로 상태를 확인한 뒤 A가 team_work(resolve_uncertain)로 정리한다. 자동 재실행하지 않는다."}
     return None  # Existing permission and business idempotency checks still run.
 
 
@@ -351,7 +351,7 @@ def observe(home, learning, *, session_id, turn_id="", tool_name, args, result, 
     if (tool_name == "google_calendar_color_set" and payload.get("ok") is False
             and payload.get("mutation_calls") == 0):
         outcome = "failure"  # No patch was attempted; retry after reauthentication is safe.
-    if (tool_name in {"contacts_direct_mutation", "task_reminders_sync", "personal_work_bundle"}
+    if (writing(tool_name, args or {})
             and payload.get("ok") is False
             and type(payload.get("mutation_calls")) is int and payload["mutation_calls"] == 0
             and (tool_name != "personal_work_bundle" or
@@ -442,6 +442,30 @@ def _start(home, args, src, turn, learning):
             "approval":"No approval is transferred. Use the existing tool approval path for every action."}
 
 
+def _resolve_uncertain(work, args, turn):
+    if turn["last_role"] not in {"interpret", "review"}:
+        raise ValueError("Only A may resolve an uncertain write after reading the original.")
+    receipt = next((r for r in work["receipts"] if r["tool_call_id"] == args.get("receipt_id")), None)
+    if not receipt or receipt["write"] is not True or receipt["status"] not in {"unknown", "partial"}:
+        raise ValueError("receipt_id must identify an unknown or partial write in this checkpoint.")
+    outcome = args.get("outcome")
+    if outcome not in {"applied", "not_applied"}:
+        raise ValueError("Resolve as applied or not_applied.")
+    identifiers = args.get("evidence_ids")
+    if not isinstance(identifiers, list) or not identifiers or any(not isinstance(i, str) for i in identifiers):
+        raise ValueError("At least one successful lookup receipt is required.")
+    valid = {r["tool_call_id"] for r in work["receipts"]
+             if r["write"] is False and r["status"] == "success" and r["at"] > receipt["at"]}
+    if any(i not in valid for i in identifiers):
+        raise ValueError("Evidence must be successful reads after the uncertain write in this checkpoint.")
+    resolution = {"outcome": outcome, "evidence_ids": list(dict.fromkeys(identifiers)),
+                  "summary": text(args.get("summary"), "summary", 1500), "at": time.time(),
+                  "model": turn.get("last_route", {}).get("model", INTERPRETER)}
+    receipt.update(status="success" if outcome == "applied" else "failure", resolved=resolution)
+    work["progress"].append({"action": "resolve_uncertain", "receipt_id": receipt["tool_call_id"], **resolution})
+    return receipt
+
+
 def handle(home, args, *, learning, session_id="", turn_id="", **_):
     try:
         if not turn_id:
@@ -467,7 +491,10 @@ def handle(home, args, *, learning, session_id="", turn_id="", **_):
                 raise ValueError("This work belongs to another project thread.")
             if action == "read":
                 return json.dumps({"ok":True, "checkpoint":public(work), "hint":"Before resume, use common_work_get/kanban_show to refresh every referenced original. Past approvals do not transfer."}, ensure_ascii=False)
-            if action == "resume":
+            resolved = None
+            if action == "resolve_uncertain":
+                resolved = _resolve_uncertain(work, args, turn)
+            elif action == "resume":
                 learning.validate_quote(src, args.get("user_said", ""))
                 if turn["last_role"] not in {"interpret", "review"} or work["status"] == "completed":
                     raise ValueError("A can resume only unfinished work after interpreting the new owner request.")
@@ -511,8 +538,13 @@ def handle(home, args, *, learning, session_id="", turn_id="", **_):
                                   "model":INTERPRETER, "tool_success_is_task_success":False}
                 turn["phase"] = "interpret"
             else:
-                raise ValueError("Use start/list/read/resume/checkpoint/review/finish/metrics.")
+                raise ValueError("Use start/list/read/resume/checkpoint/review/finish/resolve_uncertain/metrics.")
             save(home, work, learning)
+            if resolved is not None:
+                # A's direct-write guard reads observations, B's guard reads receipts.
+                for observation in turn["observations"]:
+                    if observation["tool_call_id"] == resolved["tool_call_id"]:
+                        observation.update(status=resolved["status"], resolved=copy.deepcopy(resolved["resolved"]))
         return json.dumps({"ok":True, "checkpoint":public(work)}, ensure_ascii=False)
     except (OSError, ValueError, TypeError, KeyError) as exc:
         return json.dumps({"ok":False, "error":str(exc)}, ensure_ascii=False)
@@ -621,10 +653,10 @@ def ended(home, learning, *, turn_id="", **_):
             save(home, work, learning)
 
 
-SCHEMA = {"name":"team_work", "description":"Handoff a verified owner request from interpretation to execution, checkpoint actual results, review, and resume existing work. Never transfers approval or executes business actions.",
+SCHEMA = {"name":"team_work", "description":"Handoff a verified owner request from interpretation to execution, checkpoint actual results, review, and resume existing work. A alone may resolve_uncertain with receipt_id, applied/not_applied, summary and successful read evidence_ids from after that write in the same case. Never transfers approval or executes business actions.",
           "parameters":{"type":"object", "properties":{
-              "action":{"type":"string", "enum":["start","list","read","resume","checkpoint","review","finish","metrics"]},
-              "case_id":{"type":"string"}, "user_said":{"type":"string"},
+              "action":{"type":"string", "enum":["start","list","read","resume","checkpoint","review","finish","resolve_uncertain","metrics"]},
+              "receipt_id":{"type":"string"}, "case_id":{"type":"string"}, "user_said":{"type":"string"},
               "goal":{"type":"string","maxLength":500}, "scope":{"type":"string","maxLength":1000},
               "plan":{"type":"array","items":{"type":"string"},"maxItems":12},
               "done_when":{"type":"array","items":{"type":"string"},"maxItems":8},
@@ -632,5 +664,5 @@ SCHEMA = {"name":"team_work", "description":"Handoff a verified owner request fr
               "difficulty":{"type":"string","enum":["simple","normal","complex"]},
               "summary":{"type":"string","maxLength":1500}, "next_step":{"type":"string","maxLength":500},
               "evidence_ids":{"type":"array","items":{"type":"string"}},
-              "outcome":{"type":"string","enum":["completed","waiting","blocked"]}},
+              "outcome":{"type":"string","enum":["completed","waiting","blocked","applied","not_applied"]}},
               "required":["action"],"additionalProperties":False}}

@@ -926,9 +926,9 @@ def _personal_direct_llm_request(request: dict[str, Any], **context: Any) -> dic
         "The linked-work watcher reads these: the owner ticking ☐→☑ in the memo completes the Notion to-do and reminder of that name, "
         "and changing the 다음 마감 date moves the Notion 다음 마감, reminder due date and calendar event; changes elsewhere tick and "
         "update the memo the same way. Keep these rows on every update. "
-        "Task marks, their entire row and child details are blue, overriding other row colors. Use {fmt:blue} or {fmt:blue,u} for other task-related text. Optional label prefixes {fmt:red}, {fmt:gray}, {fmt:u}, {fmt:red,u}, {fmt:gray,u} style the row; red means deadline/caution, gray means missing evidence. "
+        "Task marks, their entire row and child details are blue, overriding other row colors. Use {fmt:blue} or {fmt:blue,u} for other task-related text. Put the prefix after the section colon, before the label: - 확인 필요: {fmt:gray} 수익 모델 | 값. Optional label prefixes {fmt:red}, {fmt:gray}, {fmt:u}, {fmt:red,u}, {fmt:gray,u} style the row; red means deadline/caution, gray means missing evidence. "
         "Use underline for only one or two must-check rows, and '  - <label> | <value>' for details below the preceding row. "
-        "Use one fact per line; the renderer bolds labels/dates. A leading backslash escapes literal label prefixes; {fmt:plain} disables automatic deadline/caution red. "
+        "Example: - 확인 필요: {fmt:gray} 수익 모델 | 값 (after the section colon, before the label). Use one fact per line; the renderer bolds labels/dates. A leading backslash escapes literal label prefixes; {fmt:plain} disables automatic deadline/caution red. "
         "Both Notes folders use headings and lists; preview_summary is the first body line below the title in green and summarizes the whole note. "
         "On update keep task markers and child rows, changing to [x] only when completion is evidenced. A work block is a meaningful cluster whose facts must be read "
         "together, such as 배송 정보, 행사 일정, 확인 및 결정, or 운영 방식. Never split one workflow into global "
@@ -1284,6 +1284,13 @@ def _tool_execution_guard(tool_name: str, args: dict[str, Any], next_call, **con
             call_args['approved'] = True
         call_args.pop('request_plan', None)
         args = call_args
+    note_gate = _notes_reminders_button_action(tool_name, call_args)
+    if note_gate == "block":
+        return _error("PERSONAL_SCOPE_OWNER_CHAT_REQUIRED: 메모·미리알림 쓰기는 인증된 소유자 대화에서만 가능하다.", mutation_calls=0)
+    if note_gate == "approve":
+        # The dispatcher runs this wrapper only after the approval gate succeeds.
+        # Internal direct handlers still retain their preview safety check.
+        args = call_args = {**call_args, "approved": True}
     if tool_name == "terminal" and selected_skills.enabled(sys.modules[__name__]):
         try:
             args = selected_skills.wrap(sys.modules[__name__], call_args)
@@ -1449,8 +1456,62 @@ def _gmail_mutation_plan(args: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def _notes_reminders_button_action(tool_name: str, args: dict[str, Any]) -> str | None:
+    """Shared gate/execution classification; internal choice and recovery actions are excluded."""
+    actions = {
+        "apple_notes_direct_mutation": {"create", "update", "move", "delete"},
+        "reminders_direct_mutation": {"create", "update", "complete", "reopen", "delete"},
+    }
+    action = str(args.get("action") or "").strip().lower()
+    if action not in actions.get(tool_name, set()):
+        return None
+    if _personal_role_problem(tool_name, args):
+        return "block"
+    profile = personal_roles.profile(sys.modules[__name__])
+    if profile != _personal_executor() and not (profile == LEAD_PROFILE
+            and personal_scopes.config(sys.modules[__name__]) is not None):
+        return None
+    if (personal_scopes.background(sys.modules[__name__])
+            or get_session_env("HERMES_SESSION_PLATFORM", "").strip().lower() not in {"slack", "photon"}
+            or not get_session_env("HERMES_SESSION_CHAT_ID", "")
+            or not get_session_env("HERMES_SESSION_USER_ID", "")):
+        return "block"
+    return None if action == "create" and _owner_chat_create() else "approve"
+
+
 def _one_button_plan(tool_name: str, action: str, args: dict[str, Any]) -> str:
-    """The readable plan shown above the single 승인·거절 button for a mail or calendar write."""
+    """The readable plan shown above a single 승인·거절 button for a personal write."""
+    if tool_name == "apple_notes_direct_mutation":
+        titles = {"create": "만들기", "update": "수정", "move": "이동", "delete": "삭제"}
+        lines = ["승인하면 아래 메모 변경을 실행합니다.", f"동작: {titles[action]}",
+                 f"폴더: {args.get('folder') or '기존 폴더 유지'}",
+                 f"제목: {args.get('title') or '기존 제목 유지'}",
+                 f"메모 ID: …{str(args.get('note_id') or '')[-24:]}"]
+        if args.get("preview_summary"):
+            lines.append("한줄요약: " + str(args["preview_summary"]))
+        if args.get("summary"):
+            lines.append("적용할 요약 전체:\n" + str(args["summary"]))
+        if action in {"create", "update"}:
+            lines.append(f"원문 {len(str(args['original_text']))}자 보존" if args.get("original_text")
+                         else "기존 원문 유지")
+        for key, label in {"rename_title": "제목 변경", "mixed_mode": "첨부 처리 방식",
+                           "remove_existing": "제거할 기존 첨부", "attachment_analysis": "첨부 분석",
+                           "append_text": "추가할 글", "common_id": "연결 업무 ID"}.items():
+            if key in args:
+                lines.append(f"{label}: {args[key]}")
+        if args.get("attachments"):
+            lines.append("첨부: " + ", ".join(Path(str(p)).name for p in args["attachments"]))
+        return "\n".join(lines)
+    if tool_name == "reminders_direct_mutation":
+        titles = {"create": "만들기", "update": "수정", "complete": "완료", "reopen": "미완료로 변경", "delete": "삭제"}
+        lines = ["승인하면 아래 미리알림 변경을 실행합니다.", f"동작: {titles[action]}",
+                 f"미리알림 ID: {args.get('reminder_id') or ''}"]
+        labels = {"title": "제목", "list": "목록", "due": "마감", "alarm": "알림 시각",
+                  "notes": "메모", "url": "링크", "repeat": "반복", "priority": "우선순위",
+                  "clear_due": "마감 지우기", "clear_alarm": "알림 지우기", "clear_url": "링크 지우기",
+                  "clear_repeat": "반복 지우기", "common_id": "연결 업무 ID"}
+        lines.extend(f"{label}: {args[key]}" for key, label in labels.items() if key in args)
+        return "\n".join(lines)
     if tool_name == "contacts_direct_mutation":
         titles = {'update': '연락처 수정', 'delete': '연락처 삭제', 'group_rename': '그룹 이름 변경',
                   'group_delete': '그룹 삭제(멤버 연락처 유지)', 'group_remove': '그룹에서 연락처 제외'}
@@ -1660,6 +1721,22 @@ def _personal_mutation_approval_single(
             "message": _one_button_plan(tool_name, action, args),
             "rule_key": f"personal-mutation:{tool_name}:{digest}:{tool_call_id or turn_id or digest}",
         }
+    # 2026-10-25: ordinary Notes/Reminders edits use one button, never a text-preview round trip.
+    note_gate = _notes_reminders_button_action(tool_name, args)
+    if note_gate == "block":
+        return {"action": "block", "message": (
+            "PERSONAL_SCOPE_OWNER_CHAT_REQUIRED: 메모·미리알림 쓰기는 인증된 소유자 대화에서만 가능하다.")}
+    if note_gate == "approve":
+        exact_payload = {key: value for key, value in args.items() if key != "approved"}
+        digest = hashlib.sha256(json.dumps(
+            exact_payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+        ).encode()).hexdigest()[:16]
+        return {"action": "approve", "message": _one_button_plan(tool_name, action, args),
+                "rule_key": f"personal-mutation:{tool_name}:{digest}:{tool_call_id or turn_id or digest}"}
+    # Keep create exemptions and internal choice/recovery approval behavior unchanged.
+    if (tool_name in {"reminders_direct_mutation", "apple_notes_direct_mutation"}
+            and action == "create" and _owner_chat_create()):
+        return None
     if args.get("approved") is not True:
         return None
     mutation = tool_name in {"reminders_direct_mutation", "apple_notes_direct_mutation"}
@@ -2075,8 +2152,9 @@ REMINDERS_DIRECT_MUTATION_SCHEMA = {
     "name": "reminders_direct_mutation",
     "description": (
         "Create, update, complete, reopen, or delete one Apple Reminder through remindctl. "
-        "Always call once without approved to obtain a preview, then call with approved=true only "
-        "after a separate user approval of that exact preview."
+        "A create the owner asked for in chat runs at once without preview or approval; report the result. "
+        "Call only once. For edits, completion and deletion the system shows one approval/rejection button and executes after approval. "
+        "Do not ask for approval in text or call again with approved=true."
     ),
     "parameters": {
         "type": "object",
@@ -2111,6 +2189,9 @@ APPLE_NOTES_DIRECT_MUTATION_SCHEMA = {
     "name": "apple_notes_direct_mutation",
     "description": (
         "Create, update, move, or delete one Apple Note through Notes.app automation. "
+        "A create the owner asked for in chat runs at once without preview or approval; report the result. "
+        "Call only once. For edits, moves and deletion the system shows one approval/rejection button and executes after approval. "
+        "Do not ask for approval in text or call again with approved=true. "
         "Create/update require preview_summary and summary. For a title change read the note first, repeat its entire existing summary unchanged, pass rename_title=true and omit original_text to reuse existing source."
     ),
     "parameters": {
@@ -2129,7 +2210,7 @@ APPLE_NOTES_DIRECT_MUTATION_SCHEMA = {
                 "maxLength": 140,
                 "description": "One Korean sentence summarizing the whole note, shown as the first body line below the title in green and in the Notes list preview.",
             },
-            "summary": {"type": "string", "description": "Required Korean summary for create/update: '- 구역: 라벨 | 값'; task prefixes [ ]/[x] (our tasks/source-confirmed completion only), optional {fmt:red|gray|blue|u|red,u|gray,u|blue,u|plain} prefix before label, '  - 라벨 | 값' child lines. Task marks/rows/child details are blue (overrides other colors); blue=related task text, red=other deadline/caution, gray=other missing evidence, underline=1-2 must-check rows. Labels/dates are bold automatically. Escape literal prefixes with a leading backslash. One fact per line; preserve every existing line, task marker and child on update, including title changes."},
+            "summary": {"type": "string", "description": "Required Korean summary for create/update: '- 구역: 라벨 | 값'; task prefixes [ ]/[x] (our tasks/source-confirmed completion only), optional {fmt:red|gray|blue|u|red,u|gray,u|blue,u|plain} prefix after the section colon, before the label (example: - 확인 필요: {fmt:gray} 수익 모델 | 값), '  - 라벨 | 값' child lines. Task marks/rows/child details are blue (overrides other colors); blue=related task text, red=other deadline/caution, gray=other missing evidence, underline=1-2 must-check rows. Labels/dates are bold automatically. Escape literal prefixes with a leading backslash. One fact per line; preserve every existing line, task marker and child on update, including title changes."},
             "original_text": {
                 "type": "string",
                 "description": "User-provided source content preserved in its original wording and order.",
@@ -2299,13 +2380,14 @@ GMAIL_DIRECT_SCHEMA = {
 
 
 def _personal_owner_error(tool_name: str) -> str | None:
+    fields = {"mutation_calls": 0} if tool_name.endswith("_mutation") else {}
     profile = (
         get_session_env("HERMES_SESSION_PROFILE", "")
         or os.environ.get("HERMES_PROFILE") or _home_profile()
         or "default"
     ).strip()
     if problem := _personal_role_problem(tool_name, {} if tool_name != 'gmail_direct' else {'action': 'read'}):
-        return _error(problem)
+        return _error(problem, **fields)
     readers = {PERSONAL_PROFILE, _personal_executor()}
     if profile == 'work-assistant' and tool_name == 'messages_direct_lookup':
         return _error('Messages lookup remains with the read-only oversight profile.')
@@ -2314,7 +2396,7 @@ def _personal_owner_error(tool_name: str) -> str | None:
         return None
     if profile == _personal_executor() or (profile in readers and tool_name in personal_roles.PERSONAL_READS):
         return None
-    return _error(f"{tool_name} is restricted to the {_personal_executor()} profile")
+    return _error(f"{tool_name} is restricted to the {_personal_executor()} profile", **fields)
 
 
 def _direct_receipt(work_type: str, authority: str, items: list[dict[str, Any]]) -> str:
@@ -3673,6 +3755,12 @@ def _apple_notes_direct_lookup(args: dict[str, Any], **context: Any) -> str:
     return json.dumps(payload, ensure_ascii=False)
 
 
+def _owner_chat_create() -> bool:
+    """A create the owner asked for in chat runs without approval (2026-10-25 사용자 결정)."""
+    return (get_session_env("HERMES_SESSION_PLATFORM", "").strip().lower() in {"slack", "photon"}
+            and not personal_scopes.background(sys.modules[__name__]))
+
+
 def _mutation_preview(authority: str, action: str, target: dict[str, Any]) -> str:
     preview_digest = _remember_pending_personal_owner(f"{authority}:{action}", target)
     return json.dumps({
@@ -3836,16 +3924,16 @@ def _reminders_direct_mutation(args: dict[str, Any], **context: Any) -> str:
         return error
     action = str(args.get("action") or "").strip().lower()
     if action not in {"create", "update", "complete", "reopen", "delete"}:
-        return _error("invalid reminders mutation action")
+        return _error("invalid reminders mutation action", mutation_calls=0)
     reminder_id = str(args.get("reminder_id") or "").strip()
     title = str(args.get("title") or "").strip()
     list_name = str(args.get("list") or "").strip()
     if action == "create" and not list_name:
         list_name = DEFAULT_REMINDERS_LIST
     if action == "create" and not title:
-        return _error("title is required for reminder creation")
+        return _error("title is required for reminder creation", mutation_calls=0)
     if action != "create" and not reminder_id:
-        return _error("reminder_id is required for this action")
+        return _error("reminder_id is required for this action", mutation_calls=0)
     preview = {key: value for key, value in {
         "reminder_id": reminder_id or None,
         "title": title or None,
@@ -3858,7 +3946,7 @@ def _reminders_direct_mutation(args: dict[str, Any], **context: Any) -> str:
         "priority": str(args.get("priority") or "").strip() or None,
         "common_id": str(args.get("common_id") or "").strip() or None,
     }.items() if value is not None}
-    if not bool(args.get("approved")):
+    if not bool(args.get("approved")) and not (action == "create" and _owner_chat_create()):
         return _mutation_preview("Apple Reminders via remindctl", action, preview)
 
     runner = context.get("runner") or subprocess.run
@@ -3873,7 +3961,7 @@ def _reminders_direct_mutation(args: dict[str, Any], **context: Any) -> str:
         if current is None:
             # Writing now would replace notes we could not read: stop instead of losing them.
             return _error("REMINDERS_CURRENT_NOTES_UNAVAILABLE: the reminder's existing notes could "
-                          "not be read, so nothing was changed; retry later")
+                          "not be read, so nothing was changed; retry later", mutation_calls=0)
         if previous.strip() and _squash(previous) not in _squash(notes_value):
             args = {**args, "notes": f"{previous.rstrip()}\n\n[{_seoul_stamp()} 추가]\n{notes_value.strip()}"}
     command = ["remindctl"]
@@ -4822,7 +4910,7 @@ def _apple_notes_direct_mutation(args: dict[str, Any], **context: Any) -> str:
     if action == "apply_choice":
         return _apply_note_choice(args, context.get("runner") or subprocess.run)
     if action not in {"create", "update", "move", "delete"}:
-        return _error("invalid Apple Notes mutation action")
+        return _error("invalid Apple Notes mutation action", mutation_calls=0)
     note_id = str(args.get("note_id") or "").strip()
     folder = str(args.get("folder") or "").strip()
     if action == "create" and (not folder or folder == INBOX_NOTES_FOLDER):
@@ -4831,48 +4919,50 @@ def _apple_notes_direct_mutation(args: dict[str, Any], **context: Any) -> str:
     preview_summary = str(args.get("preview_summary") or "").strip()
     summary = str(args.get("summary") or "").strip()
     original_text = str(args.get("original_text") or "")
+    if action in {"create", "update"} and (problem := notes_format.validate_summary(summary)):
+        return _error(problem, mutation_calls=0)
     raw_attachments = args.get("attachments", [])
     attachments: list[str] = []
     if raw_attachments is not None:
         if not isinstance(raw_attachments, list) or len(raw_attachments) > 10:
-            return _error("attachments must be an array of at most 10 absolute file paths")
+            return _error("attachments must be an array of at most 10 absolute file paths", mutation_calls=0)
         for raw_path in raw_attachments:
             if not isinstance(raw_path, str) or not raw_path.strip():
-                return _error("each attachment must be a non-empty absolute file path")
+                return _error("each attachment must be a non-empty absolute file path", mutation_calls=0)
             path = Path(raw_path).expanduser()
             if not path.is_absolute():
-                return _error("each attachment path must be absolute")
+                return _error("each attachment path must be absolute", mutation_calls=0)
             try:
                 resolved = path.resolve(strict=True)
             except OSError:
-                return _error(f"attachment not found: {path}")
+                return _error(f"attachment not found: {path}", mutation_calls=0)
             if not resolved.is_file():
-                return _error(f"attachment is not a file: {resolved}")
+                return _error(f"attachment is not a file: {resolved}", mutation_calls=0)
             attachments.append(str(resolved))
     if action in {"create", "update"} and attachments:
         attachments = _stable_note_files(attachments)
     body = _structured_note_body(summary, original_text, preview_summary) if action in {"create", "update"} else ""
     if action != "create" and not note_id:
-        return _error("note_id is required for this action")
+        return _error("note_id is required for this action", mutation_calls=0)
     if action in {"create", "update"} and not title:
-        return _error("title is required for note creation or update")
+        return _error("title is required for note creation or update", mutation_calls=0)
     if action == "update" and args.get("rename_title") is True and (not preview_summary or not summary):
-        return _error(_NOTE_RENAME_SUMMARY_REQUIRED)
+        return _error(_NOTE_RENAME_SUMMARY_REQUIRED, mutation_calls=0)
     if action in {"create", "update"} and (not preview_summary or not summary or (not original_text.strip() and not _notes_reuse_source(action, args))):
-        return _error("preview_summary, summary, and original_text are required for note creation or update")
+        return _error("preview_summary, summary, and original_text are required for note creation or update", mutation_calls=0)
     if action in {"create", "update"} and ("\n" in preview_summary or len(preview_summary) > 140):
-        return _error("preview_summary must be one line and at most 140 characters")
+        return _error("preview_summary must be one line and at most 140 characters", mutation_calls=0)
     if action not in {"create", "update"} and attachments:
-        return _error("attachments are supported only for note creation or update")
+        return _error("attachments are supported only for note creation or update", mutation_calls=0)
     if action == "move" and not folder:
-        return _error("folder is required for note move")
+        return _error("folder is required for note move", mutation_calls=0)
     preview = {key: value for key, value in {
         "note_id": note_id or None, "folder": folder or None,
         "title": title or None, "body": body if action in {"create", "update"} else None,
         "attachments": attachments or None,
         "common_id": str(args.get("common_id") or "").strip() or None,
     }.items() if value is not None}
-    if not bool(args.get("approved")):
+    if not bool(args.get("approved")) and not (action == "create" and _owner_chat_create()):
         return _mutation_preview("Apple Notes", action, preview)
 
     runner = context.get("runner") or subprocess.run
@@ -4889,7 +4979,7 @@ def _apple_notes_direct_mutation(args: dict[str, Any], **context: Any) -> str:
                 note_id, attachments, original_text, runner, reuse_source=_notes_reuse_source(action, args),
             )
         except ValueError as exc:
-            return _error(str(exc))
+            return _error(str(exc), mutation_calls=0)
         if not args.get("rename_title"):
             # Rule: the title changes only when the user asked (rename_title=true).
             current_title = (_note_plaintext(note_id, runner).splitlines() or [""])[0].strip()
@@ -4906,7 +4996,7 @@ def _apple_notes_direct_mutation(args: dict[str, Any], **context: Any) -> str:
             attachments, attachments_skipped = _select_note_attachments(
                 attachments, _stable_note_files(existing_files))
         except NoteAttachmentsNotPreserved as exc:
-            return _error(str(exc))
+            return _error(str(exc), mutation_calls=0)
     summary_blocks_removed = None
     before_verification = None
     if action == "update" and not args.get("_rollback"):
@@ -4927,7 +5017,7 @@ def _apple_notes_direct_mutation(args: dict[str, Any], **context: Any) -> str:
             # Attachments the user added by hand have no saved originals: copy them out of Notes.
             originals = _export_note_attachments(note_id, runner, str(before_verification.get("body_html") or ""))
             if originals is None:
-                return _error("APPLE_NOTES_REBUILD_ORIGINAL_FILES_REQUIRED")
+                return _error("APPLE_NOTES_REBUILD_ORIGINAL_FILES_REQUIRED", mutation_calls=0)
             added = [p for p in attachments if p not in existing_files]
             existing_files, attachments, exported = originals, [*originals, *added], True
             removed_attachments = _drop_existing_note_files(attachments, existing_files, args.get("remove_existing"))
@@ -4940,14 +5030,14 @@ def _apple_notes_direct_mutation(args: dict[str, Any], **context: Any) -> str:
                 shown > keeping and args.get("remove_existing") not in {"images", "all"}):
             # The rewrite would drop photos that cannot be put back.
             return _error("APPLE_NOTES_REBUILD_SNAPSHOT_REQUIRED" if not isinstance(before_verification.get("attachment_names"), list)
-                          else "APPLE_NOTES_PHOTOS_NOT_PRESERVED: 메모의 사진 원본을 확보하지 못해 고치지 않았다.")
+                          else "APPLE_NOTES_PHOTOS_NOT_PRESERVED: 메모의 사진 원본을 확보하지 못해 고치지 않았다.", mutation_calls=0)
     mixed = any(_is_note_image(p) for p in attachments) and any(not _is_note_image(p) for p in attachments)
     if action == "update" and not args.get("_rollback") and before_verification and mixed:
         # Rewriting a note that keeps photos and documents drops the documents (Notes scripting limit).
         mode = str(args.get("mixed_mode") or "").strip()
         if mode not in {"rebuild", "screen"}:
             return json.dumps({
-                "ok": False, "error": "APPLE_NOTES_MIXED_NEEDS_CHOICE", "needs_choice": True,
+                "ok": False, "error": "APPLE_NOTES_MIXED_NEEDS_CHOICE", "needs_choice": True, "mutation_calls": 0,
                 "note_id": note_id, "files": [Path(p).name for p in attachments],
                 "options": {
                     "rebuild": "새 메모로 다시 만들어 고침. 내용·표·첨부는 유지, 메모 ID·링크·만든 날짜가 바뀌고 공유 중이면 공유가 풀림.",
@@ -4963,7 +5053,7 @@ def _apple_notes_direct_mutation(args: dict[str, Any], **context: Any) -> str:
         if not exported:
             originals = _export_note_attachments(note_id, runner, str(before_verification.get("body_html") or ""))
             if originals is None:
-                return _error("APPLE_NOTES_REBUILD_ORIGINAL_FILES_REQUIRED")
+                return _error("APPLE_NOTES_REBUILD_ORIGINAL_FILES_REQUIRED", mutation_calls=0)
             added = [p for p in attachments if p not in existing_files]
             existing_files, exported = originals, True
             attachments = [p for p in [*originals, *added] if p not in _drop_existing_note_files(
@@ -5959,32 +6049,33 @@ def _calendar_direct_mutation(args: dict[str, Any], **context: Any) -> str:
         return error
     action = str(args.get("action") or "").strip().lower()
     if action not in {"create", "update", "delete"}:
-        return _error("invalid calendar mutation action")
+        return _error("invalid calendar mutation action", mutation_calls=0)
     args = dict(args)
     if error := _normalize_calendar_dates(args, action):
-        return _error(error)
+        return _error(error, mutation_calls=0)
     if error := _calendar_alarm_error(args, action):
-        return _error(error)
+        return _error(error, mutation_calls=0)
     if "_restore_alarms" in args and not args.get("_rollback"):
-        return _error("alarm snapshots are reserved for rollback")
+        return _error("alarm snapshots are reserved for rollback", mutation_calls=0)
     if error := _calendar_identity_error(args, action):
-        return _error(error)
+        return _error(error, mutation_calls=0)
     event_id = str(args.get("event_id") or "").strip()
     title = str(args.get("title") or "").strip()
     start = str(args.get("start") or "").strip()
     end = str(args.get("end") or "").strip()
     if action == "create" and not all((title, start, end)):
-        return _error("title, start, and end are required for calendar creation")
+        return _error("title, start, and end are required for calendar creation", mutation_calls=0)
     if action != "create" and not event_id:
-        return _error("event_id is required for this action")
+        return _error("event_id is required for this action", mutation_calls=0)
     span = str(args.get("span") or "this").strip().lower()
     if span not in {"this", "future"}:
-        return _error("span must be this or future")
+        return _error("span must be this or future", mutation_calls=0)
 
     source = Path(__file__).with_name("eventkit_calendar_mutation.swift")
     cache_root = _calendar_cache_root(PERSONAL_PROFILE)
     binary = cache_root / "eventkit_calendar_mutation-v1"
     runner = context.get("runner") or subprocess.run
+    write_started = False
     try:
         if not binary.exists() or binary.stat().st_mtime_ns < source.stat().st_mtime_ns:
             compiled = runner(
@@ -5992,17 +6083,19 @@ def _calendar_direct_mutation(args: dict[str, Any], **context: Any) -> str:
                 capture_output=True, text=True, timeout=60, check=False,
             )
             if compiled.returncode != 0:
-                return _error("TE_CALENDAR_MUTATION_EXECUTOR_COMPILE_FAILED")
+                return _error("TE_CALENDAR_MUTATION_EXECUTOR_COMPILE_FAILED", mutation_calls=0)
         payload = dict(args)
         payload.pop("approved", None)
         payload.pop("common_id", None)
         payload.pop("_skip_common_work", None)
+        write_started = True
         proc = runner(
             [str(binary), json.dumps(payload, ensure_ascii=False)],
             capture_output=True, text=True, timeout=30, check=False,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
-        return _error(f"CALENDAR_NATIVE_UNAVAILABLE:{type(exc).__name__}")
+        return _error(f"CALENDAR_NATIVE_UNAVAILABLE:{type(exc).__name__}",
+                      **({} if write_started else {"mutation_calls": 0}))
     return _native_mutation_result(
         "EventKit Calendar", action, event_id or None, proc,
         common_work_domain="" if args.get("_skip_common_work") else "calendar",

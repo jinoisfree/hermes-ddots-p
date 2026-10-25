@@ -233,7 +233,7 @@ struct ChatView: View {
                 Button { model.closeSearch() } label: { Image(systemName: "xmark.circle.fill") }.buttonStyle(.plain)
             } else {
                 HStack(spacing: 0) {
-                    Text(Ddots.enabled && slack.connected ? Ddots.title : model.title).font(.system(size: ChatMetrics.nameFont, weight: .semibold)).lineLimit(1)
+                    Text(Ddots.title).font(.system(size: ChatMetrics.nameFont, weight: .semibold)).lineLimit(1)
                     Spacer(minLength: 0)
                 }.frame(minHeight: 22).overlay(ChatDragRegion(model: model).padding(.vertical, -9))
                 // With ddots on and Slack connected, the rooms are the whole of the window and there is nothing to switch between.

@@ -76,6 +76,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     var motionTrace: MotionTrace?
     private weak var petMenuItem: NSMenuItem?
     private weak var pauseMenuItem: NSMenuItem?
+    private weak var vaultMenuItem: NSMenuItem?
     var paneSnapshotMS: Double = 0
     var paneSnapshotUsed = false
     private var paneLayoutDeferred = false
@@ -1222,7 +1223,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         addMenu("업데이트 연결…", #selector(connectAppUpdate), to: links)
         links.addItem(.separator())
         addMenu("승인 알림 연결 안내", #selector(showHooksHelp), to: links)
-        let vault = addSubmenu("새우튀김 보관함")
+        let vault = addSubmenu("새우튀김 보관함"); vaultMenuItem = menu.items.last
+        vaultMenuItem?.isHidden = ShrimpVault.defaultBot.isEmpty
         addMenu("보관함 폴더 지정…", #selector(configureShrimpVault), to: vault)
         addMenu("보관함 저장 뒤 Slack 원본 삭제", #selector(toggleShrimpOriginalDeletion(_:)), to: vault)
         vault.items.last?.state = (UserDefaults.standard.object(forKey: ShrimpReceipts.setting) == nil || UserDefaults.standard.bool(forKey: ShrimpReceipts.setting)) ? .on : .off
@@ -2214,5 +2216,7 @@ extension AppDelegate: NSMenuDelegate {
         guard menu === self.menu else { return }
         petMenuItem?.title = panel.isVisible ? "펫 숨기기" : "펫 보이기"
         pauseMenuItem?.title = model.paused ? "다시 시작" : "잠시 쉬기"
+        // The vault belongs to 새우튀김; an organization without one (the public edition) has no such menu.
+        vaultMenuItem?.isHidden = ShrimpVault.defaultBot.isEmpty
     }
 }
