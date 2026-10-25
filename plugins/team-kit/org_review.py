@@ -939,13 +939,16 @@ def autofix_thread_reply(home, event, source, thread):
     if str(getattr(source, 'user_id', '')) != R.owner(home):
         return None
     action = plain(str(getattr(event, 'text', '') or ''))
-    if action not in ('확인', '롤백'):
-        return None
     fix = autofix()
+    if action not in ('확인', '롤백', *fix.CAP_CHOICES):
+        return None
     key = fix.incident_thread(home, str(getattr(source, 'chat_id', '')), thread)
     if not key:
         return None
-    reply = fix.request(home, key, action, str(getattr(event, 'message_id', '') or time.time()))
+    if action in fix.CAP_CHOICES:
+        reply = fix.decide_cap(home, key, action)
+    else:
+        reply = fix.request(home, key, action, str(getattr(event, 'message_id', '') or time.time()))
     job = fix.load(home)['jobs'][key]
     if reply:
         fix.say(home, job, reply)

@@ -37,6 +37,21 @@ def rich(value):
     return [{'type': 'text', 'text': {'content': value[i:i+1900]}} for i in range(0, len(value), 1900)]
 
 
+def stable_notion(value):
+    """Notion returns a fresh request_id and freshly signed file URLs on every read.
+
+    Drop the request_id and keep only the file path (its identity) so an unchanged page keeps
+    one revision; otherwise every pre-write check sees a change and the write never runs.
+    """
+    if isinstance(value, dict):
+        if set(value) == {'url', 'expiry_time'}:
+            return {'url': str(value['url']).split('?', 1)[0]}
+        return {key: stable_notion(item) for key, item in value.items() if key != 'request_id'}
+    if isinstance(value, list):
+        return [stable_notion(item) for item in value]
+    return value
+
+
 class Sources:
     def __init__(self, home, *, reader=None, notes=None, calendar=None):
         import notion_completion_sync as sync
@@ -132,7 +147,7 @@ class Sources:
             result = {'content': parsed, 'raw': raw, 'closed': False}
         else:
             raise source_lookup.SourceReadError('unsupported', 'unsupported_work_source')
-        result['revision'] = content.digest(result['raw'])
+        result['revision'] = content.digest(stable_notion(result['raw']) if kind == 'notion' else result['raw'])
         return result
 
     def preflight(self, kind, identifier, before, desired):

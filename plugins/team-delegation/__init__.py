@@ -7381,6 +7381,14 @@ def _inverse_bundle_operation(
     if action in {"update", "move"}:
         rollback_arguments = dict(operation.get("rollback_arguments") or {})
         rollback_arguments.update(identity_fields)
+        if domain == "calendar":
+            # Editing a recurring series with span=future splits it and EventKit returns a new
+            # calendarItemIdentifier; the pre-change id no longer owns the edited occurrence.
+            new_id = str(calendar_after.get("calendarItemIdentifier") or "").strip()
+            if new_id and new_id != str(rollback_arguments.get("event_id") or "").strip():
+                rollback_arguments["event_id"] = new_id
+            if "span" not in rollback_arguments and operation["arguments"].get("span"):
+                rollback_arguments["span"] = operation["arguments"]["span"]
         if domain == "calendar" and ("alarms" in operation["arguments"] or operation["arguments"].get("clear_alarms")):
             before = (receipt.get("result") or {}).get("before") or {}
             if "alarmDetails" not in before:

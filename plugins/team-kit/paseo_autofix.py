@@ -413,8 +413,23 @@ def incident_item(record, fix_key, record_path, previous):
     }
 
 
+CAP_CHOICES = ('오늘 계속 고쳐', '이것만 고쳐', '내일로')
+WAITING_OWNER = 'awaiting_owner'
+
+
+def cap_question(job, cap):
+    return (f'*🔴 오늘 자동 수정 {cap}건 — 더 고칠까?*\n'
+            f"• 새로 확정된 결함: `{job['fix_key']}` ({R.escape(job['items'][0]['title'])})\n"
+            '• *오늘 계속 고쳐*: 오늘 남은 결함은 더 묻지 않고 바로 고친다.\n'
+            '• *이것만 고쳐*: 이 결함만 고치고 다음 결함이 오면 다시 묻는다.\n'
+            '• *내일로*: 내일 10:00 조직개편안에서 처리한다. 답이 없어도 내일 조직개편안이 가져간다.\n'
+            '[[버튼: ' + ' | '.join(CAP_CHOICES) + ']]')
+
+
 def enqueue_incident(home, record, fix_key, record_path, now=None):
-    """Queue one confirmed defect. Returns queued | duplicate | deferred | disabled."""
+    """Queue one confirmed defect. Returns queued | duplicate | awaiting_owner | disabled.
+
+    Over the daily cap the owner is asked with buttons (2026-10-25) instead of deferring silently."""
     now = now or time.time()
     cfg = settings(home)
     if not (cfg['enabled'] and cfg['incidents']):
@@ -428,14 +443,50 @@ def enqueue_incident(home, record, fix_key, record_path, now=None):
         if any(j['status'] in ('queued', 'analyzing', 'implementing') for j in same):
             return 'duplicate'
         previous = [j['key'] for j in same if j['status'] in ('reported', 'confirmed') and now - j.get('queued_at', 0) < 14 * 86400]
-        counted = [j for j in state['jobs'].values() if j.get('kind') == 'incident' and j['status'] != 'deferred'
-                   and j.get('queued_at', 0) >= today_start(now)]
-        status = 'queued' if len(counted) < cfg['daily_incident_cap'] else 'deferred'
+        counted = [j for j in state['jobs'].values() if j.get('kind') == 'incident'
+                   and j['status'] not in ('deferred', 'handed_over', WAITING_OWNER) and j.get('queued_at', 0) >= today_start(now)]
+        day = datetime.fromtimestamp(now, O.KST).date().isoformat()
+        open_today = state.get('cap_open') == day
+        status = 'queued' if open_today or len(counted) < cfg['daily_incident_cap'] else WAITING_OWNER
         state['jobs'][key] = {'key': key, 'kind': 'incident', 'status': status, 'fix_key': fix_key, 'record_id': record['id'],
                               'items': [incident_item(record, fix_key, record_path, previous)],
                               'channel': record['dm_channel'], 'thread_ts': record['posted_ts'], 'queued_at': now}
         L.save(state_path(home), state)
-        return status
+    if status == WAITING_OWNER:
+        job = state['jobs'][key]
+        ts = say(home, job, cap_question(job, cfg['daily_incident_cap']))
+        with L.locked(state_path(home)):
+            state = load(home)
+            state['jobs'][key]['question_ts'] = ts
+            L.save(state_path(home), state)
+    return status
+
+
+def decide_cap(home, key, choice, now=None):
+    """Owner's button answer to the daily-cap question. Returns the thread reply."""
+    now = now or time.time()
+    with L.locked(state_path(home)):
+        state = load(home)
+        job = state['jobs'].get(key)
+        if not job or job['status'] != WAITING_OWNER:
+            return '이미 정해진 결함이야.'
+        if choice == '내일로':
+            job['status'] = 'deferred'
+        else:
+            job['status'] = 'queued'
+            if choice == '오늘 계속 고쳐':
+                state['cap_open'] = datetime.fromtimestamp(now, O.KST).date().isoformat()
+        job['cap_choice'] = choice
+        L.save(state_path(home), state)
+    if job.get('question_ts'):
+        try:
+            L.extension('report_status').mark(lambda method, body: R.slack(home, method, body), job['channel'], job['question_ts'],
+                                               'done', choice)
+        except Exception as exc:
+            print(f'autofix cap repaint failed ({type(exc).__name__})', file=sys.stderr)
+    return {'내일로': '알았다. 이 결함은 내일 10:00 조직개편안에서 처리한다.',
+            '이것만 고쳐': '이 결함만 지금 고친다. 끝나면 이 스레드에 결과를 올린다.',
+            '오늘 계속 고쳐': '오늘 남은 결함은 더 묻지 않고 바로 고친다. 이것부터 시작한다.'}[choice]
 
 
 def incident_thread(home, channel, thread):
@@ -449,14 +500,14 @@ def deferred_items(home, n):
     """Jobs over the daily cap go into the next 조직개편안 as fixed items (numbered from ``n``)."""
     state = load(home)
     return [(key, dict(job['items'][0], n=n + i)) for i, (key, job) in
-            enumerate(sorted((k, j) for k, j in state['jobs'].items() if j['status'] == 'deferred'))]
+            enumerate(sorted((k, j) for k, j in state['jobs'].items() if j['status'] in ('deferred', WAITING_OWNER)))]
 
 
 def hand_over(home, keys, report_key):
     with L.locked(state_path(home)):
         state = load(home)
         for key in keys:
-            if state['jobs'].get(key, {}).get('status') == 'deferred':
+            if state['jobs'].get(key, {}).get('status') in ('deferred', WAITING_OWNER):
                 state['jobs'][key].update(status='handed_over', handed_to=report_key)
         L.save(state_path(home), state)
 

@@ -18,6 +18,23 @@ class Engine:
             with self.store._connect() as conn:
                 self.store._event(conn, cid, 'work_sync', payload)
 
+    def reminder_messages(self, path, state, cid, result):
+        # skipped is a standing state (existing reminder, user edit, uncertain write) that
+        # recurs every watcher pass; report it only when the skipped set changes.
+        messages = [f'• 할 일 미리알림 {key}: {len(result[key])}개' for key in
+                    ('created', 'moved', 'completed', 'deleted', 'past_due') if result.get(key)]
+        skipped = sorted(content.digest(row) for row in result.get('skipped') or [])
+        reported = state.setdefault('reported_skips', {})
+        if skipped and reported.get(cid) != skipped:
+            messages.append(f'• 할 일 미리알림 skipped: {len(skipped)}개')
+        if not self.dry and reported.get(cid) != (skipped or None):
+            if skipped:
+                reported[cid] = skipped
+            else:
+                reported.pop(cid, None)
+            content.save(path, state)
+        return messages
+
     def run(self, item):
         cid, messages = item['common_id'], []
         refs = self.sources.references(item)
@@ -28,8 +45,8 @@ class Engine:
         if len(refs) == 1 or duplicate_domains:
             if self.reminders:
                 result = self.reminders(item, self.dry)
-                messages = [f'• 할 일 미리알림 {key}: {len(result[key])}개' for key in
-                            ('created', 'moved', 'completed', 'deleted', 'past_due', 'skipped') if result.get(key)]
+                with content.ledger(self.home, 'work-sync') as (path, state):
+                    messages = self.reminder_messages(path, state, cid, result)
             return {'handled': True, 'messages': messages,
                     **({'connection_status': 'unsupported', 'connection_reason': 'single_original_per_domain_required'}
                        if duplicate_domains else {})}
@@ -90,9 +107,7 @@ class Engine:
                     return {'handled': True, 'messages': ['• ⚠️ 본문·할 일 반영 확인이 필요해 멈췄어요. 부분 반영 가능성이 있어 자동 재실행하지 않아요.']}
             if self.reminders:
                 result = self.reminders(item, self.dry)
-                for bucket in ('created', 'moved', 'completed', 'deleted', 'past_due', 'skipped'):
-                    if result.get(bucket):
-                        messages.append(f'• 할 일 미리알림 {bucket}: {len(result[bucket])}개')
+                messages += self.reminder_messages(path, state, cid, result)
             if not self.dry:
                 work['sources'] = current
                 content.save(path, state)
