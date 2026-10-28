@@ -321,7 +321,7 @@
   "plugins/team-delegation/notes_format.py": "45f5aeff9c62723da4ebf3667d0720ee2640aa8448767acf3cb9fb84a92334d9",
   "plugins/team-delegation/notes_rebuild.py": "a1fecf877083c3a8ebd17d7ab80d9bc07ac8956fc557028cebad7f31052e73e3",
   "plugins/team-delegation/notes_screen.py": "2622e344a151ec2edafe74cd5bb7433e0fb132d6745dfb58c4c3b29047b31c43",
-  "plugins/team-delegation/notion_completion_sync.py": "3eacc192c7b78caab4044d9ae1e5739fd5baa15d209cbd27d04728cac9594d5d",
+  "plugins/team-delegation/notion_completion_sync.py": "ede780b6455307961b757e033ed43b51165d5bcd2563d81d4dec25b3c83226c6",
   "plugins/team-delegation/notion_task_dates.py": "0aef07c3b9b33d01ef85e685231b1cdb2ed5354cf9f7d5548a9d6f16415be003",
   "plugins/team-delegation/obsidian_format.py": "30d84f11c827ea9a314bf59648651a454a793af75a13ed572cecb196ab39ceec",
   "plugins/team-delegation/obsidian_notes.py": "9647c699b9ced28f0761084e4ed1a509aff5c2bb6210e7876b598216998e5c0e",

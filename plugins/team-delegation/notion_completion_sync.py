@@ -43,12 +43,16 @@ WORK_ERROR_REASONS = {
     'linked_task_sources_conflict': '연결된 원본의 할 일 내용이 서로 달라요',
     'ambiguous_task_deadline': '할 일의 마감 날짜가 불명확해 소유자 확인이 필요해요',
     'note_structure_preserved': '구역이 나뉜 메모라 할 일 완료 표시 말고는 다른 원본의 변경을 옮기지 않았어요',
+    # work_sync raises this when Notion is the authority and its task list cannot be fitted to a structured
+    # memo's own task rows; unnamed it fell to unknown_error (진단담당 진단 89267e81, 2026-10-29).
+    'authoritative_tasks_cannot_be_preserved_in_note': '노션 할 일을 구역이 나뉜 메모의 할 일 줄에 맞춰 넣지 못해 이 업무 동기화를 멈췄어요',
     'reminder_read_failed': '미리알림을 읽지 못했어요',
     'title_write_pending': '제목 반영 확인이 필요해 멈췄어요. 자동 재실행하지 않아요',
     'unknown_error': '분류되지 않은 오류가 반복됐어요. 로컬 로그 확인이 필요해요',
 }
 NON_TARGET_REASONS = frozenset(WORK_ERROR_REASONS) - {
-    'linked_task_sources_conflict', 'ambiguous_task_deadline', 'reminder_read_failed', 'unknown_error', 'title_write_pending'}
+    'linked_task_sources_conflict', 'ambiguous_task_deadline', 'reminder_read_failed', 'unknown_error', 'title_write_pending',
+    'authoritative_tasks_cannot_be_preserved_in_note'}
 TRANSIENT_REASONS = {'reminder_read_failed', 'unknown_error'}
 
 
