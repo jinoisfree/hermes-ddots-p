@@ -8,7 +8,7 @@ trap 'rm -r "$TEST_CONFIG"' EXIT
 export DDOTS_CONFIG_ROOT="$TEST_CONFIG/record" HERMES_HOME="$TEST_CONFIG/hermes"
 mkdir -p "$HERMES_HOME"
 python3 "$ROOT/Tests/prepare_config.py" "$DDOTS_CONFIG_ROOT"
-xcrun swiftc -swift-version 5 "$ROOT/Sources/UpdateIdlePolicy.swift" "$ROOT/Tests/UpdateIdlePolicyTests.swift" -o "$ROOT/.build/UpdateIdlePolicyTests"
+xcrun swiftc -swift-version 5 "$ROOT/Sources/UpdateIdlePolicy.swift" "$ROOT/Sources/UpdateReminder.swift" "$ROOT/Tests/UpdateIdlePolicyTests.swift" -o "$ROOT/.build/UpdateIdlePolicyTests"
 "$ROOT/.build/UpdateIdlePolicyTests"
 xcrun swiftc -swift-version 5 "$ROOT/Sources/HermesRouting.swift" "$ROOT/Tests/RoutingContractTests.swift" -o "$ROOT/.build/RoutingContractTests"
 "$ROOT/.build/RoutingContractTests" "$ROOT/Tests/Fixtures/routing.json"

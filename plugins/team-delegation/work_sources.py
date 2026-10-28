@@ -81,7 +81,7 @@ def due_property(props, explicit, status_name):
     return result
 
 
-def _note_summary_line(line):
+def _note_summary_line(line, nested=False):
     hit = re.match(r'\s*- ([^:]+):\s*(.*?)\s*\|\s*(.*)', line)
     if hit:
         section, label, value = hit.groups()
@@ -89,6 +89,12 @@ def _note_summary_line(line):
         # Only task rows may omit the deadline separator; body rows still need a value.
         hit = re.match(r'\s*- (할 일):\s*(.*)', line)
         if not hit:
+            # A nested detail row with no section of its own ('  - 장소 | 코엑스') is body text of its
+            # parent. Unparsed, it sent the whole memo to the plaintext reading, whose task wording
+            # differs from the task rows (진단담당 진단 89267e81, 2026-10-29).
+            sub = nested and re.match(r'\s+- ([^:|\[\]{}\n]+?)\s*\|\s*(.*)', line)
+            if sub:
+                return sub[1].strip()+': '+sub[2]
             raise ValueError('note_summary_incomplete')
         section, label = hit.groups()
         value = ''
@@ -109,6 +115,14 @@ def _attachment_keys(note):
     store, which appends '_<digest>' again (and cuts long names at 40 characters), so 'a.png',
     'a_<d>.png' and 'a_<d>_<d>.png' are the same attachment (2026-10-28 scratch-note check)."""
     return sorted(re.sub(r'_[0-9a-f]{16}.*(?=\.[^.]+$)', '', str(name)) for name in note.get('attachment_names') or [])
+
+
+def _summary_lines(summary):
+    """Readable lines of a memo summary. Detail rows are tolerated only when the summary has its own task
+    rows: a memo without them keeps reading its tasks from the plain text (checkbox lines elsewhere)."""
+    lines = str(summary).splitlines()
+    nested = any(re.match(r'\s*- 할 일:', line) for line in lines)
+    return [_note_summary_line(line, nested) for line in lines]
 
 
 SUMMARY_ROW = re.compile(r'^(\s*- )([^:{\n]+)(:\s*)(\[[ xX]\]\s*)?(\{fmt:[^}]+\}\s*)?(.*)$')
@@ -206,7 +220,7 @@ def structured_edit(summary, own, wanted):
 
 def structured_content(title, summary):
     """What Sources.read will see in a memo carrying this summary."""
-    return content.semantic(content.from_text(title, '\n'.join(_note_summary_line(l) for l in summary.splitlines())))
+    return content.semantic(content.from_text(title, '\n'.join(_summary_lines(summary))))
 
 
 class Sources:
@@ -289,7 +303,7 @@ class Sources:
                 raise source_lookup.SourceReadError('transient', 'note_read_unclassified')
             try:
                 _, summary, _ = self.notes.tools()._linked_note_sections(raw['body_html'])
-                lines = [_note_summary_line(line) for line in summary.splitlines()]
+                lines = _summary_lines(summary)
                 parsed = content.from_text(raw['title'], '\n'.join(lines))
             except (KeyError, ValueError):
                 text = str(raw.get('plaintext') or '')

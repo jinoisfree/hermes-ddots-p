@@ -47,3 +47,17 @@ struct SilentUpdateSettings {
         return true
     }
 }
+
+/// Automatic discovery obeys both preferences; a manual check always remains available.
+enum UpdateNoticePolicy {
+    static func allows(manual: Bool, enabled: Bool, reminderAllows: Bool) -> Bool {
+        manual || (enabled && reminderAllows)
+    }
+}
+
+struct UpdateNoticeSettings {
+    static let key = "updateNotices"
+    var defaults: UserDefaults = .standard
+    var enabled: Bool { defaults.object(forKey: Self.key) as? Bool ?? true }
+    func setEnabled(_ enabled: Bool) { defaults.set(enabled, forKey: Self.key) }
+}

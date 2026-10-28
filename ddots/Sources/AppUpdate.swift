@@ -14,8 +14,31 @@ final class AppUpdate: NSObject, SPUUpdaterDelegate {
     func updaterDidNotFindUpdate(_ updater: SPUUpdater, error: Error) { liveReport?("none " + error.localizedDescription) }
     func updater(_ updater: SPUUpdater, didAbortWithError error: Error) { liveReport?("abort " + error.localizedDescription) }
     private let client = UpdateReleaseClient()
-    private let reminder = UpdateReminder()
-    private let settings = SilentUpdateSettings()
+    private let reminder: UpdateReminder
+    private let settings: SilentUpdateSettings
+    private let notices: UpdateNoticeSettings
+    private let relayRestoration: (() -> Void)?
+    init(defaults: UserDefaults = .standard, relayRestoration: (() -> Void)? = nil) {
+        reminder = UpdateReminder(defaults: defaults)
+        settings = SilentUpdateSettings(defaults: defaults)
+        notices = UpdateNoticeSettings(defaults: defaults)
+        self.relayRestoration = relayRestoration
+        super.init()
+    }
+    private func allowsCheck(manual: Bool) -> Bool {
+        UpdateNoticePolicy.allows(manual: manual, enabled: notices.enabled,
+                                  reminderAllows: reminder.allowsCheck(manual: false))
+    }
+    /// Options call this immediately after saving the preference, including while waiting for idle.
+    func noticesChanged() {
+        guard !notices.enabled else { return }
+        if automaticCheckPending {
+            generation += 1
+            task?.cancel(); task = nil
+            automaticCheckPending = false; busy = false
+        }
+        cancelIdle(reply: true)
+    }
     var activity: () -> UpdateIdlePolicy.Activity = {
         .init(idleSeconds: 0, hasDrafts: true, transferring: true)
     }
@@ -37,6 +60,7 @@ final class AppUpdate: NSObject, SPUUpdaterDelegate {
     private var generation = 0
     private var stopped = false
     private var busy = false
+    private var automaticCheckPending = false
     private var release: UpdateRelease?
     private var updater: SPUUpdater?
     private var driver: UpdateUserDriver?
@@ -69,7 +93,7 @@ final class AppUpdate: NSObject, SPUUpdaterDelegate {
 
     @objc func checkNow() { check(manual: true) }
     func check(manual: Bool) {
-        guard !stopped, reminder.allowsCheck(manual: manual) else { return }
+        guard !stopped, allowsCheck(manual: manual) else { return }
         guard LoginLaunch.isInstalled() else {
             if manual { inform("응용 프로그램 폴더에 설치한 뒤 업데이트할 수 있어요.") }
             return
@@ -90,22 +114,26 @@ final class AppUpdate: NSObject, SPUUpdaterDelegate {
         guard !busy, !restoring else { return }
         cycleSilent = UpdateIdlePolicy.silent(enabled: settings.enabled, manual: manual, failures: settings.failures)
         cycleFailed = false; cancelledCycle = false; installingVersion = nil; pendingManualCheck = false
-        busy = true
+        busy = true; automaticCheckPending = !manual
         generation += 1
         let generation = generation
         work.async { [weak self] in
             let token: String? = UpdateRelease.requiresToken ? (Self.liveCheckToken ?? UpdateCredential.read()) : ""
             DispatchQueue.main.async {
                 guard let self, !self.stopped, self.generation == generation else { return }
+                guard self.allowsCheck(manual: manual) else {
+                    self.automaticCheckPending = false; self.busy = false; return
+                }
                 guard let token else {
-                    self.busy = false
+                    self.automaticCheckPending = false; self.busy = false
                     if manual { self.connect() }
                     return
                 }
                 self.task = self.client.latest(token: token) { [weak self] result in
                     DispatchQueue.main.async {
                         guard let self, !self.stopped, self.generation == generation else { return }
-                        self.busy = false; self.task = nil
+                        self.busy = false; self.task = nil; self.automaticCheckPending = false
+                        guard self.allowsCheck(manual: manual) else { return }
                         switch result {
                         case .success(let release):
                             if manual {
@@ -125,7 +153,7 @@ final class AppUpdate: NSObject, SPUUpdaterDelegate {
     /// Automatic discovery downloads silently unless opted out or repeated failures
     /// require the existing confirmation UI. Both paths retain Sparkle verification.
     private func announce(_ release: UpdateRelease, token: String) {
-        guard !stopped, reminder.allowsCheck(manual: false),
+        guard !stopped, allowsCheck(manual: false),
               let current = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String,
               SUStandardVersionComparator().compareVersion(release.version, toVersion: current) == .orderedDescending else { return }
         if cycleSilent {
@@ -145,7 +173,7 @@ final class AppUpdate: NSObject, SPUUpdaterDelegate {
         }
         NSApp.activate(ignoringOtherApps: true)
         let response = alert.runModal()
-        guard !stopped else { return }
+        guard !stopped, allowsCheck(manual: false) else { return }
         if response == .alertSecondButtonReturn { reminder.hideToday() }
         else if response == .alertFirstButtonReturn {
             do { try begin(release, token: token, manual: true, consented: true) }
@@ -228,7 +256,7 @@ final class AppUpdate: NSObject, SPUUpdaterDelegate {
     private func prepareInstall(_ done: @escaping (Bool) -> Void) {
         guard !stopped else { done(false); return }
         // Drafts are memory-only. A silent update never terminates with any unsaved draft.
-        if cycleSilent && UpdateIdlePolicy.decide(activity(), elapsed: 0) != .install { done(false); return }
+        if cycleSilent && (!allowsCheck(manual: false) || UpdateIdlePolicy.decide(activity(), elapsed: 0) != .install) { done(false); return }
         let executable = executable, item = RelayAgent.plistURL
         let preparation = preparationGeneration
         work.async { [weak self] in
@@ -240,7 +268,7 @@ final class AppUpdate: NSObject, SPUUpdaterDelegate {
                 }
                 switch result {
                 case .success:
-                    if self.cycleSilent && UpdateIdlePolicy.decide(self.activity(), elapsed: 0) != .install {
+                    if self.cycleSilent && (!self.allowsCheck(manual: false) || UpdateIdlePolicy.decide(self.activity(), elapsed: 0) != .install) {
                         self.restoreRelay(); done(false); return
                     }
                     if let (version, build) = self.installingVersion { self.settings.preparing(version: version, build: build) }
@@ -253,6 +281,7 @@ final class AppUpdate: NSObject, SPUUpdaterDelegate {
         }
     }
     private func restoreRelay() {
+        if let relayRestoration { relayRestoration(); return }
         guard !restoring else { return }
         restoring = true
         let executable = executable, item = RelayAgent.plistURL
@@ -344,7 +373,7 @@ final class AppUpdate: NSObject, SPUUpdaterDelegate {
             settings.cancelled(); pending(.skip); restoreRelay()
         }
     }
-    private func waitUntilIdle(_ reply: @escaping (SPUUserUpdateChoice) -> Void) {
+    func waitUntilIdle(_ reply: @escaping (SPUUserUpdateChoice) -> Void) {
         cancelIdle(reply: true)
         cancelledCycle = false; readyReply = reply; readyAt = Date()
         let timer = Timer(timeInterval: 60, repeats: true) { [weak self] _ in
@@ -355,7 +384,7 @@ final class AppUpdate: NSObject, SPUUpdaterDelegate {
     }
     private func attemptSilentInstall() {
         guard !stopped, !preparingIdle, let reply = readyReply, let since = readyAt else { return }
-        if !settings.enabled { cancelIdle(reply: true); return }
+        if !notices.enabled || !settings.enabled { cancelIdle(reply: true); return }
         switch UpdateIdlePolicy.decide(activity(), elapsed: Date().timeIntervalSince(since)) {
         case .wait: return
         case .expire: cancelIdle(reply: true) // .skip at ready cancels this installer, not the version.

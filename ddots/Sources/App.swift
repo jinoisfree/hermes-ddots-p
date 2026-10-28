@@ -49,6 +49,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     var optionsWindow: NSWindow?
     var paseoStatusLabel: NSTextField?
     var loginCheckbox: NSButton?
+    var updateNoticeCheckbox: NSButton?
+    var updateNoticeSettings = UpdateNoticeSettings()
     /// What the bubble is out for, so the same thing does not bring it out twice.
     var bubbleAlert: String?, shownBubbleAlert: String?
     var approvalBubbleMessageID: String?
@@ -207,7 +209,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     /// How long closing waits for its file and cache work before the app ends anyway.
     static let closingLimit: TimeInterval = 2
     private var closingRun: ClosingRun?
-    private var appUpdate: AppUpdate?
+    var appUpdate: AppUpdate?
     private var installedUpdateNotice: (text: String, until: Date)?
     /// How many folders of pasted pictures the start removed, once it has finished.
     var pasteRecovered: Int?
@@ -531,7 +533,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                     return
                 }
                 self.capture(destination: destination)
-                if CommandLine.arguments.contains("--ui-smoke-update-reminder") { self.verifyUpdateReminder(destination: destination) }
+                if CommandLine.arguments.contains("--ui-smoke-update-notices") { self.verifyUpdateNotices(destination: destination) }
+                else if CommandLine.arguments.contains("--ui-smoke-update-reminder") { self.verifyUpdateReminder(destination: destination) }
                 else if CommandLine.arguments.contains("--ui-smoke-connect-offer") { self.verifyConnectOffer(destination: destination) }
                 else if CommandLine.arguments.contains("--ui-smoke-faces") { self.verifyDdotsFaces(destination: destination) }
                 else if CommandLine.arguments.contains("--ui-smoke-stop") { self.verifyAgentStop(destination: destination) }
@@ -1691,9 +1694,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
     @objc func showOptions() {
         if optionsWindow == nil {
-            let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 360, height: 712), styleMask: [.titled, .closable], backing: .buffered, defer: false)
+            let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 360, height: 768), styleMask: [.titled, .closable], backing: .buffered, defer: false)
             window.title = "ddots 옵션"; window.isReleasedWhenClosed = false
-            let content = NSView(frame: NSRect(x: 0, y: 0, width: 360, height: 712))
+            let content = NSView(frame: NSRect(x: 0, y: 0, width: 360, height: 768))
             let usageTitle = NSTextField(labelWithString: "사용량")
             usageTitle.font = .systemFont(ofSize: 14, weight: .semibold)
             usageTitle.frame = NSRect(x:24,y:669,width:312,height:24); content.addSubview(usageTitle)
@@ -1767,10 +1770,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             loginSettings.bezelStyle = .rounded; loginSettings.frame = NSRect(x:24,y:421,width:220,height:30)
             content.addSubview(loginSettings)
             loginCheckbox = login; loginStatusLabel = loginStatus; loginSettingsButton = loginSettings
+            for view in content.subviews { view.frame.origin.y += 56 }
+            let updateNotices = NSButton(checkboxWithTitle: "업데이트 알림 받기", target: self, action: #selector(toggleUpdateNotices(_:)))
+            updateNotices.identifier = NSUserInterfaceItemIdentifier(UpdateNoticeSettings.key)
+            updateNotices.frame = NSRect(x:24,y:22,width:312,height:24); content.addSubview(updateNotices)
+            updateNoticeCheckbox = updateNotices
             window.contentView = content; window.center()
             optionsWindow = window; sizeSlider = slider; sizeValueLabel = value
         }
         refreshLoginLaunch()
+        updateNoticeCheckbox?.state = updateNoticeSettings.enabled ? .on : .off
         paseoStatusLabel?.stringValue = usage.paseoStatus
         let opacityPercent = BubbleOpacity.load()
         opacitySlider?.doubleValue = opacityPercent; opacityValueLabel?.stringValue = "\(Int(opacityPercent))%"
@@ -1780,6 +1789,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         petNameHint?.stringValue = "1~20자 · 저장하면 모든 화면에 적용됩니다."
         petNameHint?.textColor = .secondaryLabelColor
         NSApp.activate(ignoringOtherApps: true); optionsWindow?.makeKeyAndOrderFront(nil)
+    }
+    @MainActor @objc func toggleUpdateNotices(_ sender: NSButton) {
+        updateNoticeSettings.setEnabled(sender.state == .on)
+        appUpdate?.noticesChanged()
     }
     func applicationDidBecomeActive(_ notification: Notification) {
         refreshLoginLaunch()

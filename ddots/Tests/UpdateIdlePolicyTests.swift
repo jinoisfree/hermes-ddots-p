@@ -40,6 +40,23 @@ import Foundation
         expect(settings.installed(version: "2", build: "20"), "actual replacement")
         expect(settings.failures == 0 && settings.reason.isEmpty, "success resets failures")
         expect(!settings.installed(version: "2", build: "20"), "notify exactly once")
+        let notices = UpdateNoticeSettings(defaults: defaults)
+        expect(notices.enabled, "update notices default on")
+        notices.setEnabled(false)
+        expect(!UpdateNoticeSettings(defaults: UserDefaults(suiteName: suite)!).enabled, "update notices persist off")
+        notices.setEnabled(true)
+        expect(notices.enabled, "update notices persist on")
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        let reminder = UpdateReminder(defaults: defaults)
+        for enabled in [false, true] { for manual in [false, true] { for hidden in [false, true] { for silent in [false, true] {
+            defaults.removeObject(forKey: UpdateReminder.key)
+            if hidden { reminder.hideToday(now: now) }
+            let allowed = UpdateNoticePolicy.allows(manual: manual, enabled: enabled,
+                                                    reminderAllows: reminder.allowsCheck(manual: false, now: now))
+            expect(allowed == (manual || (enabled && !hidden)), "notice/manual/today/silent policy matrix")
+            let quiet = allowed && UpdateIdlePolicy.silent(enabled: silent, manual: manual, failures: 0)
+            expect(quiet == (enabled && !hidden && silent && !manual), "no silent installation with notices off; manual stays explicit")
+        } } } }
         print("PASS UpdateIdlePolicyTests: \(checks) checks, 0 failures")
     }
 }
