@@ -12,6 +12,15 @@ import export_config as E
 import migrate_local_settings as M
 
 class ConfigExportTests(unittest.TestCase):
+    def test_conversation_allowlist(self):
+        value = E.conversation_contract({'schema': 1, 'patterns': {'approval1': '[', 'secret': 'ignored'},
+             'sets': {'yes': ['go']}, 'numbers': {'longThread': True}, 'credentials': 'ignored'})
+        self.assertEqual(value, {'schema': 1, 'patterns': {'approval1': '['}, 'sets': {'yes': ['go']}})
+        self.assertIsNone(E.conversation_contract({'schema': True}))
+        self.assertIsNone(E.conversation_contract({'schema': 2}))
+        with self.assertRaises(ValueError):
+            E.conversation_contract({'schema': 1, 'texts': {'approveText': 'xoxb-' + '1'*30}})
+
     def test_allowlist(self):
         result=E.contract({'profiles':{'wiki':'guide','fallback':'helper','token':'not-exported'},'patterns':{'wiki_target':'wiki','private':'not-exported'},'credentials':'not-exported'})
         self.assertNotIn('not-exported',json.dumps(result))

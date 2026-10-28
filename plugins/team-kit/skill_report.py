@@ -317,10 +317,10 @@ def render(day, snap, *, home=None, summarizer=None):
         label, row = f"{item['name']} · {item['change']}", summaries[item["name"]]
         what, learned = row["what_ko"].replace("~", "∼"), row["learned_ko"].replace("~", "∼")
         rows.append((label, learned))
-        details += layout.item_messages(f"*{n}. {layout.excerpt(label, 100)}*\n"
+        details += layout.item_messages(f"*스킬 {n}번 · {layout.excerpt(label, 100)}*\n"
                        f"> *무슨 스킬:* {layout.excerpt(what, 180)}\n"
                        f"> *새로 배운 것:* {layout.excerpt(learned, 180)}", "스킬", n)
-    return [layout.summary(title, status, rows, "모두 배우기=유지 · 롤백=변경 전 복구 · 일부만 배우기=항목별 선택") + base.review_buttons(True)] + details
+    return [layout.summary(title, status, rows, f"모두 배우기=1~{len(snap['learned'])}번 전부 유지 · 롤백=전부 변경 전 복구 · 일부만 배우기=아래 항목 글의 N번만 버튼으로 하나씩") + base.review_buttons(True)] + details
 
 
 def merged(home):
@@ -399,6 +399,15 @@ def deliver(home, state, key):
     learning.save(path(home), state)
 
 
+
+def _rest_day():
+    """주말·공휴일이면 아침 보고를 11:00에 보낸다 (2026-10-27 사용자 결정)."""
+    spec = importlib.util.spec_from_file_location("skill_report_rest_day", Path(__file__).with_name("rest_day.py"))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 def daily(home, now=None, *, dry_run=False, summarizer=None):
     now = (now or datetime.now(KST)).astimezone(KST)
     target = now.date() - timedelta(days=1)
@@ -409,7 +418,7 @@ def daily(home, now=None, *, dry_run=False, summarizer=None):
         return 0
     with learning.locked(path(home)):
         record_midnight(home, now)
-        if (now.hour, now.minute) < (8, 29) or merged(home):
+        if (now.hour, now.minute) < _rest_day().start(now, (8, 29)) or merged(home):
             return 0  # Merged homes: the 08:30 learning report builds the skill section.
         state = prune(load(home), now)
         key = now.date().isoformat()  # Today only: a missed day is not sent late.

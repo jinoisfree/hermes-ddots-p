@@ -23,6 +23,7 @@ KST = ZoneInfo("Asia/Seoul")
 _spec = importlib.util.spec_from_file_location("team_report_layout", Path(__file__).with_name("report_layout.py"))
 layout = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(layout)
+REVIEW_GUIDE = "모두 배우기=이 보고의 학습·스킬 전부 유지 · 롤백=전부 변경 전 복구 · 일부만 배우기=아래 항목 글의 N번만 버튼으로 하나씩"
 
 
 def compact_report(home):
@@ -58,8 +59,8 @@ def with_blocks(body, update=False):
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
         rendered = module.with_blocks(body, update=update)
-        # Learning reviews own this bar: a topic such as "실패 보고" must not override its state.
-        title = re.match(r"^\*([🟡🟢🔴]) (?:아침 학습 보고|아침 스킬 보고|학습 항목|스킬 항목)", body.get("text", ""))
+        # Reviews and the morning system report own their bar: section words must not override the verdict.
+        title = re.match(r"^\*([🟡🟢🔴]) (?:아침 학습 보고|아침 스킬 보고|학습 항목|스킬 항목|진단담당 아침 시스템 보고)", body.get("text", ""))
         if title and rendered.get("attachments"):
             colour = module.COLORS[{"🟡": "warn", "🟢": "ok", "🔴": "fail"}[title[1]]]
             rendered = {**rendered, "attachments": [{**part, "color": colour}
@@ -72,6 +73,7 @@ def with_blocks(body, update=False):
 
 def slack(home, method, body):
     if method in {"chat.postMessage", "chat.update"}:
+        body = learning.extension("jang_voice").prepare(home, body)
         body = with_blocks(body, update=method == "chat.update")
     token = learning.env(home, "SLACK_BOT_TOKEN")
     if not token:
@@ -88,6 +90,15 @@ def slack(home, method, body):
     if not data.get("ok"):
         raise RuntimeError(f"Slack refused {method}: {data.get('error', 'unknown_error')}")
     return data
+
+
+def update_message(home, channel, ts, text):
+    """Replace one report through the same voice and slack_blocks delivery path."""
+    result = slack(home, 'chat.update', {'channel': channel, 'ts': ts, 'text': text,
+                                       'unfurl_links': False, 'unfurl_media': False})
+    if not (result.get('ok') is True and result.get('ts') == ts and result.get('channel') == channel):
+        raise ValueError('report update unconfirmed')
+    return result
 
 
 def check(home):
@@ -168,12 +179,11 @@ def render(day, items, workspace_url="", *, after_apply=False, compact=False, it
                       "`학습거절`은 이 보고의 변경을 모두 변경 전으로 되돌리는 거야. 답이 없거나 보류하면 적용은 유지하고 미검토로 남겨 둘게. "
                       "보고 이후 다른 곳에서 고친 내용은 덮어쓰지 않아."]
     if compact:
-        effect = "변경 전 복구" if after_apply else "원칙 전체 삭제"
         overview = layout.summary(
             f"🔴 아침 학습 보고 · {day.isoformat()}",
             f"*배운 내용 {len(items)}건* · 현재 적용 중 · 검토 대기",
             [(f"{item['topic']} · {item['change']}", item['rule']) for item in items],
-            f"`학습승인` 유지 · `학습거절` {effect} · `2번 수정: …`")
+            REVIEW_GUIDE)
         paragraphs = ["*검토 안내*\n" + paragraphs[0]]
     introduction = list(paragraphs)
     item_pages = []
@@ -369,7 +379,10 @@ def with_skills(texts, skills):
         return texts
     # Item markers must remain at each message's end, never combined by chunks().
     details = skills["details"] if skills.get("items") else layout.chunks(skills["details"])
-    return [texts[0] + "\n\n" + skills["head"]] + texts[1:] + details
+    head = texts[0] + "\n\n" + skills["head"]
+    if skills.get("items") and REVIEW_GUIDE not in head:
+        head += "\n\n" + REVIEW_GUIDE
+    return [head] + texts[1:] + details
 
 
 def recover(home, report, part, marker):
@@ -434,6 +447,15 @@ def deliver(home, state, key):
     learning.save(path(home), state)
 
 
+
+def _rest_day():
+    """주말·공휴일이면 아침 보고를 11:00에 보낸다 (2026-10-27 사용자 결정)."""
+    spec = importlib.util.spec_from_file_location("learning_report_rest_day", Path(__file__).with_name("rest_day.py"))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 def daily(home, now=None, *, dry_run=False, day=None):
     now = (now or datetime.now(KST)).astimezone(KST)
     if dry_run:
@@ -454,7 +476,7 @@ def daily(home, now=None, *, dry_run=False, day=None):
         for text in texts:
             print(text)
         return 0
-    if (now.hour, now.minute) < (8, 30):
+    if (now.hour, now.minute) < _rest_day().start(now, (8, 30)):
         return 0
     with learning.locked(path(home)):
         if learning.extension("learning_skills").enabled(home):
@@ -531,7 +553,7 @@ def review(home, args, session_id=None, **_):
                         item = report["items"][n - 1]
                         current = data["rules"][item["topic"]]
                         if action == "keep":
-                            current["review"] = {"at": time.time(), "user_said": quote, "source": {k: v for k, v in src.items() if k != "text"}}
+                            current["review"] = {"at": time.time(), "user_said": quote, "source": {k: v for k, v in src.items() if k not in {"text", "followups"}}}
                         else:
                             current, _changed = learning.change(data, item["topic"], args.get("rule", ""),
                                                                "remember" if action == "correct" else "forget", src, quote, via="review")

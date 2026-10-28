@@ -533,7 +533,7 @@ final class DdotsEntryScript {
     var api: SlackAPI {
         let base = SlackSmokeFixture.api(ddots: true)
         return SlackAPI(transport: { [self] method, parameters in
-            if method == "conversations.history", parameters["channel"] == "DJARVIS" {
+            if method == "conversations.history", parameters["channel"] == "Dassistant" {
                 lock.lock(); let held = !released; if held { asked = true }; lock.unlock()
                 if held { _ = gate.wait(timeout: .now() + 25) }
             }
@@ -599,7 +599,7 @@ extension AppDelegate {
         await until("개인비서's conversation is being listed") { model.isDdots && model.selected == Ddots.room && script.waiting }
         let early = model.threads.count
         script.letListing()
-        await until("every conversation in workspace is read") { !script.waiting && model.threads.count > early && model.threads.contains { $0.room == "DJARVIS" } && model.threads.allSatisfy(\.loaded) }
+        await until("every conversation in workspace is read") { !script.waiting && model.threads.count > early && model.threads.contains { $0.room == "Dassistant" } && model.threads.allSatisfy(\.loaded) }
         check(model.entryTarget == "slack-bottom", "workspace, kept in order of activity, is entered at its foot")
         await settle(1.4)
         check(atFoot() && shown(last()), "Replies that come late still leave workspace at its newest line: \(place())")

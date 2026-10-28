@@ -11,12 +11,17 @@
     (literal "/usr/bin/shortcuts") (literal "/usr/bin/automator") (literal "/usr/bin/open"))
 (deny process-info*)
 (allow process-info* (target self))
-; Exclude only this profile's skill code and scratch data from the Hermes read denial.
+; Read only this profile's skill code, scratch data and media caches.
+; Media caches remain under deny file-write*.
 (deny file-read*
     (require-all
         (subpath (param "HERMES_ROOT"))
         (require-not (subpath (param "SKILLS")))
         (require-not (subpath (param "WORKSPACE")))
+        (require-not (subpath (string-append (param "PROFILE_HOME") "/cache/generated")))
+        (require-not (subpath (string-append (param "PROFILE_HOME") "/cache/images")))
+        (require-not (subpath (string-append (param "PROFILE_HOME") "/cache/documents")))
+        (require-not (subpath (string-append (param "PROFILE_HOME") "/cache/videos")))
 ))
 (deny file-read*
     (subpath (string-append (param "HOME") "/.ssh"))

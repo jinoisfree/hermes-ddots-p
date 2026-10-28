@@ -20,6 +20,8 @@ _READS = OrderedDict()
 SESSION_READ_LIMIT = 128
 FILES_PER_SESSION = 64
 INLINE_LIMIT = 4000
+# Preserved old procedures (e.g. references/pre-secretary-2026-10-17.md) stay searchable but are never forced reads.
+ARCHIVED_REFERENCE = re.compile(r"references/pre-[^/]*-\d{4}-\d{2}-\d{2}\.md")
 _LOCK = threading.RLock()
 PERSONAL = {"contacts_direct_lookup", "contacts_direct_mutation", "google_calendar_color_get", "calendar_direct_lookup", "calendar_direct_mutation", "google_calendar_color_set",
             "reminders_direct_lookup", "reminders_direct_mutation", "apple_notes_direct_lookup",
@@ -190,7 +192,8 @@ def guard(home, learning, *, tool_name, args, session_id, task_id="", **_):
         return {"action": "block", "message": f"필수 업무 스킬 {name}을 확인할 수 없다. 파일과 학습 상태를 확인한 뒤 진행한다."}
     needed = ["SKILL.md"]
     for match in recall.search(index, src["text"], limit=8, kind="skill"):
-        if match.get("skill") == name and match.get("file", "").startswith("references/") and match["score"] >= 5:
+        if (match.get("skill") == name and match.get("file", "").startswith("references/") and match["score"] >= 5
+                and not ARCHIVED_REFERENCE.match(match["file"])):
             needed.append(match["file"])
             if len(needed) == 3:
                 break
@@ -279,7 +282,7 @@ def observe_memory(home, learning, *, session_id, tool_name, args, result, statu
                 continue
             previous = [r["id"] for r in old_facts if op.get("old_text") and op["old_text"] in r["text"]]
             changes[row["id"]] = {"origin": "owner_memory_tool", "verified_owner_source": True,
-                                   "source": {k: v for k, v in src.items() if k != "text"}, "observed_at": time.time()}
+                                   "source": {k: v for k, v in src.items() if k not in {"text", "followups"}}, "observed_at": time.time()}
             if op.get("action") == "replace" and len(previous) == 1 and previous[0] != row["id"]:
                 changes[row["id"]]["replaces"] = previous[0]
     archive = learning.extension("learning_archive")
@@ -295,7 +298,7 @@ def observe_memory(home, learning, *, session_id, tool_name, args, result, statu
             if durable:
                 archive.put(home, "facts", {
                     "updated_at": time.time(), "target": target,
-                    "source": {k: v for k, v in src.items() if k != "text"},
+                    "source": {k: v for k, v in src.items() if k not in {"text", "followups"}},
                     "before": [{"id": r["id"], "text": r["text"], "provenance": r["provenance"]} for r in old_facts],
                     "after": [{"id": r["id"], "text": r["text"], "provenance": data.get(r["id"], r["provenance"])} for r in current_facts],
                     "observed_after_success": True,

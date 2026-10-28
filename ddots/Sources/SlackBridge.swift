@@ -1364,7 +1364,7 @@ final class SlackBridge {
                 let moved = max(newest, changedAt[room + ":" + root.ts]?.timeIntervalSince1970 ?? 0)
                 return (root, at - moved < Self.settleWindow ? Self.liveInterval : Self.calmInterval, "live")
             }
-            if let state = ([root] + answers).last(where: { $0.hermesReplyState != nil })?.hermesReplyState,
+            if let state = ([root] + answers).last(where: { $0.effectiveHermesReplyState != nil })?.effectiveHermesReplyState,
                state != .closed {
                 return (root, Self.lingerInterval, "hermes")
             }
@@ -1400,7 +1400,7 @@ final class SlackBridge {
         let received = (json["messages"] as? [[String: Any]] ?? []).compactMap(SlackMessage.init(json:))
         if let root = received.first(where: { $0.ts == ts }) {
             func refreshed(_ old: SlackMessage) -> SlackMessage {
-                guard root.hermesReplyState != nil || old.hermesReplyState != nil else { return old }
+                guard root.effectiveHermesReplyState != nil || old.effectiveHermesReplyState != nil else { return old }
                 var result = root
                 // Thread scheduling metadata belongs to history; a replies response may omit it.
                 result.replyCount = old.replyCount

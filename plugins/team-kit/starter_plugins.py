@@ -50,8 +50,15 @@ def load(home):
     return state
 
 
+def quiet():
+    """2026-10-28 사용자 결정: 04:30 정비의 질문·답글은 08:30 아침 보고 때 ``flush``가 올린다."""
+    return module('morning_queue').quiet()
+
+
 def send(home, state, report, part, key, thread=False):
     if part.get('ts'): return
+    if quiet() and not part.get('attempted_at'): return
+    if thread and not report.get('thread_ts'): return
     marker = 'starter_plugin_' + hashlib.sha256(key.encode()).hexdigest()[:40]
     recovery = report if thread else {k: v for k, v in report.items() if k != 'thread_ts'}
     ts = R.recover(home, recovery, part, marker) if part.get('attempted_at') else None
@@ -68,7 +75,7 @@ def send(home, state, report, part, key, thread=False):
 
 
 def paint(home, state, report, status, note):
-    if report.get('painted') == [status, note]: return
+    if report.get('painted') == [status, note] or not report.get('thread_ts'): return
     L.extension('report_status').mark(lambda method, body: R.slack(home, method, body),
                                     report['channel'], report['thread_ts'], status, note)
     report['painted'] = [status, note]
@@ -188,3 +195,21 @@ def finish(home, name, ok, note):
         paint(home, state, report, 'done' if ok else 'failed', note)
         report['finished'] = bool(ok)
         L.save(state_path(home), state)
+
+
+def flush(home):
+    """08:30: post what the quiet hours held back (questions, decision replies, results) in order."""
+    if not config(home)['enabled']: return 0
+    count = 0
+    with L.locked(state_path(home)):
+        state = load(home)
+        for key, report in sorted(state['reports'].items()):
+            if not report['root'].get('ts'):
+                send(home, state, report, report['root'], key); count += 1
+            for ts, part in report.get('processed', {}).items():
+                if not part.get('ts'):
+                    send(home, state, report, part, key + ':reply:' + ts, thread=True); count += 1
+            for part_key, part in report.get('results', {}).items():
+                if not part.get('ts'):
+                    send(home, state, report, part, key + ':' + part_key, thread=True); count += 1
+    return count

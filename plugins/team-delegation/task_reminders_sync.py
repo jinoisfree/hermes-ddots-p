@@ -16,6 +16,7 @@ SCHEMA = {'name': 'task_reminders_sync', 'description':
     '업무비서의 업무별 할 일 미리알림 맞추기. common_id 또는 source_kind(notion|notes)+source_id로 원본을 다시 읽는다. '
     '할 일마다 마감 당일 1개 생성·이동·완료·삭제. 노션·메모가 없으면 업무 제목으로 due(등록 초안 마감), '
     '연결 일정 시작 순으로 마감을 찾아 1개 관리하며 마감이 없으면 no_due로 건너뛴다. '
+    '노션·메모의 마감 없는 열린 할 일은 결과 no_due에 남긴다(할 일 줄 | 뒤는 마감 날짜). '
     '날짜만 있으면 시각 없음, 연도 없으면 KST 올해, 7일 제한 없음. '
     '등록의 작성 승인 후 바로 호출한다. 사용자 수정 항목은 관리 제외, 불명확 쓰기는 재시도 금지. '
     '소유자 대화와 승인된 연결 감시·08:40/15:00 점검만 허용.',
@@ -89,6 +90,13 @@ class Native(old.Native):
         self.sources = Sources(home)
 
     def resolve(self, args):
+        # Reuse only within this resolution. check_source/apply still read fresh before writes.
+        snapshots_by_ref = {}
+        def read(kind, identifier):
+            key = (kind, identifier)
+            if key not in snapshots_by_ref:
+                snapshots_by_ref[key] = self.sources.read(kind, identifier)
+            return snapshots_by_ref[key]
         cid = str(args.get('common_id') or '')
         if cid:
             if args.get('source_id') or args.get('source_kind'):
@@ -96,19 +104,25 @@ class Native(old.Native):
             candidate = getattr(self, 'watcher_item', None)
             item = candidate if candidate is not None and candidate['common_id']==cid else self.store.get(cid)
             refs = [r for r in self.sources.references(item) if r[0] in {'notion', 'notes'}]
+            authority = getattr(self.sources, 'authority', lambda *_: None)(item, refs)
+            if authority:refs = [authority]
             if not refs:
                 kind, identifier = 'work', cid
-                source = self.work_source(item, args.get('due'))
+                source = self.work_source(item, args.get('due'), read=read)
             else:
-                snapshots = [(kind, identifier, self.sources.read(kind, identifier)) for kind, identifier in refs]
+                snapshots = [(kind, identifier, read(kind, identifier)) for kind, identifier in refs]
                 if len({content.digest(content.semantic(r['content'])['tasks']) for _, _, r in snapshots}) > 1:
-                    raise ValueError('linked_task_sources_conflict')
+                    # Owner decision 2026-10-26: Notion is the standard when task lists differ.
+                    notion = [snap for snap in snapshots if snap[0] == 'notion']
+                    if len(notion) != 1:
+                        raise ValueError('linked_task_sources_conflict')
+                    snapshots = notion
                 kind, identifier, source = snapshots[0]
         else:
             kind, identifier = args.get('source_kind'), str(args.get('source_id') or '')
             if kind not in {'notion', 'notes'} or not identifier:
                 raise ValueError('common_id_or_source_required')
-            source = self.sources.read(kind, identifier)
+            source = read(kind, identifier)
             item = old.related(self.store, {'kind': kind, 'id': identifier})
             if item is None:
                 if args.get('dry_run') is True:
@@ -122,19 +136,24 @@ class Native(old.Native):
                     item = self.store.link_knowledge_ref('', ref_type='notion_page', external_id=identifier,
                         relation_type='originated_from', link_reason='verified_workflow_evidence', receipt_id=receipt,
                         new_work_title=source['content']['title'])
+        authority = getattr(self.sources, 'authority', lambda *_: None)(item, self.sources.references(item))
+        if authority:
+            kind, identifier = authority
+            source = read(kind, identifier)
         if (item.get('status') != 'active' and kind != 'work') or source['closed']:
             raise ValueError('source_closed')
         for ref_kind, ref_id in self.sources.references(item):
-            if self.sources.read(ref_kind, ref_id).get('closed'):
+            if read(ref_kind, ref_id).get('closed'):
                 raise ValueError('linked_work_closed')
         for linked in item.get('sources', []):
             if linked['domain'] == 'todo' and linked.get('metadata',{}).get('link_state',{}).get('status','ok')=='ok':
                 self.guard('todo', {'action': 'update', 'reminder_id': linked['source_id']})
         return item, {'kind': kind, 'id': identifier, 'url': identifier, **source}
 
-    def work_source(self, item, due=None):
+    def work_source(self, item, due=None, *, read=None):
         """One stable work-level task; calendar reads retain the existing company/identity guards."""
-        snapshots = [(kind, identifier, self.sources.read(kind, identifier))
+        read = read or self.sources.read
+        snapshots = [(kind, identifier, read(kind, identifier))
                      for kind, identifier in self.sources.references(item)]
         if any(row['closed'] for _, _, row in snapshots):
             raise ValueError('linked_work_closed')
@@ -222,7 +241,7 @@ def sync(home, args, *, native=None, config=None, now=None, serialized=False):
     item, source = native.resolve(args)
     dry = args.get('dry_run') is True
     result = {'ok': True, 'common_id': item['common_id'], 'created': [], 'moved': [],
-              'completed': [], 'deleted': [], 'skipped': [], 'past_due': [], 'mutation_calls': 0}
+              'completed': [], 'deleted': [], 'skipped': [], 'past_due': [], 'no_due': [], 'mutation_calls': 0}
     if source['kind'] == 'work' and not source['content']['tasks'][0]['due'] and item['status'] != 'completed':
         result['skipped'].append({'task': item['title'], 'reason': 'no_due'})
         return {**result, 'applied': False}
@@ -286,6 +305,9 @@ def sync(home, args, *, native=None, config=None, now=None, serialized=False):
                           'update' if row and (row.get('title') != task['text'] or fingerprint(row)['due'] != task.get('due')) else
                           'create' if not row and not task.get('done') and task.get('due') else None)
                 if not action:
+                    if not row and not task.get('done') and not task.get('deleted') and not task.get('due'):
+                        # Kept apart from 'skipped' so the 10-minute watcher does not report it.
+                        result['no_due'].append({'task': task['text'], 'reason': 'no_due'})
                     continue
                 if action in {'create', 'update'} and dates.past(task['due'], now=now):
                     result['past_due'].append({'task': task['text'], 'due': task['due']}); continue

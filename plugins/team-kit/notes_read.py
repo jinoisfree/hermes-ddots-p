@@ -37,7 +37,7 @@ def handle(config, home, args, *, runner=None, **_):
                            '조회에 실패했습니다. 결과 없음으로 해석하지 마세요.'}, ensure_ascii=False)
 
 
-SCHEMA = {'name': 'notes_read', 'description': NOTICE + 'Apple Notes 제목·폴더 검색과 선택적인 본문 읽기. 본문은 15000자까지 제공한다. 개수·폴더는 summary=true로 한 번에 센다(검색어·본문 옵션과 함께 쓰지 않는다). offset으로 이어 읽고 next_offset이 null이면 끝이다.',
+SCHEMA = {'name': 'notes_read', 'description': NOTICE + '업무비서는 Obsidian pie1, 개인비서는 Apple 메모의 제목·폴더 검색과 선택적인 본문 읽기. 본문은 15000자까지 제공한다. 개수·폴더는 summary=true로 한 번에 센다(검색어·본문 옵션과 함께 쓰지 않는다). offset으로 이어 읽고 next_offset이 null이면 끝이다.',
           'parameters': {'type': 'object', 'properties': {
               'note_id': {'type': 'string', 'maxLength': 1000},
               'save_images': {'type': 'boolean', 'default': False},
@@ -74,6 +74,13 @@ def query(args, runner=None, home=None):
         raise ReadError('offset은 0 이상 정수여야 합니다.')
     if args.get('summary') and (args.get('query') or args.get('search_body') or args.get('include_body') or offset):
         raise ReadError('summary는 폴더별 전체 개수 조회입니다. 검색어·본문·offset과 함께 쓰지 마세요.')
+    if home is not None and Path(home).name == 'work-assistant':
+        import sys
+        sibling = str(Path(__file__).parents[1]/'team-delegation')
+        if sibling not in sys.path:sys.path.insert(0, sibling)
+        import obsidian_notes
+        if obsidian_notes.disk.enabled(home):
+            return obsidian_notes.read_tool(args)
     command = ['/usr/bin/osascript', '-l', 'JavaScript', str(Path(__file__).with_name('apple_notes_lookup.js')),
                args.get('query', '').strip(), args.get('folder', '').strip(), str(limit),
                str(args.get('include_body', False)).lower(), str(args.get('search_body', False)).lower(),

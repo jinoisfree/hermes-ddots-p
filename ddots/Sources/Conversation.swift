@@ -60,6 +60,26 @@ struct ChatFile: Identifiable, Equatable, Codable {
 /// One line of the Hermes conversation. Bodies are shown on screen only and never stored by the app.
 enum HermesReplyState: String, Codable { case asking, working, closed }
 
+/// Preserve only protocol evidence, so a cached message can be reclassified after a rule edit.
+struct HermesReplyEvidence: Codable, Equatable {
+    var statusText: String
+    var hasStatus: Bool
+    var hasControls: Bool
+    var color: String?
+    func state(_ rules: ConversationRules = DdotsConfig.shared.conversation) -> HermesReplyState? {
+        if rules.list("workingStatus").contains(where: statusText.contains) { return .working }
+        if rules.list("closedStatus").contains(where: statusText.contains) { return .closed }
+        if hasControls { return .asking }
+        if hasStatus, let color {
+            if color.uppercased() == rules.color("askingColor") { return .asking }
+            if color.uppercased() == rules.color("workingColor") { return .working }
+            if color.uppercased() == rules.color("closedColor") { return .closed }
+        }
+        return nil
+    }
+}
+
+
 struct ChatMessage: Identifiable, Equatable {
     var id: String
     var fromUser: Bool
@@ -78,10 +98,17 @@ struct ChatMessage: Identifiable, Equatable {
         self.pending = pending; self.sessionID = sessionID; self.replyInterrupted = replyInterrupted
         self.profile = profile ?? String(id.split(separator: ":").first ?? "")
     }
-    var hermesReplyState: HermesReplyState?
+    var hermesReplyState: HermesReplyState? {
+        didSet { if oldValue != hermesReplyState { hermesReplyEvidence = nil } }
+    }
+    var hermesReplyEvidence: HermesReplyEvidence?
+    var effectiveHermesReplyState: HermesReplyState? {
+        if let evidence = hermesReplyEvidence { return evidence.state() }; return hermesReplyState
+    }
     var hermesButtons: [String] = []
     var hermesChecklist: [String] = []
     var hermesChecklistSelected: [String] = []
+    var hermesChecklistCanSkip = false
     var slackUserID = ""
     var slackBroadcast = false
     /// Colours of the bars beside the last stretches of first-level quoted lines, one per stretch in order;
@@ -311,7 +338,11 @@ struct NudgeEngine {
 
     init(reminders: [String: Date] = [:]) { self.reminders = reminders }
 
-    mutating func update(messages: [ChatMessage], now: Date, chatOpen: Bool, muted: Bool) -> Nudge? {
+    mutating func update(messages: [ChatMessage], now: Date, chatOpen: Bool, muted: Bool, readIDs: Set<String> = []) -> Nudge? {
+        let acknowledged = readIDs.union(chatOpen ? Set(messages.map(\.id)) : [])
+        reminders = reminders.filter { !acknowledged.contains($0.key) }
+        seen.formUnion(acknowledged)
+        if let shown = current, acknowledged.contains(shown.message.id) { current = nil }
         guard let baseline else { self.baseline = now; return nil }
         let fresh = messages.filter { !$0.fromUser && !$0.pending && $0.date > baseline && !seen.contains($0.id) }
         seen.formUnion(fresh.map(\.id))
@@ -328,13 +359,21 @@ struct NudgeEngine {
         return current
     }
 
+    static func visible(_ nudge: Nudge?, now: Date, chatOpen: Bool) -> Nudge? {
+        guard !chatOpen, let nudge, nudge.until > now else { return nil }
+        return nudge
+    }
+
     mutating func remindLater(now: Date) {
         guard let shown = current else { return }
         reminders[shown.message.id] = now.addingTimeInterval(Self.remindAfter)
         current = nil
     }
 
-    mutating func dismiss() { current = nil }
+    mutating func dismiss() {
+        if let shown = current { reminders[shown.message.id] = nil; seen.insert(shown.message.id) }
+        current = nil
+    }
 }
 
 struct ChatReceipt {

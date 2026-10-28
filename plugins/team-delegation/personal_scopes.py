@@ -19,6 +19,7 @@ SCOPED_TOOLS = frozenset({'calendar_direct_mutation', 'reminders_direct_mutation
 OWNERS = {'personal-secretary': 'personal', 'work-assistant': 'company'}
 FLAGS = ('HERMES_CRON_SESSION', 'HERMES_SINGLE_QUERY_SESSION', 'HERMES_KANBAN_TASK')
 MAIL_ACCOUNT = ContextVar('personal_scope_mail_account', default='')
+MAIL_RUNNER = ContextVar('personal_scope_mail_runner', default=None)
 PERSONAL_DISCONNECTED = 'PERSONAL_ACCOUNT_NOT_CONNECTED: 개인 계정 연결 전'
 UNKNOWN = 'PERSONAL_SCOPE_UNVERIFIED: 대상 폴더·목록·캘린더를 확인할 수 없어 쓰기를 거부한다.'
 MAIL_UNKNOWN = 'PERSONAL_SCOPE_MAIL_ACCOUNT_UNKNOWN: 개인·회사 어느 범위에도 등록되지 않은 메일 계정이다.'
@@ -50,7 +51,30 @@ def background(td):
 
 
 def mailbox(td, args, cfg):
-    return str(args.get('account') or MAIL_ACCOUNT.get() or cfg[OWNERS[current(td)]]['gmail']).strip().casefold()
+    return normalize_mail_account(td, args.get('account') or MAIL_ACCOUNT.get() or cfg[OWNERS[current(td)]]['gmail'], cfg)
+
+
+def normalize_mail_account(td, value, cfg=None, runner=None):
+    """Only a unique, single-address company Mail account may supply a display-name alias."""
+    value = str(value or '').strip().casefold()
+    if not value or '@' in value:
+        return value
+    cfg = config(td) if cfg is None else cfg
+    if not cfg or cfg.get('invalid'):
+        return value
+    allowed = {str(a).strip().casefold() for a in cfg.get('company', {}).get('mail_accounts', [])}
+    if not allowed:
+        return value
+    try:
+        rows = td.mail_app.accounts(runner or MAIL_RUNNER.get())
+        found = [r for r in rows if r['name'].strip().casefold() == value]
+        if len(found) == 1:
+            addresses = set(found[0]['addresses'])
+            if len(addresses) == 1 and addresses <= allowed:
+                return next(iter(addresses))
+    except ValueError:
+        pass
+    return value  # role_problem retains the existing unknown-account refusal.
 
 
 def mail_scope(cfg, account):
@@ -132,6 +156,9 @@ def scope_of(cfg, domain, row):
 
 
 def native_metadata(td, domain, args, context):
+    import obsidian_notes
+    if domain == 'notes' and (obsidian_notes.handles(args.get('note_id')) or obsidian_notes.selected(td)):
+        return obsidian_notes.disk.Store().metadata(args.get('note_id'))
     if domain == 'calendar':
         wanted = args.get('event_id') or args.get('eventkit_id')
         # Exact-ID read is independent of today's query window. Mutations still
@@ -210,6 +237,9 @@ def authorize_mutation(td, domain, args, context, *, scope_config=None, owner_sc
     if cfg.get('invalid'):
         raise ValueError(UNKNOWN)
     owner = owner_scope or OWNERS[current(td)]
+    import obsidian_notes
+    if domain == 'notes' and (obsidian_notes.selected(td) or obsidian_notes.handles(args.get('note_id'))):
+        return obsidian_notes.scope(td, args, owner)
     args = dict(args)
     if domain == 'calendar' and owner == 'personal' and not cfg['personal'].get('connected'):
         raise ValueError(PERSONAL_DISCONNECTED)
@@ -365,6 +395,7 @@ def install_mail(td):
         cfg = config(td)
         if cfg is None or current(td) not in OWNERS:return original(args, **context)
         token = None
+        runner_token = MAIL_RUNNER.set(mail_runner)
         try:
             if problem := role_problem(td, 'gmail_direct', args):raise ValueError(problem)
             selected = mailbox(td, args, cfg)
@@ -376,7 +407,10 @@ def install_mail(td):
                         mail_scope(cfg, str(a).casefold()) == OWNERS[current(td)] for a in row.get('addresses', []))]
                 return json.dumps(value, ensure_ascii=False)
             if selected != cfg[OWNERS[current(td)]]['gmail'].casefold():
-                # A listed Mac Mail app account; the original tool reads it through Mail, read-only.
+                # MAIL_ACCOUNT selects a Gmail token, never a Mail app account. Leaving the
+                # POP address here makes _gmail_account() mistake it for the OAuth mailbox.
+                MAIL_ACCOUNT.reset(token)
+                token = MAIL_ACCOUNT.set('')
                 return original({**args, 'account': selected}, **context)
             root = td._gmail_root()
             home = token_home(td, root)
@@ -391,6 +425,7 @@ def install_mail(td):
             return td._error(str(exc) if isinstance(exc, ValueError) else 'PERSONAL_SCOPE_MAIL_ACCOUNT_UNVERIFIED', mutation_calls=0)
         finally:
             if token is not None:MAIL_ACCOUNT.reset(token)
+            MAIL_RUNNER.reset(runner_token)
     td._gmail_direct = mail
 
 

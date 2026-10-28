@@ -10,13 +10,13 @@ import time
 from types import SimpleNamespace
 
 NOTE = '''학습·스킬 보고 검토: 전체 버튼 모두 배우기=이 보고의 학습+스킬 전체 keep, 롤백=전체 reject,
-일부만 배우기=항목별 버튼 안내만(변경 없음). 학습 N번 승인/거절=team_learn_review keep/reject items=[N],
-스킬 N번 승인/거절=team_skill_review keep/reject items=[N]. 수정 버튼은 무엇을 고칠지 먼저 묻는다.
+일부만 배우기=항목별 버튼 안내만(변경 없음). 학습 N번만 승인/거절(그 항목 하나만)=team_learn_review keep/reject items=[N],
+스킬 N번만 승인/거절(그 항목 하나만)=team_skill_review keep/reject items=[N]. 예전 N번 승인/거절도 같은 뜻이다. 수정 버튼은 무엇을 고칠지 먼저 묻는다.
 후속 수정 지시를 받으면 학습은 team_learn_review correct items=[N](rule/operations),
 스킬은 team_skill_review correct items=[N] operations(기존 skill_manage의 정확한 patch)로 처리한다.
 학습승인/학습거절/보류와 번호별 글 답장은 유지한다. 결정만 기록된 경우와 파일까지 바꾼 결과를 구분한다.
 '''
-LABEL = re.compile(r'^(학습|스킬) (\d+)번 (승인|거절|수정)$')
+LABEL = re.compile(r'^(학습|스킬) (\d+)번(?:만)? (승인|거절|수정)$')
 GLOBAL = {'모두 배우기': 'keep', '롤백': 'reject', '일부만 배우기': 'choose',
           '학습승인': 'keep', '학습거절': 'reject', '보류': 'defer'}
 
@@ -28,7 +28,7 @@ def stores(home, base):
 
 def find(home, src, base):
     if src.get('user_id') != base.owner(home) or not base.learning.owner_report_place(home, src):
-        raise ValueError('소유자의 학원 보고 또는 DM 스레드에서만 검토할 수 있어.')
+        raise ValueError('소유자의 학습 채널 보고 또는 DM 스레드에서만 검토할 수 있어.')
     for store, loader in stores(home, base):
         for key, report in loader(home)['reports'].items():
             if (report.get('review_version') == 2 and report.get('thread_ts') == src.get('thread_id')
@@ -183,7 +183,7 @@ def skill_decisions(home, args, src, base):
                     spread_shared(home, plan[0], item['relative'], docs)
                 status = {'keep': 'confirmed', 'reject': 'rejected', 'correct': 'corrected', 'defer': 'deferred'}[action]
                 decision = {'status': status, 'at': time.time(), 'user_said': args['user_said'],
-                            'source': {k: v for k, v in src.items() if k != 'text'}}
+                            'source': {k: v for k, v in src.items() if k not in {'text', 'followups'}}}
                 file = docs.document(home, item['relative'])
                 if file.is_file():
                     decision['current_sha256'] = base.skill_report().hashlib.sha256(file.read_bytes()).hexdigest()

@@ -9,6 +9,10 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
+try:
+    from .gmail_watch import normalized_account, normalized_rfc_id, WatchError
+except ImportError:
+    from gmail_watch import normalized_account, normalized_rfc_id, WatchError
 from pathlib import Path
 from typing import Any
 
@@ -24,7 +28,7 @@ SCHEMA = {
     'name': 'mail_work',
     'description': (
         '업무비서 회사 메일 → 연결 업무 찾기·기록. action=match는 읽기 전용이다. thread_id·message_id·subject(·keywords)로 '
-        '같은 메일 타래가 이미 연결된 업무(match=same_thread)와 제목 낱말이 겹치는 업무 후보(match=keywords)를 돌려준다. '
+        'Mail 앱은 rfc_ids(자기 Message-ID와 References)로 찾고 link는 thread_id 대신 account+rfc_id를 쓴다. 같은 메일 타래가 이미 연결된 업무(match=same_thread)와 제목 낱말이 겹치는 업무 후보(match=keywords)를 돌려준다. '
         '후보는 확정이 아니다. 실제 원본(메모·일정·미리알림·Notion)을 조회해 맞는지 확인한 뒤 고친다. 연결 업무가 없으면 '
         'search_terms로 apple_notes_direct_lookup(search_body=true)·calendar_direct_lookup·reminders_direct_lookup·notion search를 찾는다. '
         'action=link는 소유자 대화에서 메일 내용을 실제로 반영한 뒤 그 타래를 업무(common_id)에 기록해 다음 메일부터 바로 찾게 한다. '
@@ -35,6 +39,9 @@ SCHEMA = {
             'action': {'type': 'string', 'enum': ['match', 'link']},
             'thread_id': {'type': 'string', 'description': 'gmail_direct가 돌려준 Gmail threadId'},
             'message_id': {'type': 'string', 'description': 'gmail_direct가 돌려준 Gmail message id'},
+            'rfc_id': {'type': 'string', 'description': 'Mail 앱 메일의 Message-ID(link용)'},
+            'rfc_ids': {'type': 'array', 'items': {'type': 'string'}, 'maxItems': 51,
+                        'description': 'match용: 자기 rfc_id와 In-Reply-To·References의 Message-ID'},
             'subject': {'type': 'string'},
             'keywords': {'type': 'array', 'items': {'type': 'string'}, 'maxItems': 10,
                          'description': '본문·첨부에서 고른 업무 이름·상대 회사·과제명 등 추가 낱말'},
@@ -98,7 +105,7 @@ def _titles(metadata: dict) -> list[str]:
 def _load(conn: sqlite3.Connection, include_completed: bool) -> dict[str, dict]:
     where = '' if include_completed else "WHERE status = 'active'"
     works = {row['common_id']: {'common_id': row['common_id'], 'title': row['title'], 'status': row['status'],
-                                'sources': [], 'notion_pages': [], 'mail_threads': [], 'haystack': [row['title']]}
+                                'sources': [], 'notion_pages': [], 'mail_threads': [], 'mail_messages': [], 'haystack': [row['title']]}
              for row in conn.execute(f"SELECT common_id, title, status FROM common_work {where}")}
     for row in conn.execute('SELECT common_id, domain, source_id, metadata_json FROM source_links'):
         if (work := works.get(row['common_id'])) is None:
@@ -117,6 +124,11 @@ def _load(conn: sqlite3.Connection, include_completed: bool) -> dict[str, dict]:
             work['notion_pages'].append({'page_id': row['external_id'],
                                          **({'url': metadata['url']} if metadata.get('url') else {})})
             work['haystack'] += _titles(metadata)
+        elif row['ref_type'] == 'mail_message':
+            if rfc_id := normalized_rfc_id(row['external_id']):
+                work['mail_messages'].append(rfc_id)
+            if metadata.get('subject'):
+                work['haystack'].append(clean_subject(metadata['subject']))
         elif row['ref_type'] in ('gmail_thread', 'gmail_message'):
             work['mail_threads'].append(row['external_id'])
             if metadata.get('subject'):
@@ -143,8 +155,12 @@ def match(path: Path, args: dict) -> dict:
         raise MailWorkError('GMAIL_ID_INVALID')
     keywords = [k for k in args.get('keywords') or [] if isinstance(k, str)][:10]
     words = terms(args.get('subject') or '', *keywords)
-    if not ids and not words:
-        raise MailWorkError('thread_id, message_id, subject or keywords required')
+    raw_rfc = args.get('rfc_ids') or []
+    if not isinstance(raw_rfc, list) or len(raw_rfc) > 51 or any(not normalized_rfc_id(v) for v in raw_rfc):
+        raise MailWorkError('MAIL_RFC_IDS_INVALID')
+    rfc_ids = list(dict.fromkeys(normalized_rfc_id(v) for v in raw_rfc))
+    if not ids and not rfc_ids and not words:
+        raise MailWorkError('thread_id, message_id, rfc_ids, subject or keywords required')
     conn = _connect(path)
     try:
         works = _load(conn, args.get('include_completed') is True)
@@ -152,11 +168,14 @@ def match(path: Path, args: dict) -> dict:
         conn.close()
     found = []
     for work in works.values():
-        same = [value for value in ids if value in work['mail_threads']]
+        same = ([value for value in ids if value in work['mail_threads']]
+                + [value for value in rfc_ids if value in work['mail_messages']])
         hits = _score(words, work['haystack'])
         # Years and numbers alone (2026) connect unrelated work; they only add weight.
+        # One shared word is not enough either: a product name (ECAS) spans several works,
+        # e.g. a past consultation and the ongoing plan revision (2026-10-26).
         named = [h for h in hits if not h.isdigit()]
-        strong = len(named) >= 2 or any(len(h) >= 3 for h in named)
+        strong = len(set(named)) >= 2
         if not same and not strong:
             continue
         entry = {key: work[key] for key in ('common_id', 'title', 'status', 'sources', 'notion_pages')}
@@ -177,7 +196,8 @@ def match(path: Path, args: dict) -> dict:
 def compact(result: dict) -> list[dict]:
     """Short form for the scheduled mail report."""
     return [{'common_id': c['common_id'], 'title': c['title'], 'match': c['match'],
-             'sources': sorted({s['domain'] for s in c['sources']} | ({'notion'} if c['notion_pages'] else set()))}
+             'sources': sorted({s['domain'] for s in c['sources']} | ({'notion'} if c['notion_pages'] else set())),
+             **({'matched_terms': c['matched_terms']} if c['match'] == 'keywords' and c.get('matched_terms') else {})}
             for c in result.get('candidates', [])]
 
 
@@ -185,18 +205,34 @@ def link(store, args: dict) -> dict:
     common_id = str(args.get('common_id') or '').strip()
     thread_id = str(args.get('thread_id') or '').strip()
     message_id = str(args.get('message_id') or '').strip()
-    if not common_id or not THREAD.fullmatch(thread_id) or (message_id and not THREAD.fullmatch(message_id)):
-        raise MailWorkError('link needs common_id and a Gmail thread_id')
+    rfc_id = normalized_rfc_id(args.get('rfc_id'))
+    try:
+        account = normalized_account(args.get('account') or '')
+    except WatchError as exc:
+        raise MailWorkError('MAIL_ACCOUNT_INVALID') from exc
+    if thread_id:
+        if not THREAD.fullmatch(thread_id) or (message_id and not THREAD.fullmatch(message_id)):
+            raise MailWorkError('link needs a valid Gmail thread_id')
+        ref_type, external_id = 'gmail_thread', thread_id
+        receipt = 'gmail:' + (message_id or thread_id)
+        identity = {'thread_id': thread_id}
+    elif account and rfc_id:
+        ref_type, external_id = 'mail_message', rfc_id
+        receipt = 'mail_app:' + rfc_id
+        identity = {'account': account, 'rfc_id': rfc_id}
+    else:
+        raise MailWorkError('link needs common_id and a Gmail thread_id or account + rfc_id')
+    if not common_id:
+        raise MailWorkError('link needs common_id')
     work = store.get(common_id)
-    if thread_id in {r['external_id'] for r in work.get('knowledge_refs', []) if r['ref_type'] == 'gmail_thread'}:
-        return {'ok': True, 'already_linked': True, 'common_id': common_id, 'thread_id': thread_id}
+    if external_id in {r['external_id'] for r in work.get('knowledge_refs', []) if r['ref_type'] == ref_type}:
+        return {'ok': True, 'already_linked': True, 'common_id': common_id, **identity}
     metadata = {key: value for key, value in (('subject', clean_subject(args.get('subject') or '')),
-                                               ('account', str(args.get('account') or '').strip().casefold()),
-                                               ('message_id', message_id)) if value}
-    store.link_knowledge_ref(common_id, ref_type='gmail_thread', external_id=thread_id,
+                                               ('account', account), ('message_id', message_id)) if value}
+    store.link_knowledge_ref(common_id, ref_type=ref_type, external_id=external_id,
                              relation_type='discussed_in', link_reason='verified_workflow_evidence',
-                             receipt_id='gmail:' + (message_id or thread_id), metadata=metadata)
-    return {'ok': True, 'linked': True, 'common_id': common_id, 'title': work['title'], 'thread_id': thread_id}
+                             receipt_id=receipt, metadata=metadata)
+    return {'ok': True, 'linked': True, 'common_id': common_id, 'title': work['title'], **identity}
 
 
 def role_problem(td, action: str) -> str | None:

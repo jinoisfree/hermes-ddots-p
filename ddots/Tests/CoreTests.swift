@@ -145,6 +145,14 @@ struct CoreTests {
         let screenEncoded = String(data: try JSONEncoder().encode(screenSnapshot), encoding: .utf8)!
         check(!screenEncoded.contains("PRIVATE"), "screen arguments not retained")
 
+        var stale = completed; stale.state = .responded; stale.updatedAt = now.addingTimeInterval(-300)
+        check(PetTaskSummary.animationState(stale, at: now) == .idle, "selected five-minute response must not keep waving")
+        stale.updatedAt = now.addingTimeInterval(-19)
+        check(PetTaskSummary.animationState(stale, at: now) == .responded, "fresh selected response waves")
+        stale.updatedAt = now.addingTimeInterval(-20)
+        check(PetTaskSummary.animationState(stale, at: now) == .idle, "selected response expires at twenty seconds")
+        stale.state = .waiting
+        check(PetTaskSummary.animationState(stale, at: now) == .waiting, "approval waiting is preserved")
         var runningCodex = completed; runningCodex.state = .running
         var runningClaude = runningCodex; runningClaude.provider = .claude
         check(PetTaskSummary.runningHeadline([runningClaude, runningCodex]) == "Codex · Claude Code · 작업 중", "both AI names shown in bubble")

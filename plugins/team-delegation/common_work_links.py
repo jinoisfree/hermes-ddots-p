@@ -24,6 +24,7 @@ KNOWLEDGE_REF_AUTHORITIES = {
     "notion_page": "Notion",
     "gmail_message": "Gmail",
     "gmail_thread": "Gmail",
+    "mail_message": "Mac Mail app",
     "wiki_page": "starter_user1 LLM Wiki",
     "memory_entry": "Hermes memory",
     "source_session": "Hermes session",

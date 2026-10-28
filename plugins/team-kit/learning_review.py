@@ -108,7 +108,7 @@ def rule_change(data, item, current, action, args, src, learning):
     quote = args["user_said"]
     if action in {"keep", "defer"}:
         current["review"] = {"at": time.time(), "user_said": quote,
-                             "source": {k: v for k, v in src.items() if k != "text"},
+                             "source": {k: v for k, v in src.items() if k not in {"text", "followups"}},
                              "status": "kept" if action == "keep" else "deferred"}
         return
     if action == "reject":
@@ -163,7 +163,7 @@ def skill_change(home, data, item, current, action, args, src, skills, learning)
     if changes or (lesson is not None and lesson != current.get("lesson", {})):
         entry = skills.event(data, name, args.get("rule") or current["rule"], changes, src, args["user_said"], via="review", lesson=lesson)
         current = data["skills"][entry["skill"]]
-    current["review"] = {"at": time.time(), "source": {k: v for k, v in src.items() if k != "text"},
+    current["review"] = {"at": time.time(), "source": {k: v for k, v in src.items() if k not in {"text", "followups"}},
                          "user_said": args["user_said"], "files": baseline,
                          "status": {"keep": "kept", "correct": "corrected", "reject": "reverted", "defer": "deferred"}[action]}
     if archive:
@@ -238,7 +238,7 @@ def review(home, args, session_id, learning, reports, *, _source=None):
                         after.setdefault("report_reviews", {})[item["version"]] = {
                             "status": "kept_report_only", "at": time.time(), "skill": item["skill"],
                             "user_said": args["user_said"],
-                            "source": {k: v for k, v in src.items() if k != "text"},
+                            "source": {k: v for k, v in src.items() if k not in {"text", "followups"}},
                             "current_version": current["version"], "current_confirmed": False,
                         }
                     elif item.get("kind") == "skill":
@@ -265,7 +265,7 @@ def review(home, args, session_id, learning, reports, *, _source=None):
 
 def schema(base, operations):
     result = copy.deepcopy(base)
-    result["description"] = ("Review the owner's daily learning report. 학습 N번 승인=keep items=[N], 학습 N번 거절=reject items=[N]. 학습 N번 수정 asks for the correction first; then correct items=[N]. List first. keep confirms the reported learning, checking only "
+    result["description"] = ("Review the owner's daily learning report. 학습 N번만 승인=keep items=[N], 학습 N번만 거절=reject items=[N] (그 항목 하나만; 예전 N번 승인/거절도 같음). 학습 N번 수정 asks for the correction first; then correct items=[N]. List first. keep confirms the reported learning, checking only "
                              "the report's files or their latest same-thread review snapshot. Without a file snapshot, legacy reports check all "
                              "fingerprints. A newer skill version outside this thread or changed snapshot file records only the "
                              "reported approval (report_only=true, confirmed=false), without approving "

@@ -83,15 +83,15 @@ final class FakeSlack {
             case "auth.test": body["user_id"] = "UME"; body["url"] = "https://team.slack.test/"
             case "users.conversations":
                 if parameters["cursor"] == "page2" { body["channels"] = self.nextPage; break }
-                body["channels"] = [["id": "CCOW", "name": "SNS담당방"], ["id": "CTRUTH", "name": "진실의방"], ["id": "DJARVIS", "is_im": true, "user": "UJARVIS"]] + self.archivedListing
+                body["channels"] = [["id": "CCOW", "name": "SNS담당방"], ["id": "CTRUTH", "name": "검토 채널"], ["id": "Dassistant", "is_im": true, "user": "Uassistant"]] + self.archivedListing
                 if !self.nextPage.isEmpty { body["response_metadata"] = ["next_cursor": "page2"] }
             case "users.info":
                 self.userLookups.append(parameters["user"] ?? "")
                 if let failure = self.unreadable[parameters["user"] ?? ""] { return .failure(failure) }
-                let names = ["UJARVIS": "개인비서", "UOLDJARVIS": "개인비서", "UGUEST": "손님", "UCOWBOT": "SNS담당"]
+                let names = ["Uassistant": "개인비서", "UOLDassistant": "개인비서", "UGUEST": "손님", "UCOWBOT": "SNS담당"]
                 guard let name = names[parameters["user"] ?? ""] else { body = ["ok": false, "error": "user_not_found"]; break }
                 body["user"] = ["real_name": name, "profile": ["display_name": ""], "deleted": self.inactiveUsers.contains(parameters["user"] ?? "")]
-            case "conversations.members": body["members"] = self.memberLists[asked] ?? ["CCOW": ["UME", "UCOWBOT", "UGUEST"], "CTRUTH": ["UJARVIS", "UME", "UGONE"]][asked] ?? []
+            case "conversations.members": body["members"] = self.memberLists[asked] ?? ["CCOW": ["UME", "UCOWBOT", "UGUEST"], "CTRUTH": ["Uassistant", "UME", "UGONE"]][asked] ?? []
             case "conversations.history": body["messages"] = self.history[parameters["channel"] ?? ""] ?? []; body["has_more"] = false
             case "conversations.replies":
                 let key = (parameters["channel"] ?? "") + ":" + (parameters["ts"] ?? "")
@@ -153,7 +153,7 @@ final class FakeSlack {
         check(made.room == SlackRoom(id: "CNEW", name: "새방") && made.problem == nil, "The new room is given back")
         check(fake.roomChanges.map(\.0) == ["conversations.create", "conversations.invite"] && fake.roomChanges[0].1["is_private"] == "true"
               && fake.roomChanges[1].1["users"] == "UCOWBOT,UGUEST" && fake.roomChanges[1].1["channel"] == "CNEW", "A private channel is made and the chosen, not the user, asked in")
-        let channelOrder = [("CNEW", "새방"), ("CTRUTH", "진실의방"), ("CCOW", "SNS담당방")].sorted { $0.1 < $1.1 }.map(\.0) + ["DJARVIS"]
+        let channelOrder = [("CNEW", "새방"), ("CTRUTH", "검토 채널"), ("CCOW", "SNS담당방")].sorted { $0.1 < $1.1 }.map(\.0) + ["Dassistant"]
         check(bridge.current.rooms.map(\.id) == channelOrder && Set(bridge.current.members["CNEW"]?.map(\.user) ?? []) == ["UCOWBOT", "UGUEST"],
               "The new room shows among the channels with its members at once: \(bridge.current.rooms)")
         check(bridge.archive(room: "CNEW") == nil && !bridge.current.rooms.contains { $0.id == "CNEW" } && bridge.current.archived.map(\.id) == ["CNEW", "COLD"], "Archiving moves the room among the archived")
@@ -173,31 +173,31 @@ final class FakeSlack {
 
     static func agentInvitations() {
         _ = NSApplication.shared
-        let people = [SlackBridge.Person(id: "UJARVIS", name: "개인비서", profile: "personal-secretary", bot: true, handle: "jarvis"),
-                      SlackBridge.Person(id: "UJ2", name: "개인비서", profile: "personal-secretary", bot: true, handle: "jarvis-new"),
+        let people = [SlackBridge.Person(id: "Uassistant", name: "개인비서", profile: "personal-secretary", bot: true, handle: "assistant"),
+                      SlackBridge.Person(id: "UJ2", name: "개인비서", profile: "personal-secretary", bot: true, handle: "assistant-new"),
                       SlackBridge.Person(id: "UC", name: "SNS담당", profile: "sns-manager", bot: true),
                       SlackBridge.Person(id: "UTOOL", name: "Calendar", bot: true),
                       SlackBridge.Person(id: "UPERSON", name: "손님")]
         let dialog = SlackRoomDialogs.inviteDialog(room: "합성채널", people: people, unreadable: nil, agentsOnly: true, inside: ["UC"])
-        check(dialog.alert.messageText == "#합성채널에 에이전트 추가" && dialog.picks.boxes.map(\.id) == ["UJARVIS", "UJ2", "UC"], "Only Hermes characters are offered by the agent action")
-        check(dialog.picks.boxes[0].box.title.contains("@jarvis") && dialog.picks.boxes[1].box.title.contains("@jarvis-new"), "Same-named accounts can be distinguished before inviting")
+        check(dialog.alert.messageText == "#합성채널에 에이전트 추가" && dialog.picks.boxes.map(\.id) == ["Uassistant", "UJ2", "UC"], "Only Hermes characters are offered by the agent action")
+        check(dialog.picks.boxes[0].box.title.contains("@assistant") && dialog.picks.boxes[1].box.title.contains("@assistant-new"), "Same-named accounts can be distinguished before inviting")
         check(!dialog.picks.boxes[2].box.isEnabled && dialog.picks.boxes[2].box.title.contains("참여 중"), "An agent already in the channel stays visible and cannot be invited again")
         dialog.picks.boxes[0].box.state = .on; dialog.picks.boxes[2].box.state = .on
-        check(dialog.picks.chosen == ["UJARVIS"], "Only enabled, selected account IDs are invited")
-        let allInside = SlackRoomDialogs.inviteDialog(room: "합성채널", people: people, unreadable: nil, agentsOnly: true, inside: ["UJARVIS", "UJ2", "UC"])
+        check(dialog.picks.chosen == ["Uassistant"], "Only enabled, selected account IDs are invited")
+        let allInside = SlackRoomDialogs.inviteDialog(room: "합성채널", people: people, unreadable: nil, agentsOnly: true, inside: ["Uassistant", "UJ2", "UC"])
         check(!allInside.alert.buttons[0].isEnabled, "No invite is offered when every character is already inside")
         let noAgents = SlackRoomDialogs.inviteDialog(room: "합성채널", people: Array(people.suffix(2)), unreadable: nil, agentsOnly: true)
         check(noAgents.picks.boxes.isEmpty && !noAgents.alert.buttons[0].isEnabled, "An integration or a person alone is not an available character")
         let failed = SlackRoomDialogs.inviteDialog(room: "합성채널", people: [], unreadable: "권한 부족", agentsOnly: true)
         check(failed.picks.chosen.isEmpty && !failed.alert.buttons[0].isEnabled, "An unreadable list cannot invite anyone")
         let general = SlackRoomDialogs.inviteDialog(room: "합성채널", people: people, unreadable: nil, inside: ["UC"])
-        check(general.picks.boxes.map(\.id) == ["UJARVIS", "UJ2", "UTOOL", "UPERSON"], "The existing people action keeps integrations and people, excluding current members")
+        check(general.picks.boxes.map(\.id) == ["Uassistant", "UJ2", "UTOOL", "UPERSON"], "The existing people action keeps integrations and people, excluding current members")
 
         let fake = FakeSlack(), bridge = SlackBridge(api: fake.api)
         _ = bridge.sync(.init(characters: [ChatCharacter(id: "personal-secretary", name: "개인비서")]), now: Date(timeIntervalSince1970: 900))
         check(bridge.invite(room: "CCOW", users: dialog.picks.chosen) == nil && fake.roomChanges.last?.0 == "conversations.invite"
-              && fake.roomChanges.last?.1["channel"] == "CCOW" && fake.roomChanges.last?.1["users"] == "UJARVIS"
-              && bridge.current.members["CCOW"]?.contains { $0.user == "UJARVIS" } == true, "The chosen account is invited into the existing channel and appears among its members")
+              && fake.roomChanges.last?.1["channel"] == "CCOW" && fake.roomChanges.last?.1["users"] == "Uassistant"
+              && bridge.current.members["CCOW"]?.contains { $0.user == "Uassistant" } == true, "The chosen account is invited into the existing channel and appears among its members")
         check(fake.posted.isEmpty && !fake.log.contains("conversations.create"), "Adding an agent does not post a message or create a channel")
     }
 
@@ -205,51 +205,51 @@ final class FakeSlack {
         let folder = FileManager.default.temporaryDirectory.appendingPathComponent("ddots-deleted-agents-" + UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: folder) }
         let file = folder.appendingPathComponent(SlackCache.fileName), fake = FakeSlack()
-        fake.nextPage = [["id": "DOLD", "is_im": true, "user": "UOLDJARVIS"]]
-        fake.memberLists["CTRUTH"] = ["UJARVIS", "UOLDJARVIS", "UME"]
-        fake.inactiveUsers = ["UOLDJARVIS"]
-        fake.history["CTRUTH"] = [["ts": "800.0", "user": "UOLDJARVIS", "text": "이전 답변은 남아 있어요"]]
-        fake.history["DJARVIS"] = [["ts": "801.0", "user": "UJARVIS", "text": "현재 답변"]]
+        fake.nextPage = [["id": "DOLD", "is_im": true, "user": "UOLDassistant"]]
+        fake.memberLists["CTRUTH"] = ["Uassistant", "UOLDassistant", "UME"]
+        fake.inactiveUsers = ["UOLDassistant"]
+        fake.history["CTRUTH"] = [["ts": "800.0", "user": "UOLDassistant", "text": "이전 답변은 남아 있어요"]]
+        fake.history["Dassistant"] = [["ts": "801.0", "user": "Uassistant", "text": "현재 답변"]]
         let cast = [ChatCharacter(id: "personal-secretary", name: "개인비서")]
-        let request = SlackBridge.Request(active: "CTRUTH", open: true, watch: ["DJARVIS", "DOLD"], characters: cast)
+        let request = SlackBridge.Request(active: "CTRUTH", open: true, watch: ["Dassistant", "DOLD"], characters: cast)
         let start = Date(timeIntervalSince1970: 900), bridge = SlackBridge(api: fake.api, cache: file)
         var view = bridge.sync(request, now: start)
-        check(view.rooms.filter(\.direct).map(\.id) == ["DJARVIS"] && !fake.historyLog.contains("DOLD"), "A deleted same-named bot's DM is neither shown nor polled")
-        check(view.members["CTRUTH"]?.map(\.user) == ["UJARVIS"] && view.threads["CTRUTH"]?.first?.root.body == "이전 답변은 남아 있어요", "Deleted agents leave the member picker while earlier channel messages stay readable")
+        check(view.rooms.filter(\.direct).map(\.id) == ["Dassistant"] && !fake.historyLog.contains("DOLD"), "A deleted same-named bot's DM is neither shown nor polled")
+        check(view.members["CTRUTH"]?.map(\.user) == ["Uassistant"] && view.threads["CTRUTH"]?.first?.root.body == "이전 답변은 남아 있어요", "Deleted agents leave the member picker while earlier channel messages stay readable")
 
-        fake.unreadable["UJARVIS"] = .network("일시 오류")
+        fake.unreadable["Uassistant"] = .network("일시 오류")
         view = bridge.sync(request, now: start.addingTimeInterval(301))
-        check(view.rooms.contains { $0.id == "DJARVIS" && $0.name == "개인비서" }, "A transient lookup error keeps a known live account and its name")
-        fake.unreadable = [:]; fake.inactiveUsers.insert("UJARVIS")
+        check(view.rooms.contains { $0.id == "Dassistant" && $0.name == "개인비서" }, "A transient lookup error keeps a known live account and its name")
+        fake.unreadable = [:]; fake.inactiveUsers.insert("Uassistant")
         view = bridge.sync(request, now: start.addingTimeInterval(602))
-        check(!view.rooms.contains(where: \.direct) && view.threads["DJARVIS"] == nil && view.members["CTRUTH"]?.isEmpty == true,
+        check(!view.rooms.contains(where: \.direct) && view.threads["Dassistant"] == nil && view.members["CTRUTH"]?.isEmpty == true,
               "A bot deleted after its name was cached disappears on the next room refresh")
         bridge.flush(now: start.addingTimeInterval(603))
         let cache = SlackCache.read(file)!
-        check(cache.deletedUsers == ["UJARVIS", "UOLDJARVIS"] && !cache.rooms.contains(where: \.direct), "Deletion state is saved, including when there are no remaining DMs")
+        check(cache.deletedUsers == ["Uassistant", "UOLDassistant"] && !cache.rooms.contains(where: \.direct), "Deletion state is saved, including when there are no remaining DMs")
         var stale = cache
-        stale.rooms.append(SlackRoom(id: "DJARVIS", name: "개인비서", direct: true))
-        stale.imUsers["DJARVIS"] = "UJARVIS"
-        stale.memberIDs["DJARVIS"] = ["UJARVIS"]
-        stale.state.history["DJARVIS"] = [SlackMessage(ts: "801.0", user: "UJARVIS", text: "이전 캐시")]
+        stale.rooms.append(SlackRoom(id: "Dassistant", name: "개인비서", direct: true))
+        stale.imUsers["Dassistant"] = "Uassistant"
+        stale.memberIDs["Dassistant"] = ["Uassistant"]
+        stale.state.history["Dassistant"] = [SlackMessage(ts: "801.0", user: "Uassistant", text: "이전 캐시")]
         check(SlackCache.write(try! JSONEncoder().encode(stale), to: file), "Synthetic stale cache is written")
         let next = SlackBridge(api: fake.api, cache: file)
         let restored = next.restore(characters: cast)!
-        check(!restored.rooms.contains(where: \.direct) && restored.threads["DJARVIS"] == nil, "A restart filters stale rooms and messages for accounts already known to be deleted")
-        fake.inactiveUsers.remove("UJARVIS")
+        check(!restored.rooms.contains(where: \.direct) && restored.threads["Dassistant"] == nil, "A restart filters stale rooms and messages for accounts already known to be deleted")
+        fake.inactiveUsers.remove("Uassistant")
         view = next.sync(request, now: start.addingTimeInterval(903))
-        check(view.rooms.filter(\.direct).map(\.id) == ["DJARVIS"], "An explicitly reactivated account becomes available again")
+        check(view.rooms.filter(\.direct).map(\.id) == ["Dassistant"], "An explicitly reactivated account becomes available again")
 
         var legacy = try! JSONSerialization.jsonObject(with: JSONEncoder().encode(cache)) as! [String: Any]
         legacy.removeValue(forKey: "deletedUsers")
         check(SlackCache.write(try! JSONSerialization.data(withJSONObject: legacy), to: file) && SlackCache.read(file) != nil, "Caches from before deletion tracking remain readable")
 
-        fake.unreadable["UOLDJARVIS"] = .api("user_not_found")
+        fake.unreadable["UOLDassistant"] = .api("user_not_found")
         let transport = fake.transport
         let empty = SlackBridge(api: SlackAPI(transport: { method, parameters in
             if method == "users.conversations" {
                 fake.log.append(method)
-                return .success(try! JSONSerialization.data(withJSONObject: ["ok": true, "channels": [["id": "DOLD", "is_im": true, "user": "UOLDJARVIS"]]]))
+                return .success(try! JSONSerialization.data(withJSONObject: ["ok": true, "channels": [["id": "DOLD", "is_im": true, "user": "UOLDassistant"]]]))
             }
             return transport(method, parameters)
         }))
@@ -323,8 +323,8 @@ final class FakeSlack {
             fake.history["CCOW"] = [root]
             fake.replies["CCOW:999990.000001"] = [root, ["ts": "999995.000001", "thread_ts": "999990.000001", "user": "UCOWBOT", "text": "생각 중"]]
             fake.history["CTRUTH"] = [["ts": "999000.000001", "user": "UGUEST", "text": "진실"]]
-            fake.history["DJARVIS"] = [["ts": "998000.000001", "user": "UME", "text": "예전", "reply_count": 1, "thread_ts": "998000.000001", "latest_reply": "999100.000001"]]
-            fake.replies["DJARVIS:998000.000001"] = [["ts": "998000.000001", "user": "UME", "text": "예전"], ["ts": "999100.000001", "thread_ts": "998000.000001", "user": "UJARVIS", "text": "기록할 답"]]
+            fake.history["Dassistant"] = [["ts": "998000.000001", "user": "UME", "text": "예전", "reply_count": 1, "thread_ts": "998000.000001", "latest_reply": "999100.000001"]]
+            fake.replies["Dassistant:998000.000001"] = [["ts": "998000.000001", "user": "UME", "text": "예전"], ["ts": "999100.000001", "thread_ts": "998000.000001", "user": "Uassistant", "text": "기록할 답"]]
         }
         var request = SlackBridge.Request(active: "CCOW", open: true, watch: ["CCOW", "CTRUTH"])
 
@@ -332,9 +332,9 @@ final class FakeSlack {
         let fake = FakeSlack(); room(fake)
         let bridge = SlackBridge(api: fake.api)
         _ = bridge.sync(request, now: t0)
-        check(bridge.current.status == .connected && Set(fake.historyLog) == ["CCOW", "CTRUTH", "DJARVIS"], "the rooms are read first: \(fake.historyLog)")
+        check(bridge.current.status == .connected && Set(fake.historyLog) == ["CCOW", "CTRUTH", "Dassistant"], "the rooms are read first: \(fake.historyLog)")
         fake.limited["conversations.history"] = 10
-        request.scan = ["DJARVIS": 999_000]
+        request.scan = ["Dassistant": 999_000]
         let refusedAt = t0.addingTimeInterval(4)
         _ = bridge.sync(request, now: refusedAt)
         check(fake.historyLog.count == 4 && bridge.calls.filter { $0 == "conversations.history" }.count == 1, "one refused listing, and no other listing in the same round: \(bridge.calls)")
@@ -352,7 +352,7 @@ final class FakeSlack {
         check(bridge.current.status == .connected, "and the notice goes once the wait is over: \(bridge.current.status)")
         for step in 1...40 { _ = bridge.sync(request, now: refusedAt.addingTimeInterval(10.1 + Double(step))) }
         let scanned = bridge.takeScanned()
-        check(scanned.through["DJARVIS"] != nil && scanned.messages["DJARVIS"]?.map(\.body) == ["기록할 답"], "the scan held back finishes later with what it was to find: \(scanned)")
+        check(scanned.through["Dassistant"] != nil && scanned.messages["Dassistant"]?.map(\.body) == ["기록할 답"], "the scan held back finishes later with what it was to find: \(scanned)")
 
         // A slow answer: the wait counts from when the refusal arrived, not from when the round began.
         var up = 100.0
@@ -399,7 +399,7 @@ final class FakeSlack {
         // Many rooms never read: the listings are spread over the passes, not asked for at once.
         let many = FakeSlack()
         many.nextPage = (1...14).map { ["id": "CMANY\($0)", "name": "방\($0)"] }
-        let rooms = ["CCOW", "CTRUTH", "DJARVIS"] + (1...14).map { "CMANY\($0)" }
+        let rooms = ["CCOW", "CTRUTH", "Dassistant"] + (1...14).map { "CMANY\($0)" }
         for id in rooms { many.history[id] = [["ts": "100.000001", "user": "UGUEST", "text": id]] }
         let spread = SlackBridge(api: many.api)
         let wide = SlackBridge.Request(active: "CCOW", open: true, watch: rooms, scan: Dictionary(uniqueKeysWithValues: rooms.map { ($0, 0) }))
@@ -574,7 +574,7 @@ final class FakeSlack {
         polling.nextPage = (1...7).map { ["id": "C" + String($0), "name": "room"] }
         polling.history[room] = [root]
         var pollingRequest = SlackBridge.Request(active: room, open: true)
-        pollingRequest.readRooms = Set(["CCOW", "CTRUTH", "DJARVIS"] + (1...7).map { "C" + String($0) })
+        pollingRequest.readRooms = Set(["CCOW", "CTRUTH", "Dassistant"] + (1...7).map { "C" + String($0) })
         pollingRequest.localRead = [room: 200]; pollingRequest.writesRead = true
         _ = polls.sync(pollingRequest, now: now)
         check(polling.infoRooms == [room], "pending room write gets the first global receipt slot")
@@ -1021,6 +1021,31 @@ final class FakeSlack {
             check(SlackNotice.checklistAnswer(asking, selected: Set(asking.root.hermesChecklistSelected)) == "선택: 노션, 일정", "restored horizontal selection uses normal owner reply text")
             check(asking.root.hermesButtons.isEmpty && asking.root.hermesReplyState == .asking, "horizontal checklist remains an unanswered question, separate from ordinary reply buttons")
         }
+        for attached in [false, true] {
+            let skip: [String: Any] = ["type": "button", "action_id": "hermes_reply_checklist_skip",
+                                      "value": "skip", "text": ["type": "plain_text", "text": "건너뛰기"]]
+            var control = checklistBlock
+            control["elements"] = (control["elements"] as! [[String: Any]]) + [skip]
+            var raw: [String: Any] = ["ts": "100.0", "user": "UCOWBOT", "text": "업무 등록"]
+            if attached { raw["attachments"] = [["color": "#E01E5A", "blocks": [control]]] }
+            else { raw["blocks"] = [control] }
+            let asking = thread(raw)
+            check(SlackNotice.checklistSkipAnswer(asking) == "건너뛰기", "skip is offered without a selection")
+            let cached = try! JSONDecoder().decode(SlackMessage.self, from: JSONEncoder().encode(SlackMessage(json: raw)!))
+            check(cached.hermesChecklistCanSkip == true, "cache retains offered skip capability")
+            var selected = asking; selected.root.hermesChecklistSelected = ["전체", "노션"]
+            check(SlackNotice.checklistSkipAnswer(selected) == "건너뛰기", "skip never submits selected destinations")
+            var working = asking; working.root.hermesReplyState = .working
+            check(SlackNotice.checklistSkipAnswer(working) == nil, "answered question cannot be skipped again")
+            working.root.hermesReplyState = .closed
+            check(SlackNotice.checklistSkipAnswer(working) == nil, "closed question cannot be skipped")
+            let old = thread(["ts": "100.0", "user": "UCOWBOT", "text": "업무 등록", "blocks": [checklistBlock]])
+            check(SlackNotice.checklistSkipAnswer(old) == nil, "legacy checklist does not invent a skip action")
+            var oldCache = try! JSONSerialization.jsonObject(with: JSONEncoder().encode(cached)) as! [String: Any]
+            oldCache.removeValue(forKey: "hermesChecklistCanSkip")
+            let restored = try! JSONDecoder().decode(SlackMessage.self, from: JSONSerialization.data(withJSONObject: oldCache))
+            check(restored.hermesChecklistCanSkip == nil, "old cache without skip field still loads")
+        }
         let labels = ["전체", "노션", "일정", "메모"]
         let toggle = SlackNotice.checklistToggle
         check(toggle(labels, [], "전체", true) == Set(labels), "master on selects every destination")
@@ -1092,7 +1117,7 @@ final class FakeSlack {
         let characters = [ChatCharacter(id: "default", name: "위키담당"), ChatCharacter(id: "sns-manager", name: "SNS담당"), ChatCharacter(id: "personal-secretary", name: "개인비서")]
 
         // Text
-        check(SlackText.display("<@UJARVIS> 봐줘 &gt; <https://example.com/a|문서> <https://example.org> <#C1|일반> <!here>", users: ["UJARVIS": "개인비서"])
+        check(SlackText.display("<@Uassistant> 봐줘 &gt; <https://example.com/a|문서> <https://example.org> <#C1|일반> <!here>", users: ["Uassistant": "개인비서"])
               == "@개인비서 봐줘 > [문서](https://example.com/a) <https://example.org> #일반 @here", "mentions, links and entities become readable text")
         let address = "https://example.com/my_file_name/a*b*c?x=1&y=2"
         let shown = (try? AttributedString(markdown: ChatText.normalizedMarkdown(SlackText.display("자료야 <\(address.replacingOccurrences(of: "&", with: "&amp;"))> 봐줘", users: [:])), options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace))) ?? AttributedString()
@@ -1308,7 +1333,7 @@ final class FakeSlack {
         }
 
         let queuedRooms = FakeSlack()
-        for room in ["CTRUTH", "DJARVIS"] {
+        for room in ["CTRUTH", "Dassistant"] {
             queuedRooms.history[room] = (1...20).map { bot("\(1000 + $0).0", "밀린 글", replies: 1, latest: "2000.0") }
         }
         let priority = SlackBridge(api: queuedRooms.api)
@@ -1397,13 +1422,13 @@ final class FakeSlack {
         slack.replies["CCOW:100.0"] = [bot("100.0", "첫 문의", replies: 1, latest: "101.0"), mine("101.0", "확인했어", thread: "100.0")]
         slack.replies["CCOW:200.0"] = [bot("200.0", "두 번째 문의", replies: 4, latest: "204.0"), mine("201.0", "하나", thread: "200.0"),
                                        bot("202.0", "둘", thread: "200.0"), ["ts": "203.0", "user": "UGUEST", "text": "셋", "thread_ts": "200.0"], bot("204.0", "넷", thread: "200.0")]
-        slack.history["CTRUTH"] = [bot("50.0", "진실의방 글")]
+        slack.history["CTRUTH"] = [bot("50.0", "검토 채널 글")]
 
         let bridge = SlackBridge(api: slack.api)
         let start = Date(timeIntervalSince1970: 1_000)
         var request = SlackBridge.Request(active: "CCOW", open: true, characters: characters)
         var snapshot = bridge.sync(request, now: start)
-        let listedChannels = ["진실의방", "SNS담당방"].sorted()
+        let listedChannels = ["검토 채널", "SNS담당방"].sorted()
         check(snapshot.status == .connected && snapshot.rooms.map(\.name) == listedChannels + ["개인비서"] && snapshot.rooms.last?.direct == true, "rooms are listed with direct conversations last")
         let cow = snapshot.threads["CCOW"] ?? []
         check(cow.map(\.ts) == ["100.0", "200.0", "300.0"], "threads are ordered oldest first and replies never appear as their own thread")
@@ -1433,8 +1458,8 @@ final class FakeSlack {
               "an address is written plainly, status notes and file names follow the words, and a thinking line is left out: \(SlackCopy.text(dressed, place: "", link: nil, mine: "starter_user", zone: seoul))")
 
         // Members and mentions
-        check(snapshot.members["CCOW"]?.map(\.name) == ["SNS담당", "손님"] && snapshot.members["CCOW"]?.first?.profile == "sns-manager" && snapshot.members["CTRUTH"]?.map(\.user) == ["UJARVIS"]
-              && snapshot.members["DJARVIS"]?.map(\.name) == ["개인비서"], "everyone in a room but me is listed, characters first, unreadable names left out: \(snapshot.members)")
+        check(snapshot.members["CCOW"]?.map(\.name) == ["SNS담당", "손님"] && snapshot.members["CCOW"]?.first?.profile == "sns-manager" && snapshot.members["CTRUTH"]?.map(\.user) == ["Uassistant"]
+              && snapshot.members["Dassistant"]?.map(\.name) == ["개인비서"], "everyone in a room but me is listed, characters first, unreadable names left out: \(snapshot.members)")
         check(SlackMention.toggled("확인해줘", name: "SNS담당") == "@SNS담당 확인해줘" && SlackMention.toggled("@SNS담당 확인해줘", name: "SNS담당") == "확인해줘"
               && SlackMention.toggled("@SNS담당방 봐", name: "SNS담당") == "@SNS담당 @SNS담당방 봐", "a mention is added in front and taken out again, never out of a longer word")
         check(SlackMention.outgoing("@SNS담당 a<b & @손님, @SNS담당방 @없는이", members: snapshot.members["CCOW"] ?? []) == "<@UCOWBOT> a&lt;b &amp; <@UGUEST>, @SNS담당방 @없는이", "typed text is literal and known names become real mentions")
@@ -1569,7 +1594,7 @@ final class FakeSlack {
 
         // Polling stays quiet when nothing changed
         snapshot = bridge.sync(request, now: start.addingTimeInterval(1))
-        check(bridge.calls == ["conversations.history"] && snapshot.threads["DJARVIS"] != nil, "the remaining room is read on the next pass: \(bridge.calls)")
+        check(bridge.calls == ["conversations.history"] && snapshot.threads["Dassistant"] != nil, "the remaining room is read on the next pass: \(bridge.calls)")
         snapshot = bridge.sync(request, now: start.addingTimeInterval(2))
         check(bridge.calls.isEmpty, "nothing is asked again inside the interval: \(bridge.calls)")
         snapshot = bridge.sync(request, now: start.addingTimeInterval(4))
@@ -1675,7 +1700,7 @@ final class FakeSlack {
               && notice[1].threads == ["slack:N:9.0"],
               "the notice counts unanswered messages, approval requests by character, and other open statuses; a plain request, a quoted line, a draft with no request and a thread the user answered last are left out: \(notice)")
         noticed.replies["N"]?["9.0"]?.append(SlackMessage(ts: "9.7", threadTS: "9.0", user: "UME", text: "승인"))
-        noticed.replies["N", default: [:]]["7.0"] = [SlackMessage(ts: "7.5", threadTS: "7.0", user: "UJARVIS", name: "개인비서", text: "내가 처리해도 될지 승인 부탁해")]
+        noticed.replies["N", default: [:]]["7.0"] = [SlackMessage(ts: "7.5", threadTS: "7.0", user: "Uassistant", name: "개인비서", text: "내가 처리해도 될지 승인 부탁해")]
         noticed.history["N"]?[6].replyCount = 1; noticed.history["N"]?[6].latestReply = "7.5"
         noticed.replies["N", default: [:]]["6.0"] = [SlackMessage(ts: "6.5", threadTS: "6.0", user: "UCOWBOT", name: "SNS담당", text: "> 초안\n승인하면 이대로 보낼게.")]
         noticed.history["N"]?[5].replyCount = 1; noticed.history["N"]?[5].latestReply = "6.5"
@@ -1686,7 +1711,7 @@ final class FakeSlack {
         var told = SlackState(); told.me = "UME"
         told.history["T"] = [bot("1000.0", "어제 점검 끝났어"), bot("90000.0", "오늘 일정 공유할게", replies: 1, latest: "90010.0"), bot("90100.0", "백업 끝났어", replies: 1, latest: "90110.0"),
                              mine("90200.0", "내가 연 글"), status("90300.0", "#2EB67D", "답변 완료"), bot("90400.0", "◐ 생각 중...")].compactMap(SlackMessage.init(json:))
-        told.replies["T"] = ["90000.0": [SlackMessage(ts: "90010.0", threadTS: "90000.0", user: "UJARVIS", name: "개인비서", text: "나도 봤어")],
+        told.replies["T"] = ["90000.0": [SlackMessage(ts: "90010.0", threadTS: "90000.0", user: "Uassistant", name: "개인비서", text: "나도 봤어")],
                              "90100.0": [SlackMessage(ts: "90110.0", threadTS: "90100.0", user: "UME", text: "고마워"), SlackMessage(ts: "90120.0", threadTS: "90100.0", user: "UCOWBOT", name: "SNS담당", text: "응")]]
         let alerts = SlackNotice.items(told.threads(room: "T", characters: characters), now: Date(timeIntervalSince1970: 91_000))
         check(alerts.map(\.title) == ["알림"] && alerts[0].threads == ["slack:T:90000.0"] && alerts[0].color == SlackNotice.alertColor,
@@ -1865,26 +1890,26 @@ final class FakeSlack {
         check(flaky.userLookups.filter { $0 == "UGONE" }.count == missingLookups && patient.state.users["UGONE"] == SlackBridge.unknownName, "someone Slack says is not there is not asked for again while DM partners are rechecked")
 
         // A new post in the ddots channel calls whoever it is for by a real mention
-        let jarvis = DdotsMember(profile: "personal-secretary", name: "개인비서", room: "DJ"), cowboy = DdotsMember(profile: "sns-manager", name: "SNS담당", room: "DC"), auditor = DdotsMember(profile: "system-doctor", name: "진단담당", room: "DA")
-        let troupe = [jarvis, cowboy, auditor], ids = ["personal-secretary": "UJ", "sns-manager": "UC", "system-doctor": "UA"]
+        let assistant = DdotsMember(profile: "personal-secretary", name: "개인비서", room: "DJ"), cowboy = DdotsMember(profile: "sns-manager", name: "SNS담당", room: "DC"), auditor = DdotsMember(profile: "system-doctor", name: "진단담당", room: "DA")
+        let troupe = [assistant, cowboy, auditor], ids = ["personal-secretary": "UJ", "sns-manager": "UC", "system-doctor": "UA"]
         let inChannel = [SlackMember(profile: "personal-secretary", name: "개인비서", user: "UJ"), SlackMember(profile: "sns-manager", name: "SNS담당", user: "UC"), SlackMember(profile: "", name: "손님", user: "UG")]
-        check(Ddots.post("안녕", to: jarvis, cast: troupe, users: ids, members: inChannel, prependCall: false) == DdotsPost(shown: "안녕", sent: "안녕", called: []), "the usual character needs no automatic mention")
-        check(Ddots.post("", to: jarvis, cast: troupe, users: ids, members: inChannel, prependCall: false) == DdotsPost(shown: "", sent: "", called: []), "a file alone needs no automatic mention for the usual character")
-        check(Ddots.post("@개인비서 안녕", to: jarvis, cast: troupe, users: ids, members: inChannel, prependCall: false).sent == "<@UJ> 안녕", "explicit aliases are converted without an automatic mention")
-        check(Ddots.post("내일 일정 알려줘", to: jarvis, cast: troupe, users: ids, members: inChannel) == DdotsPost(shown: "@개인비서 내일 일정 알려줘", sent: "<@UJ> 내일 일정 알려줘", called: ["UJ"]), "a post is sent with the character it is for called in front")
+        check(Ddots.post("안녕", to: assistant, cast: troupe, users: ids, members: inChannel, prependCall: false) == DdotsPost(shown: "안녕", sent: "안녕", called: []), "the usual character needs no automatic mention")
+        check(Ddots.post("", to: assistant, cast: troupe, users: ids, members: inChannel, prependCall: false) == DdotsPost(shown: "", sent: "", called: []), "a file alone needs no automatic mention for the usual character")
+        check(Ddots.post("@개인비서 안녕", to: assistant, cast: troupe, users: ids, members: inChannel, prependCall: false).sent == "<@UJ> 안녕", "explicit aliases are converted without an automatic mention")
+        check(Ddots.post("내일 일정 알려줘", to: assistant, cast: troupe, users: ids, members: inChannel) == DdotsPost(shown: "@개인비서 내일 일정 알려줘", sent: "<@UJ> 내일 일정 알려줘", called: ["UJ"]), "a post is sent with the character it is for called in front")
         check(Ddots.post("", to: cowboy, cast: troupe, users: ids, members: inChannel).sent == "<@UC>", "a file sent with no words still calls its character")
-        check(Ddots.post("@SNS담당 이거 봐줘", to: jarvis, cast: troupe, users: ids, members: inChannel) == DdotsPost(shown: "@SNS담당 이거 봐줘", sent: "<@UC> 이거 봐줘", called: ["UC"]), "a post that already calls someone is left as typed")
-        check(Ddots.post("@손님 확인 부탁해요", to: jarvis, cast: troupe, users: ids, members: inChannel).called == ["UG"], "calling a person in the channel adds no character")
-        check(Ddots.post("@개인비서 내일 일정", to: jarvis, cast: troupe, users: ids, members: inChannel) == DdotsPost(shown: "@개인비서 내일 일정", sent: "<@UJ> 내일 일정", called: ["UJ"])
+        check(Ddots.post("@SNS담당 이거 봐줘", to: assistant, cast: troupe, users: ids, members: inChannel) == DdotsPost(shown: "@SNS담당 이거 봐줘", sent: "<@UC> 이거 봐줘", called: ["UC"]), "a post that already calls someone is left as typed")
+        check(Ddots.post("@손님 확인 부탁해요", to: assistant, cast: troupe, users: ids, members: inChannel).called == ["UG"], "calling a person in the channel adds no character")
+        check(Ddots.post("@개인비서 내일 일정", to: assistant, cast: troupe, users: ids, members: inChannel) == DdotsPost(shown: "@개인비서 내일 일정", sent: "<@UJ> 내일 일정", called: ["UJ"])
               && Ddots.post("@SNS담당야, 피드 봐줘", to: cowboy, cast: troupe, users: ids, members: inChannel).sent == "<@UC>, 피드 봐줘"
-              && Ddots.post("@어둠의 개인비서 메모", to: jarvis, cast: troupe, users: ids, members: inChannel).sent == "<@UJ> 메모", "another name a character answers to becomes the same call")
-        check(Ddots.post("@here 다들 봐", to: jarvis, cast: troupe, users: ids, members: inChannel).sent == "<@UJ> @here 다들 봐" && Ddots.post("@SNS담당가 한 말", to: jarvis, cast: troupe, users: ids, members: inChannel).sent == "<@UJ> @SNS담당가 한 말",
+              && Ddots.post("@어둠의 개인비서 메모", to: assistant, cast: troupe, users: ids, members: inChannel).sent == "<@UJ> 메모", "another name a character answers to becomes the same call")
+        check(Ddots.post("@here 다들 봐", to: assistant, cast: troupe, users: ids, members: inChannel).sent == "<@UJ> @here 다들 봐" && Ddots.post("@SNS담당가 한 말", to: assistant, cast: troupe, users: ids, members: inChannel).sent == "<@UJ> @SNS담당가 한 말",
               "an @ that calls nobody does not stand in for the call")
-        check(Ddots.post("a < b & c", to: jarvis, cast: troupe, users: ids, members: inChannel).sent == "<@UJ> a &lt; b &amp; c" && Ddots.post("<@UC> 흉내", to: jarvis, cast: troupe, users: ids, members: inChannel).called == ["UJ"], "typed marks stay text; only the call is a mention")
+        check(Ddots.post("a < b & c", to: assistant, cast: troupe, users: ids, members: inChannel).sent == "<@UJ> a &lt; b &amp; c" && Ddots.post("<@UC> 흉내", to: assistant, cast: troupe, users: ids, members: inChannel).called == ["UJ"], "typed marks stay text; only the call is a mention")
         let toAuditor = Ddots.post("토큰 얼마나 썼어?", to: auditor, cast: troupe, users: ids, members: inChannel)
         check(toAuditor.sent == "<@UA> 토큰 얼마나 썼어?" && Ddots.absent(toAuditor, cast: troupe, users: ids, members: inChannel) == auditor, "a character is called by the ID its own conversation gives, and found missing from the channel")
         check(Ddots.absent(toAuditor, cast: troupe, users: ids, members: []) == nil && Ddots.absent(toAuditor, cast: troupe, users: ids, members: [SlackMember(profile: "system-doctor", name: "진단담당")]) == nil
-              && Ddots.absent(Ddots.post("안녕", to: jarvis, cast: troupe, users: ids, members: inChannel), cast: troupe, users: ids, members: inChannel) == nil, "nobody is called missing when who is there is not known, or when they are there")
+              && Ddots.absent(Ddots.post("안녕", to: assistant, cast: troupe, users: ids, members: inChannel), cast: troupe, users: ids, members: inChannel) == nil, "nobody is called missing when who is there is not known, or when they are there")
         check(Ddots.post("안녕", to: auditor, cast: troupe, users: [:], members: inChannel) == DdotsPost(shown: "안녕", sent: "안녕", called: []), "without an ID to call by the words go as typed")
         check(DdotsRoute.leadingCall("@개인비서 일정")?.profile == "personal-secretary" && DdotsRoute.leadingCall("@어둠의 개인비서")?.call == "@어둠의 개인비서" && DdotsRoute.leadingCall("@SNS담당야")?.call == "@SNS담당야"
               && DdotsRoute.leadingCall("@SNS담당가") == nil && DdotsRoute.leadingCall("개인비서 일정") == nil && DdotsRoute.leadingCall("@here") == nil, "a call at the front is read under any of a character's names")
@@ -1892,7 +1917,7 @@ final class FakeSlack {
 
         // A room Slack refuses on its own account rests; the others are read as usual
         let partly = FakeSlack()
-        partly.history["CCOW"] = [bot("100.0", "첫 문의")]; partly.history["CTRUTH"] = [bot("50.0", "진실의방 글")]
+        partly.history["CCOW"] = [bot("100.0", "첫 문의")]; partly.history["CTRUTH"] = [bot("50.0", "검토 채널 글")]
         partly.refused["CTRUTH"] = "not_in_channel"
         let steady = SlackBridge(api: partly.api)
         var both = steady.sync(request, now: start)
@@ -1926,7 +1951,7 @@ final class FakeSlack {
         check(paged.rooms.map(\.id).contains("CHUB") && Ddots.hub(paged.rooms) == "CHUB" && paged.threads["CHUB"]?.count == 1, "a room on the second page is listed and read: \(paged.rooms.map(\.id))")
 
         // A room taken off the list is not read
-        request.skipped = ["CTRUTH", "DJARVIS"]
+        request.skipped = ["CTRUTH", "Dassistant"]
         let trimmed = SlackBridge(api: slack.api)
         _ = trimmed.sync(request, now: start); _ = trimmed.sync(request, now: start.addingTimeInterval(1))
         check(trimmed.current.threads["CCOW"]?.isEmpty == false && (trimmed.current.threads["CTRUTH"] ?? []).isEmpty && trimmed.current.rooms.count == 3, "skipped rooms stay listed for putting back but are not read")
@@ -1979,15 +2004,15 @@ final class FakeSlack {
         // Threads of the rooms on screen are read first, newest first
         let busy = FakeSlack()
         busy.history["CCOW"] = (1...6).map { ["ts": "10\($0).000001", "user": "UGUEST", "text": "채널 글 \($0)", "reply_count": 1, "thread_ts": "10\($0).000001", "latest_reply": "20\($0).000001"] }
-        busy.history["DJARVIS"] = [["ts": "150.000001", "user": "UME", "text": "예전 글", "reply_count": 1, "thread_ts": "150.000001", "latest_reply": "160.000001"],
+        busy.history["Dassistant"] = [["ts": "150.000001", "user": "UME", "text": "예전 글", "reply_count": 1, "thread_ts": "150.000001", "latest_reply": "160.000001"],
                                     ["ts": "900.000001", "user": "UME", "text": "새 글", "reply_count": 1, "thread_ts": "900.000001", "latest_reply": "910.000001"]]
         busy.history["CTRUTH"] = []
-        busy.replies["DJARVIS:900.000001"] = [["ts": "910.000001", "thread_ts": "900.000001", "user": "UJARVIS", "text": "새 답"]]
-        busy.replies["DJARVIS:150.000001"] = [["ts": "160.000001", "thread_ts": "150.000001", "user": "UJARVIS", "text": "예전 답"]]
+        busy.replies["Dassistant:900.000001"] = [["ts": "910.000001", "thread_ts": "900.000001", "user": "Uassistant", "text": "새 답"]]
+        busy.replies["Dassistant:150.000001"] = [["ts": "160.000001", "thread_ts": "150.000001", "user": "Uassistant", "text": "예전 답"]]
         let prompt = SlackBridge(api: busy.api)
-        let shownFirst = prompt.sync(SlackBridge.Request(active: nil, open: false, watch: ["DJARVIS"], characters: characters), now: start.addingTimeInterval(5000))
-        check(shownFirst.threads["DJARVIS"]?.allSatisfy(\.loaded) == true && shownFirst.threads["DJARVIS"]?.last?.replies.map(\.body) == ["새 답"],
-              "the threads on screen have their replies after the first pass, whatever else waits: \(String(describing: shownFirst.threads["DJARVIS"]?.map(\.loaded)))")
+        let shownFirst = prompt.sync(SlackBridge.Request(active: nil, open: false, watch: ["Dassistant"], characters: characters), now: start.addingTimeInterval(5000))
+        check(shownFirst.threads["Dassistant"]?.allSatisfy(\.loaded) == true && shownFirst.threads["Dassistant"]?.last?.replies.map(\.body) == ["새 답"],
+              "the threads on screen have their replies after the first pass, whatever else waits: \(String(describing: shownFirst.threads["Dassistant"]?.map(\.loaded)))")
         check((shownFirst.threads["CCOW"] ?? []).filter(\.loaded).count <= SlackBridge.repliesPerSync, "the other rooms still take their turn a little at a time")
 
         // What a thread waits on, and whose it is
@@ -2071,12 +2096,12 @@ final class FakeSlack {
 
         // Watched rooms are read in turn while ddots is on screen
         let turns = FakeSlack()
-        for room in ["CCOW", "CTRUTH", "DJARVIS"] { turns.history[room] = [["ts": "100.000001", "user": "UGUEST", "text": room]] }
+        for room in ["CCOW", "CTRUTH", "Dassistant"] { turns.history[room] = [["ts": "100.000001", "user": "UGUEST", "text": room]] }
         let taking = SlackBridge(api: turns.api)
-        let turnRequest = SlackBridge.Request(active: nil, open: false, watch: ["CCOW", "CTRUTH", "DJARVIS"], characters: characters)
+        let turnRequest = SlackBridge.Request(active: nil, open: false, watch: ["CCOW", "CTRUTH", "Dassistant"], characters: characters)
         // Two watched rooms that were never read go first, and the usual one-room-per-pass rule takes the third.
         let readSoFar = taking.sync(turnRequest, now: start)
-        check(Set(readSoFar.threads.keys) == ["CCOW", "CTRUTH", "DJARVIS"], "rooms never read are read right away: \(readSoFar.threads.keys)")
+        check(Set(readSoFar.threads.keys) == ["CCOW", "CTRUTH", "Dassistant"], "rooms never read are read right away: \(readSoFar.threads.keys)")
         let slow = SlackBridge(api: turns.api)
         check(slow.sync(SlackBridge.Request(characters: characters), now: start).threads.count == 1, "a room is not listed as empty before it is read")
         _ = taking.sync(turnRequest, now: start.addingTimeInterval(1))
@@ -2088,7 +2113,7 @@ final class FakeSlack {
         // The listing of rooms keeps inside what Slack allows, whatever is on screen
         let crowd = FakeSlack()
         crowd.nextPage = (1...14).map { ["id": "CMORE\($0)", "name": "방\($0)"] }
-        for room in ["CCOW", "CTRUTH", "DJARVIS"] + (1...14).map({ "CMORE\($0)" }) { crowd.history[room] = [["ts": "100.000001", "user": "UGUEST", "text": room]] }
+        for room in ["CCOW", "CTRUTH", "Dassistant"] + (1...14).map({ "CMORE\($0)" }) { crowd.history[room] = [["ts": "100.000001", "user": "UGUEST", "text": room]] }
         let paced = SlackBridge(api: crowd.api)
         let pacedRequest = SlackBridge.Request(active: nil, open: false, watch: ["CCOW"], characters: characters)
         var pacedLog: [(at: Double, rooms: [String])] = []
@@ -2275,28 +2300,28 @@ final class FakeSlack {
 
         // Reading back through a room for the record
         let past = FakeSlack()
-        past.history["DJARVIS"] = [["ts": "900.000001", "user": "UME", "text": "새 첫 글"], ["ts": "500.000001", "user": "UME", "text": "예전 첫 글", "reply_count": 2, "thread_ts": "500.000001", "latest_reply": "950.000001"],
+        past.history["Dassistant"] = [["ts": "900.000001", "user": "UME", "text": "새 첫 글"], ["ts": "500.000001", "user": "UME", "text": "예전 첫 글", "reply_count": 2, "thread_ts": "500.000001", "latest_reply": "950.000001"],
                                    ["ts": "400.000001", "user": "UME", "text": "더 예전 글", "reply_count": 1, "thread_ts": "400.000001", "latest_reply": "450.000001"],
                                    ["ts": "300.000001", "subtype": "assistant_app_thread", "text": "", "reply_count": 1, "thread_ts": "300.000001", "latest_reply": "920.000001"]]
-        past.replies["DJARVIS:500.000001"] = [["ts": "500.000001", "user": "UME", "text": "예전 첫 글"], ["ts": "510.000001", "thread_ts": "500.000001", "user": "UJARVIS", "text": "예전 답"],
-                                              ["ts": "950.000001", "thread_ts": "500.000001", "user": "UJARVIS", "text": "새 답"]]
-        past.replies["DJARVIS:300.000001"] = [["ts": "920.000001", "thread_ts": "300.000001", "user": "UJARVIS", "text": "예전 방식 대화의 새 답"]]
+        past.replies["Dassistant:500.000001"] = [["ts": "500.000001", "user": "UME", "text": "예전 첫 글"], ["ts": "510.000001", "thread_ts": "500.000001", "user": "Uassistant", "text": "예전 답"],
+                                              ["ts": "950.000001", "thread_ts": "500.000001", "user": "Uassistant", "text": "새 답"]]
+        past.replies["Dassistant:300.000001"] = [["ts": "920.000001", "thread_ts": "300.000001", "user": "Uassistant", "text": "예전 방식 대화의 새 답"]]
         let reader = SlackBridge(api: past.api)
-        var backRequest = SlackBridge.Request(scan: ["DJARVIS": 800], characters: characters)
+        var backRequest = SlackBridge.Request(scan: ["Dassistant": 800], characters: characters)
         _ = reader.sync(backRequest, now: start)
         var found = reader.takeScanned()
-        check(found.through.isEmpty && found.messages["DJARVIS"]?.map(\.body) == ["새 첫 글"], "a scan first takes the first messages newer than the record: \(String(describing: found.messages["DJARVIS"]?.map(\.body)))")
+        check(found.through.isEmpty && found.messages["Dassistant"]?.map(\.body) == ["새 첫 글"], "a scan first takes the first messages newer than the record: \(String(describing: found.messages["Dassistant"]?.map(\.body)))")
         _ = reader.sync(backRequest, now: start.addingTimeInterval(1))
         found = reader.takeScanned()
-        check(found.messages["DJARVIS"]?.map(\.body) == ["새 답", "예전 방식 대화의 새 답"] && found.through["DJARVIS"] == start.timeIntervalSince1970,
-              "then only threads that hold something newer are opened, and the room is read through as of when the scan began: \(String(describing: found.messages["DJARVIS"]?.map(\.body)))")
-        check(found.messages["DJARVIS"]?.first?.sessionID == "500.000001", "a reply keeps the thread it belongs to")
+        check(found.messages["Dassistant"]?.map(\.body) == ["새 답", "예전 방식 대화의 새 답"] && found.through["Dassistant"] == start.timeIntervalSince1970,
+              "then only threads that hold something newer are opened, and the room is read through as of when the scan began: \(String(describing: found.messages["Dassistant"]?.map(\.body)))")
+        check(found.messages["Dassistant"]?.first?.sessionID == "500.000001", "a reply keeps the thread it belongs to")
         _ = reader.sync(backRequest, now: start.addingTimeInterval(20))
         found = reader.takeScanned()
         check(found.through.isEmpty && found.messages.isEmpty, "a finished scan is not run again")
-        backRequest.scan = ["DJARVIS": start.timeIntervalSince1970]
+        backRequest.scan = ["Dassistant": start.timeIntervalSince1970]
         _ = reader.sync(backRequest, now: start.addingTimeInterval(40))
-        check(reader.takeScanned().through["DJARVIS"] == start.timeIntervalSince1970 + 40, "a later scan from where the last one began finds nothing new and finishes")
+        check(reader.takeScanned().through["Dassistant"] == start.timeIntervalSince1970 + 40, "a later scan from where the last one began finds nothing new and finishes")
 
         // Expectations are generated by the independent Hermes Python router.
         let routeSamples = DdotsConfig.shared.document["routing_samples"] as? [[String:String]] ?? []
@@ -2468,7 +2493,7 @@ final class FakeSlack {
             // What is left out of it
             let pruneNow = keepTime.timeIntervalSince1970 + 60
             var trimmed = good
-            trimmed.prune(listed: ["CCOW", "DJARVIS"], recent: [], now: pruneNow)
+            trimmed.prune(listed: ["CCOW", "Dassistant"], recent: [], now: pruneNow)
             check(trimmed.state.history["CTRUTH"] == nil && trimmed.state.replies["CTRUTH"] == nil && !trimmed.rooms.contains { $0.id == "CTRUTH" }
                   && !trimmed.fetched.keys.contains { $0.hasPrefix("CTRUTH:") } && trimmed.state.history["CCOW"] != nil, "a room no longer listed is left out, stamps and all")
             trimmed = good
@@ -2621,6 +2646,19 @@ final class FakeSlack {
             check(!memo.needsPetApproval([unloaded], rooms: ["selected-room"], confirmed: []), "Unread replies cannot be assumed to leave an approval unanswered")
             var edited = pending; edited.root.body = "승인을 기다리는 건 이제 없습니다."
             check(!memo.needsPetApproval([edited], rooms: ["selected-room"], confirmed: []), "Editing away the request invalidates the approval decision")
+            for body in ["새 메일이 도착했어요", "배운 일하는 방법 3건이야", "> [[버튼: 확인 | 보류]]\n참고용 알림입니다"] {
+                var notification = pending
+                notification.root.body = body
+                check(!memo.needsPetApproval([notification], rooms: ["selected-room"], confirmed: []), "Ordinary notifications and learning summaries never wave the phone")
+                notification.root.hermesReplyState = .asking
+                notification.root.hermesReplyEvidence = HermesReplyEvidence(statusText: "알림", hasStatus: true, hasControls: false, color: SlackNotice.questionColor)
+                check(!memo.needsPetApproval([notification], rooms: ["selected-room"], confirmed: []), "A red notification without an answer request never waves the phone")
+            }
+            var choice = pending
+            choice.root.body = "어느 쪽으로 진행할까요?"
+            choice.root.hermesReplyState = .asking
+            choice.root.hermesButtons = ["진행해", "보류"]
+            check(memo.needsPetApproval([choice], rooms: ["selected-room"], confirmed: []), "An unanswered choice still waves the phone")
             let many = (0..<513).map { index -> SlackThread in
                 var thread = edited; thread.id = "pet-idle:\(index)"; thread.root.id = thread.id
                 return thread
@@ -2817,6 +2855,32 @@ final class FakeSlack {
             check(AgentStop.undoRequest.contains("목록") && AgentStop.undoRequest.contains("확인 전에는 아무것도 바꾸지 마"), "The undo request asks for the list first and no change before agreement")
         }
         roomChanges()
+        do {
+            guard ProcessInfo.processInfo.environment["DDOTS_CONFIG_ROOT"] != nil else { fatalError("temporary DDOTS_CONFIG_ROOT required") }
+            let config = DdotsConfig.shared, file = DdotsConfig.shared.root.appendingPathComponent("ddots-config.json")
+            let original = try! Data(contentsOf: file)
+            defer { try! original.write(to: file, options: .atomic); config.refresh() }
+            let ask = ChatMessage(id: "config-ask", fromUser: false, speaker: "Helper", body: "결재해", date: Date())
+            var thread = SlackThread(id: "config-thread", room: "TEST", ts: "1", root: ask, replies: [], replyCount: 0,
+                                     loaded: true, latest: 1, latestFromUser: false)
+            var memo = SlackNoticeMemo()
+            check(!memo.needsPetApproval([thread], rooms: ["TEST"], confirmed: []), "baseline custom request is not approval")
+            let raw = SlackMessage(json: ["ts": "1", "text": "report", "blocks": [["type": "context", "block_id": "hermes_report_status", "elements": [["type": "mrkdwn", "text": "종료표시"]]]]])!
+            check(raw.effectiveHermesReplyState == nil, "unknown status before rule change")
+            var doc = try! JSONSerialization.jsonObject(with: original) as! [String: Any]
+            doc["conversation"] = ["schema": 1, "sets": ["yes": ["go"], "settled": ["끝"], "closedStatus": ["종료표시"]],
+                                   "patterns": ["approval1": "결재해", "mailDraft": "["]]
+            try! JSONSerialization.data(withJSONObject: doc).write(to: file, options: .atomic); config.refresh()
+            check(config.status.contains("conversation.patterns.mailDraft"), "invalid regex is reported")
+            check(SlackNotice.isMailDraft("메일 초안 발송 대기"), "invalid regex falls back locally")
+            check(SlackNotice.isSettled("끝") && !SlackNotice.isSettled("종결"), "settled set changes")
+            check(memo.needsPetApproval([thread], rooms: ["TEST"], confirmed: []), "same cached thread recomputes pet approval")
+            check(raw.effectiveHermesReplyState == .closed, "existing raw message reclassifies without fetch")
+            thread.replies = [ChatMessage(id: "config-answer", fromUser: true, speaker: "Owner", body: "go", date: Date()),
+                              ChatMessage(id: "config-done", fromUser: false, speaker: "Helper", body: "done", date: Date())]
+            check(SlackNotice.isSettled(thread), "custom yes completes exchange")
+            check(!memo.needsPetApproval([thread], rooms: ["TEST"], confirmed: []), "completed custom exchange clears pet")
+        }
         print("SlackTests passed")
     }
 }

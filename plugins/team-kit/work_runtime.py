@@ -41,13 +41,19 @@ BUSINESS = READS | {"contacts_direct_mutation", "file_move", "file_copy", "folde
                     "claude_code_artifact", "kanban_create", "kanban_unblock", "kanban_comment", "paseo"}
 BUSINESS |= {"doc_convert", "doc_fill", "task_reminders_sync"}
 PREFLIGHT = {"common_work_get", "kanban_show", "kanban_list"}
+UNGATED_READS = {"session_search", "skill_view", "skills_list", "team_recall"}
 # 2026-10-21 사용자 결정(선 작성 후 보고): 일정·미리알림 단건 쓰기는 A가 조회 후 바로 실행하고,
 # 업무 기록은 실제 도구 결과로 자동 작성한다. 승인 버튼·범위 검사는 각 도구가 그대로 맡는다.
 DIRECT = {"task_reminders_sync", "contacts_direct_lookup", "contacts_direct_mutation", "calendar_direct_lookup", "reminders_direct_lookup", "google_calendar_color_get",
           "calendar_direct_mutation", "google_calendar_color_set", "reminders_direct_mutation", "personal_work_bundle"}
+# 2026-10-26 사용자 결정: '○○ 완료처리'는 A가 조회 뒤 바로 끝낸다. 메모 조회, 연결 업무 완료,
+# 단독 메모의 complete 폴더 이동만 더한다(그 밖의 메모 쓰기는 계속 team_work 인계).
+DIRECT |= {"apple_notes_direct_lookup", "common_work_get", "common_work_complete"}
 DIRECT_NOTE = (" 일정·미리알림 단건 생성·수정·색 지정·삭제와 연락처 단건·묶음 쓰기는 A가 필요한 조회 뒤 바로 처리한다. 추가성 쓰기는 선 작성 후 보고다. 연락처 create/import_vcf/group_create/group_add는 즉시 실행하며 update/delete/group_rename/group_delete/group_remove는 승인 버튼을 유지한다. team_work(start) 없이 A가 필요한 조회 뒤 "
                "바로 실행하고 결과로 답한다. 업무 기록은 실제 도구 결과로 자동 작성되므로 team_work를 부르지 않는다. "
-               "업무비서 할 일 등록 체크리스트와 선택 뒤 묶음·노션·연결은 A가 같은 턴에 처리한다. 그 밖에 여러 담당자·선행 조건·메일·파일·Notion이 얽힌 일은 team_work(start)로 B에게 넘긴다.")
+               "업무비서 할 일 등록 체크리스트와 선택 뒤 묶음·노션·연결은 A가 같은 턴에 처리한다. "
+               "소유자가 업무·일정·메모를 완료처리하라고 하면 A가 찾은 원본의 common_id를 common_work_get으로 확인하고 common_work_complete 한 번으로 끝낸다(메모 본문을 고쳐 완료를 흉내 내지 않는다). "
+               "연결 업무가 없는 단독 메모만 apple_notes_direct_mutation(action=move, folder=complete)로 옮긴다. 그 밖에 여러 담당자·선행 조건·메일·파일·Notion이 얽힌 일은 team_work(start)로 B에게 넘긴다.")
 LEARNING = {"memory", "team_learn", "team_learn_review", "team_skill_review", "skill_manage"}
 GMAIL_WRITES = frozenset({"send", "label_create", "label_apply", "filter_create", "filter_delete", "mail_organize", "inbox_restore"})
 GMAIL_INPUT_ERRORS = frozenset({
@@ -60,6 +66,13 @@ GMAIL_INPUT_ERRORS = frozenset({
 SIMPLE = re.compile(r"(?:(?:안녕|안녕하세요|고마워|감사합니다)[.!~ ]*|"
                     r"(?:오늘|내일|이번\s*주)\s*(?:내\s*)?(?:일정|캘린더|할\s*일|미리\s*알림)"
                     r"(?:(?:을|를)?\s*(?:좀\s*)?(?:알려\s*줘|보여\s*줘|확인해\s*줘|조회해\s*줘|알려주세요|보여주세요|확인해주세요|조회해주세요))?[?.!~ ]*)")
+
+
+def completion_move(tool, args):
+    """Moving a memo the owner called finished into 'complete' (2026-10-26) is A's direct write."""
+    args = args or {}
+    return (tool == "apple_notes_direct_mutation" and str(args.get("action") or "").strip() == "move"
+            and str(args.get("folder") or "").strip() == "complete")
 
 
 def direct_tools(home, learning, turn):
@@ -117,10 +130,48 @@ def save(home, data, learning):
     learning.save(path(home, data["case_id"]), data)
 
 
-def public(data):
-    return {k: copy.deepcopy(data[k]) for k in
-            ("case_id", "source", "goal", "scope", "plan", "done_when", "difficulty", "tools", "status",
-             "progress", "next_step", "references", "receipts", "review", "updated_at") if k in data}
+RECENT_RECEIPTS = 10
+SUCCESS_IDS = 60
+
+
+def _receipt_row(receipt):
+    row = {k: receipt[k] for k in ("tool_call_id", "tool", "status", "write", "at") if k in receipt}
+    if "resolved" in receipt:
+        row["resolved"] = copy.deepcopy(receipt["resolved"])
+    return row
+
+
+def public(data, *, detail=False):
+    out = {k: copy.deepcopy(data[k]) for k in
+           ("case_id", "source", "goal", "scope", "plan", "done_when", "difficulty", "tools", "status",
+            "progress", "next_step", "references", "review", "updated_at") if k in data}
+    # Keep every evidence ID and resolution; only older narrative is deferred to read(detail=True).
+    progress = out.get("progress", [])
+    omitted = 0
+    if not detail:
+        for row in progress[:-3]:
+            if "summary" in row and "receipt_id" not in row:
+                del row["summary"]
+                row["summary_omitted"] = True
+                omitted += 1
+    if omitted:
+        out["progress_summary"] = {
+            "total": len(progress), "omitted_summaries": omitted,
+            "detail_request": {"action": "read", "case_id": data["case_id"], "detail": True},
+            "hint": "Read details before relying on an omitted step's narrative; evidence IDs are not its meaning.",
+        }
+    if "receipts" in data:
+        # Replies stay bounded; the stored checkpoint and every guard keep the full receipts.
+        receipts = data["receipts"]
+        recent = len(receipts) - RECENT_RECEIPTS
+        shown = [_receipt_row(r) for i, r in enumerate(receipts) if detail or i >= recent or "resolved" in r
+                 or (r.get("write") and r.get("status") in {"unknown", "partial"})]
+        success = [r["tool_call_id"] for r in receipts if r.get("status") == "success" and r.get("tool_call_id")]
+        out["receipts"] = shown
+        out["receipt_summary"] = {"total": len(receipts), "shown": len(shown), "omitted": len(receipts) - len(shown),
+                                  "success_ids": success if detail else success[-SUCCESS_IDS:],
+                                  "success_ids_omitted": 0 if detail else max(0, len(success) - SUCCESS_IDS)}
+    return out
 
 
 def pending(home, owner_id, *, limit=5, project_source=None):
@@ -185,11 +236,14 @@ def context(home, learning, *, session_id, turn_id="", sender_id="", user_messag
     if not learning.extension("memory_live")._pre_owner(home, learning, session_id, sender_id, user_message):
         return ""
     request = learning.extension('request_source').text(home, learning, user_message)
+    from gateway.session_context import get_session_env
+    source_message_id = get_session_env('HERMES_SESSION_MESSAGE_ID', '')
     location = learning.extension("location_context").binding(home, turn_id)
     location_only = bool(location and location["session_id"] == session_id and location["only"])
     simple = bool(settings(home, learning).get("simple_requests", True) and (SIMPLE.fullmatch(request) or location_only))
     with _LOCK:
         _TURNS[key(home, turn_id)] = {"owner": sender_id, "session_id": session_id, "request": request,
+                                    "source_message_id": source_message_id,
                                     "phase": "simple" if simple else "interpret", "last_role": "", "simple_request": simple,
                                     "case_id": None, "observations": [], "started_at": time.time(),
                                     "location_only": location_only,
@@ -230,6 +284,10 @@ def authorized(home, learning, session_id, turn_id):
     turn = binding(home, turn_id)
     if not turn or src["user_id"] != turn["owner"] or learning.extension('request_source').text(home, learning, src['text']) != turn["request"]:
         raise ValueError("Work requires the current verified owner turn, not a previous or background request.")
+    if session_id != turn['session_id']:
+        raise ValueError('Work requires the session bound to the current owner turn.')
+    if turn.get('source_message_id') and src.get('platform_message_id') != turn['source_message_id']:
+        raise ValueError('Work requires the Slack message bound to the current owner turn.')
     return src, turn
 
 
@@ -260,7 +318,11 @@ def writing(tool, args):
 def guard(home, learning, *, tool_name, args, session_id, turn_id="", **_):
     if not settings(home, learning) or not binding(home, turn_id):
         return None
-    src, turn = authorized(home, learning, session_id, turn_id)
+    try:
+        src, turn = authorized(home, learning, session_id, turn_id)
+    except ValueError as exc:
+        LOG.warning('team-kit work guard blocked: %s', str(exc))
+        return {'action': 'block', 'message': '현재 소유자 요청을 확인하지 못했다: ' + str(exc)}
     if turn.get("location_only"):
         return {"action": "block", "message": "현재 위치 단순 조회는 제공된 위치 블록으로 답하고 추가 도구를 호출하지 않는다."}
     if tool_name == "team_work" and turn["last_role"] == "simple":
@@ -280,7 +342,7 @@ def guard(home, learning, *, tool_name, args, session_id, turn_id="", **_):
     if turn["last_role"] in {"interpret", "review"} and tool_name in PREFLIGHT:
         return None
     capture_allowed = (tool_name in DIRECT or learning.extension('task_capture').allowed(tool_name, args or {}))
-    if (capture_allowed and tool_name in direct_tools(home, learning, turn) and turn["last_role"] == "interpret" and turn["phase"] == "interpret"
+    if ((capture_allowed and tool_name in direct_tools(home, learning, turn) or completion_move(tool_name, args)) and turn["last_role"] == "interpret" and turn["phase"] == "interpret"
             and (not turn["case_id"] or turn.get("direct"))):
         turn["direct"] = True
         return _write_problem(tool_name, args, turn["observations"], learning)
@@ -395,7 +457,7 @@ def _direct_record(home, learning, src, turn):
         if not file.exists():
             request = turn["request"].strip() or "일정·미리알림 단건 쓰기"
             # Earlier lookups in this turn are part of the evidence too.
-            work = {"case_id":case_id, "source":{k:v for k,v in src.items() if k != "text"},
+            work = {"case_id":case_id, "source":{k:v for k,v in src.items() if k not in {"text", "followups"}},
                     "created_at":time.time(), "receipts":list(turn["observations"][:-1]), "references":[], "progress":[],
                     "goal":request[:500], "scope":"선 작성 후 보고: 소유자 대화의 일정·미리알림 단건 쓰기",
                     "plan":["조회 후 바로 실행하고 결과로 답한다"], "done_when":["쓰기 도구가 성공을 반환한다"],
@@ -412,8 +474,12 @@ def _start(home, args, src, turn, learning):
         raise ValueError("Only A may define the execution scope. Ask for review first.")
     learning.validate_quote(src, args.get("user_said", ""))
     tools = args.get("tools", [])
+    # Read-only helpers that are never gated: drop them instead of failing the handoff and costing a
+    # whole model turn (2026-10-26). Anything else outside BUSINESS still fails, naming the tool.
+    tools = [t for t in tools if t not in UNGATED_READS] if isinstance(tools, list) else tools
     if not isinstance(tools, list) or len(tools) > 30 or any(t not in BUSINESS for t in tools):
-        raise ValueError("tools must name offered business tools, at most 30.")
+        bad = [t for t in tools if t not in BUSINESS] if isinstance(tools, list) else []
+        raise ValueError("tools must name offered business tools, at most 30." + (f" Not business tools: {bad}" if bad else ""))
     plan = strings(args.get("plan"), "plan")
     difficulty = args.get("difficulty", "normal")
     if difficulty not in {"simple", "normal", "complex"}:
@@ -429,7 +495,7 @@ def _start(home, args, src, turn, learning):
                 raise ValueError("This owner request is already completed; do not repeat it.")
             # Same-turn replanning preserves receipts and canonical ids.
         else:
-            work = {"case_id":case_id, "source":{k:v for k,v in src.items() if k != "text"},
+            work = {"case_id":case_id, "source":{k:v for k,v in src.items() if k not in {"text", "followups"}},
                     "created_at":time.time(), "receipts":[], "references":[], "progress":[]}
         work.update(goal=text(args.get("goal"), "goal", 500), scope=text(args.get("scope"), "scope", 1000),
                     plan=plan, done_when=strings(args.get("done_when"), "done_when", 8),
@@ -438,7 +504,7 @@ def _start(home, args, src, turn, learning):
     turn.update(phase="execute", case_id=case_id, direct=False)
     if difficulty == "complex":
         turn["effort"] = "xhigh"
-    return {"ok":True, "handoff":public(work), "original_request":src["text"],
+    return {"ok":True, "handoff":public(work, detail=args.get("detail") is True), "original_request":src["text"],
             "approval":"No approval is transferred. Use the existing tool approval path for every action."}
 
 
@@ -490,7 +556,7 @@ def handle(home, args, *, learning, session_id="", turn_id="", **_):
             if project_scope and any(work["source"].get(k) != src.get(k) for k in ("chat_id", "thread_id")):
                 raise ValueError("This work belongs to another project thread.")
             if action == "read":
-                return json.dumps({"ok":True, "checkpoint":public(work), "hint":"Before resume, use common_work_get/kanban_show to refresh every referenced original. Past approvals do not transfer."}, ensure_ascii=False)
+                return json.dumps({"ok":True, "checkpoint":public(work, detail=args.get("detail") is True), "hint":"Before resume, use common_work_get/kanban_show to refresh every referenced original. Past approvals do not transfer."}, ensure_ascii=False)
             resolved = None
             if action == "resolve_uncertain":
                 resolved = _resolve_uncertain(work, args, turn)
@@ -503,7 +569,7 @@ def handle(home, args, *, learning, session_id="", turn_id="", **_):
                 if any((r["kind"],r["id"]) not in observed for r in work["references"]):
                     raise ValueError("Read each original Common ID/card in this turn before resuming; do not create replacement objects.")
                 work["references"] = [observed[(r["kind"],r["id"])] for r in work["references"]]
-                work["resumed_from"] = {k:v for k,v in src.items() if k != "text"}
+                work["resumed_from"] = {k:v for k,v in src.items() if k not in {"text", "followups"}}
                 already_done = work["references"] and all(r["status"] in {"done", "completed"} for r in work["references"])
                 work["status"] = "awaiting_review" if already_done else "executing"
                 turn.update(phase="review" if already_done else "execute", case_id=case_id)
@@ -545,13 +611,17 @@ def handle(home, args, *, learning, session_id="", turn_id="", **_):
                 for observation in turn["observations"]:
                     if observation["tool_call_id"] == resolved["tool_call_id"]:
                         observation.update(status=resolved["status"], resolved=copy.deepcopy(resolved["resolved"]))
-        return json.dumps({"ok":True, "checkpoint":public(work)}, ensure_ascii=False)
+        return json.dumps({"ok":True, "checkpoint":public(work, detail=args.get("detail") is True)}, ensure_ascii=False)
     except (OSError, ValueError, TypeError, KeyError) as exc:
         return json.dumps({"ok":False, "error":str(exc)}, ensure_ascii=False)
 
 
 def request(home, learning, payload, *, turn_id="", **_):
-    if _.get("aux_task") or _.get("auxiliary") or _.get("provider") not in (None, "", PROVIDER):
+    if _.get("aux_task") or _.get("auxiliary"):
+        return None
+    provider = _.get("provider")
+    fallback = provider == "openai-codex" and binding(home, turn_id) is not None
+    if provider not in (None, "", PROVIDER) and not fallback:
         return None
     cfg = settings(home, learning)
     if not cfg:
@@ -579,17 +649,30 @@ def request(home, learning, payload, *, turn_id="", **_):
     effort = "medium" if difficulty == "simple" else "xhigh" if difficulty == "complex" else "high"
     if turn and turn.get("effort") == "xhigh":
         effort = "xhigh"
-    # Per-profile opt-in; existing Jarvis/background effort selection is unchanged.
+    # Per-profile opt-in; existing assistant/background effort selection is unchanged.
     if role == "execute" and cfg.get("executor_effort") in {"low", "medium", "high", "xhigh", "max"}:
         effort = cfg["executor_effort"]
     result = copy.deepcopy(payload)
-    result["model"] = model
-    extra = result.get("extra_body") or {}
-    extra["reasoning"] = {"enabled":True, "effort":effort}
-    result["extra_body"] = extra
+    if fallback:
+        # A provider fallback is another physical request in the same owner turn. Advance
+        # the A/B role, but keep the actual fallback provider's model and reasoning fields.
+        model = result.get("model", _.get("model", ""))
+    else:
+        result["model"] = model
+        extra = result.get("extra_body") or {}
+        extra["reasoning"] = {"enabled":True, "effort":effort}
+        result["extra_body"] = extra
+    responses = _.get("api_mode") == "codex_responses" or "input" in result or "instructions" in result
+    def tool_schema(tool):
+        return tool.get("function", tool)
+    def append_role_note(note):
+        if responses:
+            result["instructions"] = (str(result.get("instructions") or "") + "\n\n" + note).strip()
+        else:
+            result.setdefault("messages", []).append({"role": "user", "content": note})
     if turn:
         turn["last_route"] = {"role": role, "model": model, "effort": effort}
-        offered = {t.get("function", {}).get("name") for t in result.get("tools", [])}
+        offered = {tool_schema(t).get("name") for t in result.get("tools", [])}
         business = sorted(offered & BUSINESS)
         allowed = set(business)
         if role in {"interpret", "review"}:
@@ -600,16 +683,17 @@ def request(home, learning, payload, *, turn_id="", **_):
             allowed &= SIMPLE_TOOLS
         filtered = []
         for tool in result.get("tools", []):
-            name = tool.get("function", {}).get("name")
+            schema = tool_schema(tool)
+            name = schema.get("name")
             if name == "team_work":
-                items = tool["function"]["parameters"]["properties"]["tools"]["items"]
+                items = schema["parameters"]["properties"]["tools"]["items"]
                 if business:
                     items["enum"] = business
                 else:
                     items.pop("enum", None)  # An empty enum is not a valid tool schema.
             filtered.append(tool)
         if "tools" in result:
-            result["tools"] = sorted(filtered, key=lambda tool: tool.get("function", {}).get("name", ""))
+            result["tools"] = sorted(filtered, key=lambda tool: tool_schema(tool).get("name", ""))
         message = {
             "interpret":"A: 원문과 최신 기억·스킬로 요청을 해석한다. 대화·학습은 직접 처리하고 업무는 team_work(start)로 B에 인계한다. 단순 대화에는 작업 기록을 만들지 않는다." + DIRECT_NOTE,
             "execute":"B: 인계한 범위·단계·도구로 실행하고 실제 결과를 확인한다. 기존 승인 절차를 따른다. 중간 결과는 checkpoint, 완료 또는 막힘은 team_work(review)로 A에게 넘긴다. 최종 답변 전에 review를 호출한다.",
@@ -629,12 +713,12 @@ def request(home, learning, payload, *, turn_id="", **_):
                        "위치를 추측하지 않고 블록의 판정별 안내를 따른다. "
                        "단축어의 정확한 이름은 '위치 보내기'다. 과거 대화의 다른 이름을 쓰지 않는다.")
         label = "업무비서" if Path(home).name == "work-assistant" else "개인비서"
-        result.setdefault("messages", []).append({"role":"user", "content":f"[{label} 실행 역할 — 새 사용자 요청이 아님]\n" + message})
+        append_role_note(f"[{label} 실행 역할 — 새 사용자 요청이 아님]\n" + message)
         if role in {"interpret", "review"}:
             try:
                 note = learning.extension("learning_usage").prompt(home, learning, turn)
                 if note:
-                    result["messages"].append({"role": "user", "content": note})
+                    append_role_note(note)
             except (OSError, ValueError, TypeError, KeyError, sqlite3.Error) as exc:
                 LOG.warning("learning confirmation prompt skipped: %s", type(exc).__name__)
 
@@ -656,6 +740,7 @@ def ended(home, learning, *, turn_id="", **_):
 SCHEMA = {"name":"team_work", "description":"Handoff a verified owner request from interpretation to execution, checkpoint actual results, review, and resume existing work. A alone may resolve_uncertain with receipt_id, applied/not_applied, summary and successful read evidence_ids from after that write in the same case. Never transfers approval or executes business actions.",
           "parameters":{"type":"object", "properties":{
               "action":{"type":"string", "enum":["start","list","read","resume","checkpoint","review","finish","resolve_uncertain","metrics"]},
+              "detail":{"type":"boolean","description":"Return all progress narratives and receipt rows; use read with detail=true when omitted steps matter."},
               "receipt_id":{"type":"string"}, "case_id":{"type":"string"}, "user_said":{"type":"string"},
               "goal":{"type":"string","maxLength":500}, "scope":{"type":"string","maxLength":1000},
               "plan":{"type":"array","items":{"type":"string"},"maxItems":12},

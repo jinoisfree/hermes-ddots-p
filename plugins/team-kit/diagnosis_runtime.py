@@ -1,4 +1,4 @@
-"""Jang Chen owner diagnosis routing, independent of Jarvis work handoffs."""
+"""system-doctor owner diagnosis routing, independent of assistant work handoffs."""
 from collections import OrderedDict
 import copy
 import logging

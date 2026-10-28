@@ -394,6 +394,7 @@ final class PetView: NSView {
         let folding = bubbleSurface.frame.height > foldedHeight + 1 || bubbleSurface.frame.width > PetLayout.bubbleSize.width + 1
         if morphing, !chatExpanded, !folding { finishMorph() }
         var held = chatExpanded || folding || previewRow != nil || previewLook || didDrag
+            || (!isPaused && (state == .waiting || slackModel?.needsPetApproval == true))
         if !chatExpanded, let window, window.isVisible {
             let head = atlas.interactionRect(in: spriteRect), pointer = pointerLocation()
             func over(_ rect: CGRect) -> Bool { window.convertToScreen(convert(rect, to: nil)).contains(pointer) }

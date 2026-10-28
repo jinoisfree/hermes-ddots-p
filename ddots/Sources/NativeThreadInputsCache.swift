@@ -4,6 +4,7 @@ import AppKit
 /// The legacy path never consults this cache.
 final class NativeThreadInputsCache {
     struct Key: Equatable {
+        var conversationGeneration = DdotsConfig.shared.generation
         var dark: Bool, reduceMotion: Bool, isDdots: Bool
         var selected: String?, target: String?, picked: String?, flash: String?, highlighted: String?
         var copied: String?, copyWaiting: String?, branching: String?, confirmingDelete: String?

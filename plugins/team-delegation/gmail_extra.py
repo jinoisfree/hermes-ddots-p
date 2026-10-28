@@ -10,6 +10,7 @@ import base64
 import html
 import json
 import mimetypes
+import os
 import re
 import sys
 from email.message import EmailMessage
@@ -25,6 +26,62 @@ except ImportError:
 
 
 ExtraError = gmail_rules.RuleError
+
+
+FILTER_SCOPE = "https://www.googleapis.com/auth/gmail.settings.basic"
+
+
+def token_scopes(request):
+    home = Path(request.get("token_home") or request.get("root") or
+                os.environ.get("HERMES_HOME", "~/.hermes")).expanduser()
+    try:
+        stored = json.loads((home / "google_token.json").read_text())
+        return set(stored.get("scopes") or [])
+    except (OSError, ValueError, TypeError, AttributeError) as exc:
+        raise ExtraError("GMAIL_TOKEN_SCOPES_UNREADABLE") from exc
+
+
+def scope_failure(request, code="GMAIL_SCOPE_MISSING:gmail.settings.basic"):
+    personal = Path(request.get("token_home") or "").name == "personal-secretary"
+    account = "personal" if personal else "company"
+    action = ("소유자가 ~/.hermes/bin/hermes-personal-google-auth --account personal --login 실행"
+              if personal else "google_reauth(action=start)로 재인증 링크 받기")
+    return {"ok": False, "status": "failed", "stage": "scope_preflight",
+            "failed_stage": "scope_preflight", "mutation_calls": 0, "error": code,
+            "owner_action": action + "; Mac mini 브라우저에서 소유자가 동의한 뒤 " +
+                ("--check" if personal else "google_reauth(action=status)") +
+                "로 확인하고 원래 작업을 다시 묻는다. 터미널: " +
+                "~/.hermes/bin/hermes-personal-google-auth --account " + account + " --login. " +
+                "기존 메일 label_apply는 필터 권한 없이 가능하다."}
+
+
+def require_filter_scope(request, rules, names, known_filters):
+    for rule in rules:
+        label_id = names.get(rule["label_name"].strip().casefold())
+        if label_id is None or _filter_key(rule["criteria"], filter_action(label_id, rule)) not in known_filters:
+            if FILTER_SCOPE not in token_scopes(request):
+                raise ExtraError("GMAIL_SCOPE_MISSING:gmail.settings.basic")
+            break
+
+
+def scope_preflight(service, request):
+    """Read-only check used before the approval button; never creates resources."""
+    try:
+        if request.get("action") == "filter_create":
+            if FILTER_SCOPE not in token_scopes(request):
+                raise ExtraError("GMAIL_SCOPE_MISSING:gmail.settings.basic")
+        else:
+            rules = request.get("rules") or []
+            if rules:
+                names = {r["name"].casefold(): r["id"] for r in labels(service)["user_labels"]}
+                deleted = set(request.get("delete_filter_ids") or [])
+                filters = service.users().settings().filters().list(userId="me").execute().get("filter") or []
+                known = {_filter_key(f.get("criteria") or {}, f.get("action") or {}): f["id"]
+                         for f in filters if f["id"] not in deleted}
+                require_filter_scope(request, rules, names, known)
+        return {"ok": True, "mutation_calls": 0}
+    except Exception as exc:
+        return scope_failure(request, safe_error(exc, "filter_create"))
 
 
 def _parts(part: dict):
@@ -232,6 +289,8 @@ def filter_create(service, request: dict) -> dict:
     if set(request) - {"op", "root", "token_home", "criteria", "label_id", "skip_inbox", "mark_read"}:
         raise ExtraError("GMAIL_FILTER_ACTION_REFUSED")
     gmail_rules.validate_operation("filter_create", request)
+    if FILTER_SCOPE not in token_scopes(request):
+        raise ExtraError("GMAIL_SCOPE_MISSING:gmail.settings.basic")
     criteria = request["criteria"]
     action = filter_action(user_label(service, request.get("label_id")), request)
     result = service.users().settings().filters().create(
@@ -297,6 +356,8 @@ def organize(service, request: dict) -> dict:
         # A deleted matching filter must be recreated, not reported as reused.
         known_filters = {_filter_key(f.get("criteria") or {}, f.get("action") or {}): f["id"]
                          for f in filters if f["id"] not in delete_ids}
+        stage, error_op = "scope_preflight", "filter_create"
+        require_filter_scope(request, rules, names, known_filters)
         stage, error_op = "filter_delete", "filter_delete"
         for failed_filter_id in delete_ids:
             row = {"id": failed_filter_id, "deleted": None}
@@ -350,9 +411,26 @@ def organize(service, request: dict) -> dict:
                 "deleted_filters": deleted_filters, "restored": restored,
                 "count_basis": "batchModify accepted message IDs"}
     except Exception as exc:
-        return {"ok": False, "status": "partial" if mutation_calls else "failed",
+        code = safe_error(exc, error_op)
+        if code.startswith("GMAIL_SCOPE_MISSING:"):
+            # A structured 403 refused this request; earlier successful calls still count.
+            if stage == "filter_delete" and deleted_filters and deleted_filters[-1]["deleted"] is None:
+                deleted_filters[-1]["deleted"] = False
+                mutation_calls -= 1
+            elif results and stage in {"label_create", "filter_create", "label_apply"}:
+                field = {"label_create": "label_created", "filter_create": "filter_created",
+                         "label_apply": "modified_count"}[stage]
+                if results[-1][field] is None:
+                    results[-1][field] = 0 if field == "modified_count" else False
+                    mutation_calls -= 1
+            elif stage == "inbox_restore" and restored and restored[-1]["modified_count"] is None:
+                restored[-1]["modified_count"] = 0
+                mutation_calls -= 1
+        return {**({"owner_action": scope_failure(request, code)["owner_action"]}
+                   if code.startswith("GMAIL_SCOPE_MISSING:") else {}),
+                "ok": False, "status": "partial" if mutation_calls else "failed",
                 "results": results, "deleted_filters": deleted_filters, "restored": restored,
-                "error": safe_error(exc, error_op), "failed_filter_id": failed_filter_id,
+                "error": code, "stage": stage, "failed_filter_id": failed_filter_id,
                 "failed_restore": failed_restore,
                 "failed_rule": getattr(exc, "rule_index", None) or index,
                 "failed_stage": stage, "mutation_calls": mutation_calls}
@@ -383,6 +461,213 @@ def safe_error(exc: Exception, operation: str) -> str:
     return type(exc).__name__
 
 
+def full_scope_check(request):
+    """Check stored consent before even preparing the new company-mail operations."""
+    scopes = token_scopes(request)
+    if scopes & {'https://mail.google.com/', 'https://www.googleapis.com/auth/gmail.modify'}:
+        return
+    action = request['action']
+    suffixes = {'label_delete': {'gmail.labels'}, 'label_rename': {'gmail.labels'},
+                'draft_create': {'gmail.compose'}, 'reply': {'gmail.send', 'gmail.compose'},
+                'forward': {'gmail.send', 'gmail.compose'}}.get(action, {'gmail.modify'})
+    if not any('https://www.googleapis.com/auth/' + s in scopes for s in suffixes):
+        raise ExtraError('GMAIL_SCOPE_MISSING:' + sorted(suffixes)[0])
+    if action in {'reply', 'forward'} and 'https://www.googleapis.com/auth/gmail.readonly' not in scopes:
+        raise ExtraError('GMAIL_SCOPE_MISSING:gmail.readonly')
+
+
+def full_changes(service, request):
+    """Only the advertised status fields and current user labels, never arbitrary system labels."""
+    add, remove = set(), set()
+    for key, label, invert in [('read', 'UNREAD', True), ('starred', 'STARRED', False),
+                                ('archive', 'INBOX', True), ('spam', 'SPAM', False)]:
+        if key in request:
+            (remove if request[key] == invert else add).add(label)
+    if request.get('spam') is True:
+        remove.add('INBOX')
+    for key, target in [('add_label_ids', add), ('remove_label_ids', remove)]:
+        for label in request.get(key, []):
+            target.add(user_label(service, label))
+    if add & remove:
+        raise ExtraError('GMAIL_CONFLICTING_LABEL_CHANGES')
+    return {'addLabelIds': sorted(add), 'removeLabelIds': sorted(remove)}
+
+
+def full_outgoing(service, request):
+    action = request['action']
+    result = {k: request.get(k, '') for k in ('to', 'cc', 'subject', 'body')}
+    result['threadId'] = ''
+    if action in {'reply', 'forward'}:
+        source = service.users().messages().get(userId='me', id=request['message_id'], format='full').execute()
+        headers = {h['name'].casefold(): h['value'] for h in source.get('payload', {}).get('headers', [])}
+        mid = headers.get('message-id', '')
+        if not re.fullmatch(r'<[^<>\r\n\s]+>', mid) or not source.get('threadId'):
+            raise ExtraError('GMAIL_REPLY_HEADERS_UNVERIFIED')
+        result['threadId'] = source['threadId']
+        result['In-Reply-To'] = mid
+        references = re.findall(r'<[^<>\r\n\s]+>', headers.get('references', ''))
+        result['References'] = ' '.join(dict.fromkeys([*references[-49:], mid]))
+        # Gmail requires the original subject for membership in the original thread.
+        result['subject'] = request.get('subject') or headers.get('subject', '')
+        if action == 'reply' and not request.get('to'):
+            from email.utils import getaddresses
+            recipients = getaddresses([headers.get('reply-to') or headers.get('from', '')])
+            if len(recipients) != 1 or not recipients[0][1]:
+                raise ExtraError('GMAIL_REPLY_RECIPIENT_UNVERIFIED')
+            result['to'] = recipients[0][1]
+        if action == 'forward':
+            # Include the entire readable source in the approved text. Attachments require explicit paths.
+            result['body'] += '\n\n--- Forwarded message ---\nFrom: ' + headers.get('from', '') + \
+                '\nDate: ' + headers.get('date', '') + '\nSubject: ' + headers.get('subject', '') + '\n\n' + text(source.get('payload') or {})
+            result['original_attachments_not_included'] = public(files(source.get('payload') or {}))
+    from mail_app import recipients
+    recipients(result['to'])
+    if result['cc']:
+        recipients(result['cc'])
+    return result
+
+
+def full_preview(service, request):
+    """Read-only, bounded snapshot used by the native approval screen."""
+    import full_mail_tools
+    full_mail_tools.validate({k: v for k, v in request.items() if k not in {'root', 'token_home', 'op'}}, False)
+    try:
+        full_scope_check(request)
+    except ExtraError as exc:
+        return scope_failure(request, str(exc))
+    action = request['action']
+    result = {'ok': True, 'mutation_calls': 0, 'ids': [], 'matched_count': 0}
+    if action in {'trash', 'untrash', 'modify'}:
+        ids = sorted(set(request['ids'])) if request.get('ids') else message_ids(service, request['query'])
+        if len(ids) > 500:
+            raise ExtraError('GMAIL_MESSAGE_LIMIT_EXCEEDED')
+        result.update(ids=ids, matched_count=len(ids))
+        if action == 'modify':
+            result['changes'] = full_changes(service, request)
+        samples = []
+        for mid in ids[:10]:
+            m = service.users().messages().get(userId='me', id=mid, format='metadata',
+                    metadataHeaders=['From', 'Subject']).execute()
+            samples.append({'id': mid, 'headers': m.get('payload', {}).get('headers', [])})
+        result['sample'] = samples
+    elif action in {'label_delete', 'label_rename'}:
+        label = user_label(service, request['label_id'])
+        result['label'] = service.users().labels().get(userId='me', id=label).execute()
+        if action == 'label_rename':
+            known = labels(service)
+            name = request['label_name'].strip()
+            if any(r['id'] != label and r['name'].casefold() == name.casefold() for r in known['user_labels']) or name.casefold() in {x.casefold() for x in known['system_labels']}:
+                raise ExtraError('GMAIL_LABEL_NAME_CONFLICT')
+    else:
+        result['outgoing'] = full_outgoing(service, request)
+    return result
+
+
+def full_write(service, request):
+    """Execute the approved snapshot once; an uncertain write is never retried."""
+    import full_mail_tools
+    full_mail_tools.validate({k: v for k, v in request.items() if k not in {'root', 'token_home', 'op', '_snapshot'}}, False)
+    try:
+        full_scope_check(request)
+    except ExtraError as exc:
+        return scope_failure(request, str(exc))
+    action, snapshot = request['action'], request['_snapshot']
+    ids, calls, done, verified, stage = snapshot.get('ids', []), 0, 0, None, 'preflight'
+    try:
+        if len(ids) > 500:
+            raise ExtraError('GMAIL_MESSAGE_LIMIT_EXCEEDED')
+        messages = service.users().messages()
+        selected_count = len(ids)
+        if action in {'trash', 'untrash', 'modify'}:
+            # Skip messages already in the requested state; report changed mail, not accepted no-ops.
+            desired = full_changes(service, request) if action == 'modify' else None
+            effective = []
+            for mid in ids:
+                labels_now = set(messages.get(userId='me', id=mid, format='minimal').execute().get('labelIds', []))
+                needed = ('TRASH' not in labels_now if action == 'trash' else 'TRASH' in labels_now) if action != 'modify' else (
+                    not set(desired['addLabelIds']) <= labels_now or bool(set(desired['removeLabelIds']) & labels_now))
+                if needed:
+                    effective.append(mid)
+            ids = effective
+        if action in {'trash', 'untrash'}:
+            for mid in ids:
+                stage = action
+                calls += 1
+                getattr(messages, action)(userId='me', id=mid).execute()
+                done += 1
+        elif action == 'modify':
+            changes = full_changes(service, request)
+            if changes != snapshot['changes']:
+                raise ExtraError('GMAIL_APPROVED_PLAN_CHANGED')
+            if ids:
+                stage = 'modify'
+                calls += 1
+                messages.batchModify(userId='me', body={'ids': ids, **changes}).execute()
+                done = len(ids)
+        elif action in {'label_delete', 'label_rename'}:
+            label = user_label(service, request['label_id'])
+            if service.users().labels().get(userId='me', id=label).execute().get('name') != snapshot['label']['name']:
+                raise ExtraError('GMAIL_APPROVED_LABEL_CHANGED')
+            stage = action
+            calls += 1
+            if action == 'label_delete':
+                service.users().labels().delete(userId='me', id=label).execute()
+            else:
+                service.users().labels().update(userId='me', id=label, body={'name': request['label_name'].strip()}).execute()
+            done = 1
+            stage = 'verify'
+            rows = labels(service)['user_labels']
+            verified = (not any(r['id'] == label for r in rows) if action == 'label_delete' else
+                        any(r['id'] == label and r['name'] == request['label_name'].strip() for r in rows))
+        else:
+            outgoing = snapshot['outgoing']
+            from mail_app import recipients
+            msg = build({**request, **outgoing, 'to': recipients(outgoing['to']),
+                         'cc': recipients(outgoing['cc']) if outgoing.get('cc') else []})
+            msg['From'] = request['account']
+            for h in ('In-Reply-To', 'References'):
+                if outgoing.get(h):
+                    msg[h] = outgoing[h]
+            body = {'raw': base64.urlsafe_b64encode(msg.as_bytes()).decode()}
+            if outgoing.get('threadId'):
+                body['threadId'] = outgoing['threadId']
+            stage = action
+            calls += 1
+            if action == 'draft_create':
+                result = service.users().drafts().create(userId='me', body={'message': body}).execute()
+            else:
+                result = messages.send(userId='me', body=body).execute()
+            done = 1 if result.get('id') else None
+            stage = 'verify'
+            verified = None
+            if result.get('id'):
+                if action == 'draft_create':
+                    check = service.users().drafts().get(userId='me', id=result['id'], format='minimal').execute()
+                    verified = check.get('id') == result['id']
+                else:
+                    check = messages.get(userId='me', id=result['id'], format='minimal').execute()
+                    verified = 'SENT' in check.get('labelIds', [])
+            return {'ok': bool(done) and verified is True, 'status': 'completed' if verified is True else 'unknown',
+                    'mutation_calls': calls, 'modified_count': done, 'verified': verified,
+                    'id': result.get('id'), 'threadId': outgoing.get('threadId')}
+        if action in {'trash', 'untrash', 'modify'}:
+            stage = 'verify'
+            checks = []
+            for mid in ids:
+                current = set(messages.get(userId='me', id=mid, format='minimal').execute().get('labelIds', []))
+                checks.append(('TRASH' in current if action == 'trash' else 'TRASH' not in current) if action != 'modify'
+                              else set(changes['addLabelIds']) <= current and not set(changes['removeLabelIds']) & current)
+            verified = all(checks)
+        return {'ok': verified is True, 'status': 'completed' if verified is True else 'unknown',
+                'mutation_calls': calls, 'modified_count': done, 'verified': verified, 'matched_count': selected_count,
+                'unchanged_count': selected_count - len(ids)}
+    except Exception as exc:
+        return {'ok': False, 'status': 'partial' if calls else 'failed', 'stage': stage,
+                'mutation_calls': calls, 'confirmed_before_failure': done,
+                'modified_count': done if stage == 'verify' else (None if calls else 0), 'verified': None,
+                'error': safe_error(exc, action), 'automatic_retry': False}
+
+
 def main() -> int:
     operation = ""
     try:
@@ -392,7 +677,11 @@ def main() -> int:
         import gmail_watch
         api, service = gmail_watch.gmail_client(root, token_home=Path(request["token_home"])) if request.get("token_home") else gmail_watch.gmail_client(root)
         operation = request["op"]
-        if operation == "details":
+        if operation == 'full_preview':
+            answer = full_preview(service, request)
+        elif operation == 'full_write':
+            answer = full_write(service, request)
+        elif operation == "details":
             message = service.users().messages().get(userId="me", id=request["message_id"], format="full").execute()
             payload = message.get("payload") or {}
             answer = {"attachments": public(files(payload)), "body": text(payload)}
@@ -412,6 +701,8 @@ def main() -> int:
             answer = label_apply(service, request)
         elif operation == "filter_list":
             answer = {"filters": service.users().settings().filters().list(userId="me").execute().get("filter") or []}
+        elif operation == "scope_preflight":
+            answer = scope_preflight(service, request)
         elif operation == "filter_create":
             answer = filter_create(service, request)
         elif operation == "filter_delete":
@@ -427,6 +718,9 @@ def main() -> int:
     except Exception as exc:
         # Client exceptions can carry credentials or mail data. Print a safe code only.
         code = safe_error(exc, operation)
+        if operation == "filter_create" and code.startswith("GMAIL_SCOPE_MISSING:"):
+            print(json.dumps(scope_failure(request, code), ensure_ascii=False))
+            return 0
         print("GMAIL_EXTRA_FAILED:" + code, file=sys.stderr)
         return 1
 

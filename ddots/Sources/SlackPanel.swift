@@ -158,6 +158,7 @@ private struct SlackResizeRow<Content: View>: View {
 /// A retained row's rendering inputs. Callbacks stay live through their model references;
 /// values used to draw the row are copied so equality never reads a mutated model.
 struct SlackThreadInputs: Equatable {
+    var conversationGeneration = DdotsConfig.shared.generation
     var threadID: String
     var threadRevision: UInt64
     var expanded: Bool, picked: Bool, target: Bool, isDdots: Bool, dark: Bool, reduceMotion: Bool
@@ -233,9 +234,11 @@ final class SlackModel: ObservableObject {
     /// The pet asks this on every animation frame. Over a whole kept record that is hundreds of threads each matched
     /// against every project, so the answer is reused while nothing it reads has changed, and for at most a second,
     /// which is how late an approval's expiry may show.
-    private var petApprovalMemo: (signature: [Int], at: TimeInterval, value: Bool)?
-    var needsPetApproval: Bool {
-        let signature = [(approvalThreads ?? threads).count, threads.count, Int(truncatingIfNeeded: nextThreadRevision), projects.count,
+    struct PetApproval { var message: ChatMessage; var reason: String }
+    private var petApprovalMemo: (signature: [Int], at: TimeInterval, value: PetApproval?)?
+    var needsPetApproval: Bool { petApproval != nil }
+    var petApproval: PetApproval? {
+        let signature = [DdotsConfig.shared.generation, (approvalThreads ?? threads).count, threads.count, Int(truncatingIfNeeded: nextThreadRevision), projects.count,
                          confirmed.count, (selected ?? "").hashValue, source.hashValue, isDdots ? 1 : 0]
         let now = ProcessInfo.processInfo.systemUptime
         if let memo = petApprovalMemo, memo.signature == signature, now - memo.at < 1 { return memo.value }
@@ -243,16 +246,25 @@ final class SlackModel: ObservableObject {
         petApprovalMemo = (signature, now, value)
         return value
     }
-    private func computePetApproval() -> Bool {
+    private func computePetApproval() -> PetApproval? {
         let threads = approvalThreads ?? self.threads
-        guard source == .slack, let selected else { return false }
+        guard source == .slack, let selected else { return nil }
         let rooms = isDdots ? Set(ddotsShown) : Set([selected])
         // Match the project cards actually shown in ddots, including their exact room/thread lookup.
         // `pending` also checks expiry, so do not retain this decision in the message-text cache.
-        if isDdots, threads.contains(where: { thread in
-            rooms.contains(thread.room) && project(thread)?.approvals?.contains(where: \.pending) == true
-        }) { return true }
-        return noticeMemo.needsPetApproval(threads, rooms: rooms, confirmed: confirmed)
+        for thread in threads where rooms.contains(thread.room) {
+            if isDdots, let project = project(thread),
+               let approval = project.approvals?.first(where: \.pending) {
+                let reason = approval.previewText?.trimmingCharacters(in: .whitespacesAndNewlines)
+                return PetApproval(message: thread.root, reason: reason?.isEmpty == false ? reason! : project.title)
+            }
+            if let request = SlackNotice.pendingApproval(thread, confirmed: confirmed),
+               SlackNotice.requestsPetReply(request),
+               !SlackNotice.isSettled(thread, confirmed: confirmed) {
+                return PetApproval(message: request, reason: request.body)
+            }
+        }
+        return nil
     }
     /// Compared once when the published timeline changes, never while SwiftUI compares rows.
     struct ThreadRenderMemo {
@@ -689,6 +701,10 @@ final class SlackModel: ObservableObject {
     }
     func answerHermes(_ thread: SlackThread, label: String) {
         guard let text = SlackNotice.hermesAnswer(thread, label: label) else { return }
+        onSend?(text, thread.room, thread, [])
+    }
+    func skipHermesChecklist(_ thread: SlackThread) {
+        guard let text = SlackNotice.checklistSkipAnswer(thread) else { return }
         onSend?(text, thread.room, thread, [])
     }
     func answerHermesChecklist(_ thread: SlackThread, selected: Set<String>) {
@@ -2664,12 +2680,17 @@ extension ChatView {
     }
     private func slackApproval(_ thread: SlackThread, compact: Bool) -> some View {
         let learning = SlackNotice.isLearningReport(thread), mail = !learning && SlackNotice.isMailDraft(thread)
-        let approve = learning ? "학습승인" : mail ? "발송 승인" : "승인", deny = learning ? "학습거절" : "거절", revise = learning ? "수정의견" : mail ? "수정" : "의견"
+        let rules = DdotsConfig.shared.conversation
+        let approve = learning ? rules.text("learningApprove") : mail ? rules.text("mailApproveLabel") : SlackNotice.approveText
+        let deny = learning ? rules.text("learningDeny") : rules.text("denyLabel")
+        let revise = rules.text(learning ? "learningReviseLabel" : mail ? "mailReviseLabel" : "reviseLabel")
         let labels = SlackNotice.replyLabels(thread)
         let checklist = SlackNotice.checklistLabels(thread)
         return HStack(spacing: 8) {
             if !checklist.isEmpty {
-                HermesReplyChecklist(labels: checklist, initialSelection: Set(SlackNotice.pendingApproval(thread)?.hermesChecklistSelected ?? [])) { slack.answerHermesChecklist(thread, selected: $0) }
+                HermesReplyChecklist(labels: checklist, initialSelection: Set(SlackNotice.pendingApproval(thread)?.hermesChecklistSelected ?? []),
+                                     canSkip: SlackNotice.checklistSkipAnswer(thread) != nil,
+                                     skip: { slack.skipHermesChecklist(thread) }) { slack.answerHermesChecklist(thread, selected: $0) }
                     .id(SlackNotice.pendingApproval(thread)?.id ?? thread.id)
             } else if !labels.isEmpty {
                 ScrollView(.horizontal, showsIndicators: false) {
@@ -3302,10 +3323,12 @@ private typealias HermesChecklistState = SwiftUI.State<Set<String>>
 private struct HermesReplyChecklist: View {
     let labels: [String]
     let submit: (Set<String>) -> Void
+    let canSkip: Bool
+    let skip: () -> Void
     @HermesChecklistState private var selected: Set<String>
 
-    init(labels: [String], initialSelection: Set<String>, submit: @escaping (Set<String>) -> Void) {
-        self.labels = labels; self.submit = submit
+    init(labels: [String], initialSelection: Set<String>, canSkip: Bool, skip: @escaping () -> Void, submit: @escaping (Set<String>) -> Void) {
+        self.labels = labels; self.submit = submit; self.canSkip = canSkip; self.skip = skip
         self._selected = HermesChecklistState(wrappedValue: initialSelection.intersection(labels))
     }
 
@@ -3325,7 +3348,10 @@ private struct HermesReplyChecklist: View {
                 LazyVGrid(columns: [GridItem(.flexible(), alignment: .leading), GridItem(.flexible(), alignment: .leading)],
                           alignment: .leading, spacing: 8) { choices }
             }
-            Button("작성") { submit(selected) }.disabled(selected.isEmpty)
+            HStack(spacing: 8) {
+                Button("작성") { submit(selected) }.disabled(selected.isEmpty)
+                if canSkip { Button(DdotsConfig.shared.conversation.text("checklistSkip"), action: skip) }
+            }
         }.font(.system(size: 12))
     }
 }

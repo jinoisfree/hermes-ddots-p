@@ -173,7 +173,7 @@ line(300, "내일 오전 일정 정리해서 알려줘", replies: 1, latest: 280
             case "search.messages": body["messages"] = ["matches": []]
             case "auth.test": body["user_id"] = "UME"; body["url"] = "https://ddots-smoke.slack.com/"
             case "users.conversations":
-                let rooms: [[String: Any]] = [["id": "CCOW", "name": "SNS담당방"], ["id": "CTRUTH", "name": "진실의방"], ["id": "CTEAM", "name": "teamstarter_user"], ["id": "DJARVIS", "is_im": true, "user": "UJARVIS"]]
+                let rooms: [[String: Any]] = [["id": "CCOW", "name": "SNS담당방"], ["id": "CTRUTH", "name": "검토 채널"], ["id": "CTEAM", "name": "teamstarter_user"], ["id": "Dassistant", "is_im": true, "user": "Uassistant"]]
                 let direct: [[String: Any]] = [["id": "DDS", "is_im": true, "user": "UDS"], ["id": "DCOW", "is_im": true, "user": "UCOW"],
                                                ["id": "DJANG", "is_im": true, "user": "UJANG"], ["id": "DRACCOON", "is_im": true, "user": "URACCOON"]]
                 body["channels"] = (ddots ? rooms + direct : rooms) + (hub ? [["id": "CHUB", "name": "workspace"]] : [])
@@ -182,7 +182,7 @@ line(300, "내일 오전 일정 정리해서 알려줘", replies: 1, latest: 280
                 case "CCOW": body["messages"] = cow
                 case "CTRUTH": body["messages"] = [line(5000, "오늘 일정 정리했어.", bot: "위키담당"), line(4000, "위키 초안 올렸어.", bot: "진단담당"), line(3000, "로그 점검 끝.", bot: "진단담당"),
                                                    line(2000, "문의 2건 처리했어.", bot: "SNS담당"), line(900, "오늘 점검 결과 공유할게.", bot: "개인비서")]
-                case "DJARVIS" where ddots: body["messages"] = [
+                case "Dassistant" where ddots: body["messages"] = [
                     line(9000, "내일 오전 일정 정리해서 알려줘", replies: 3, latest: 8700),
                     line(1500, ":books: 위키 점검 끝났어. GitHub 백업 대기 2건이야.\n승인하면 백업할게.", bot: "개인비서"),
                     line(60, "고마워, 저녁에 한 번 더 알려줘")]
@@ -192,15 +192,15 @@ line(300, "내일 오전 일정 정리해서 알려줘", replies: 1, latest: 280
                     ["id": "FREPORT", "name": "점검 보고서.pdf", "mimetype": "application/pdf", "size": 318_000, "url_private_download": "https://files.slack.com/files/report.pdf"]]]]
                 case "CHUB" where hub: body["messages"] = [line(400, "오늘 토큰 얼마나 썼어?", replies: 1, latest: 380), line(50, "아무나 대답해줘")]
                 case "DRACCOON" where ddots: body["messages"] = [line(100, "연구담당은 ddots에 없어.", bot: "연구담당")]
-                case "DJARVIS": body["messages"] = [line(8000, "따로 확인할 게 있어.", bot: "개인비서")]
+                case "Dassistant": body["messages"] = [line(8000, "따로 확인할 게 있어.", bot: "개인비서")]
                 default: body["messages"] = []
                 }
             case "conversations.replies": body["messages"] = replies[parameters["ts"] ?? ""] ?? []
             case "users.info":
-                let names = ["UDS": "위키담당", "UJARVIS": "개인비서", "UHUMAN": "테스트 참여자", "UCOW": "SNS담당", "UJANG": "진단담당", "URACCOON": "연구담당"]
+                let names = ["UDS": "위키담당", "Uassistant": "개인비서", "UHUMAN": "테스트 참여자", "UCOW": "SNS담당", "UJANG": "진단담당", "URACCOON": "연구담당"]
                 body["user"] = ["real_name": names[parameters["user"] ?? ""] ?? "starter_user"]
             case "conversations.members":
-                let rooms = ["CHUB": ["UME", "UJANG", "UCOW", "UJARVIS", "UDS"], "CCOW": ["UME", "UCOW"], "CTRUTH": ["UME", "UJANG", "UCOW", "UHUMAN", "UJARVIS", "UDS"], "CTEAM": ["UME"]]
+                let rooms = ["CHUB": ["UME", "UJANG", "UCOW", "Uassistant", "UDS"], "CCOW": ["UME", "UCOW"], "CTRUTH": ["UME", "UJANG", "UCOW", "UHUMAN", "Uassistant", "UDS"], "CTEAM": ["UME"]]
                 body["members"] = rooms[parameters["channel"] ?? ""] ?? []
             default: body = ["ok": false, "error": "unknown_method"]
             }
@@ -221,7 +221,7 @@ extension AppDelegate {
         }
         if CommandLine.arguments.contains("--ui-smoke-slack-unconnected") { slack.model.source = .slack; return }
         slack.characters = chat.characters
-        slack.lastRead = ["CCOW": Date().timeIntervalSince1970 - 1800, "CTRUTH": Date().timeIntervalSince1970 - 1800, "CTEAM": 0, "DJARVIS": Date().timeIntervalSince1970]
+        slack.lastRead = ["CCOW": Date().timeIntervalSince1970 - 1800, "CTRUTH": Date().timeIntervalSince1970 - 1800, "CTEAM": 0, "Dassistant": Date().timeIntervalSince1970]
         slack.model.selected = "CCOW"
         if CommandLine.arguments.contains("--ui-smoke-slack-hang") {
             let script = SlackHangScript(); SlackHangScript.current = script
@@ -308,7 +308,7 @@ extension AppDelegate {
             try? "slack unconnected smoke passed\n".write(to: destination.appendingPathComponent("slack.txt"), atomically: true, encoding: .utf8)
             NSApp.terminate(nil); return
         }
-        check(Set(model.rooms.map(\.name)) == ["teamstarter_user", "진실의방", "SNS담당방", "개인비서"] && model.selected == "CCOW", "Rooms are listed and the chosen one stays selected: \(model.rooms)")
+        check(Set(model.rooms.map(\.name)) == ["teamstarter_user", "검토 채널", "SNS담당방", "개인비서"] && model.selected == "CCOW", "Rooms are listed and the chosen one stays selected: \(model.rooms)")
         check(model.threads.count == 6, "Six threads are shown: \(model.threads.count)")
         check(model.notices.map(\.title) == ["답 안 한 DM", "SNS담당 질문", "알림"] && model.notices.map(\.threads.count) == [1, 2, 1], "The room's notice counts the posts still waiting: \(model.notices)")
         if let question = model.notices.first(where: { $0.id.hasPrefix(SlackNotice.questionID) }) { model.jump(question); check(model.open == [model.threads[1].id] && model.picked == model.threads[1].id && model.target?.id == model.threads[1].id, "Pressing a character's question opens the thread that asks, picks it and readies a reply"); model.foldAll() }
@@ -500,15 +500,15 @@ extension AppDelegate {
             check(model.sidebarWidth == 212 && pet.chatSize.width == preferredChatSize.width + 212 && chat.viewportWidth == preferredChatSize.width, "Widening the strip widens the window and leaves the conversation its width")
             check(model.latest["CCOW"].map { SlackText.isThinking($0.body) && $0.speaker == "개인비서" } == true && !slack.incoming.contains { SlackText.isThinking($0.body) },
                   "A thinking line is the room's newest activity, under the character's own name, but raises no bubble")
-            check(model.rooms.map(\.id) == ["CCOW", "CTRUTH", "DJARVIS", "CTEAM"], "Rooms are in order of their newest activity: \(model.rooms.map(\.name))")
-            model.pin("CTEAM", slot: 0); model.pin("DJARVIS", slot: 1)
-            check(model.rooms.map(\.id) == ["CTEAM", "DJARVIS", "CCOW", "CTRUTH"], "Pinned rooms hold the first and second places: \(model.rooms.map(\.name))")
-            model.pin("DJARVIS", slot: nil)
-            check(model.rooms.map(\.id) == ["CTEAM", "CCOW", "CTRUTH", "DJARVIS"], "Unpinning returns a room to the order of activity")
+            check(model.rooms.map(\.id) == ["CCOW", "CTRUTH", "Dassistant", "CTEAM"], "Rooms are in order of their newest activity: \(model.rooms.map(\.name))")
+            model.pin("CTEAM", slot: 0); model.pin("Dassistant", slot: 1)
+            check(model.rooms.map(\.id) == ["CTEAM", "Dassistant", "CCOW", "CTRUTH"], "Pinned rooms hold the first and second places: \(model.rooms.map(\.name))")
+            model.pin("Dassistant", slot: nil)
+            check(model.rooms.map(\.id) == ["CTEAM", "CCOW", "CTRUTH", "Dassistant"], "Unpinning returns a room to the order of activity")
             model.hide("CTEAM")
             check(!model.rooms.contains { $0.id == "CTEAM" } && model.hiddenRooms.map(\.id) == ["CTEAM"] && model.pins == Array(repeating: "", count: SlackRoomOrder.slots), "A room taken off the list leaves it and gives up its pin")
             model.restore("CTEAM")
-            check(model.rooms.map(\.id) == ["CCOW", "CTRUTH", "DJARVIS", "CTEAM"] && model.hiddenRooms.isEmpty, "Putting it back returns it to the list")
+            check(model.rooms.map(\.id) == ["CCOW", "CTRUTH", "Dassistant", "CTEAM"] && model.hiddenRooms.isEmpty, "Putting it back returns it to the list")
             let badge = unreadTotal
             model.toggleMute(room: "CTRUTH")
             check(model.muted == ["CTRUTH"] && unreadTotal == badge - 1 && model.unread["CTRUTH"] == 1 && !slack.incoming.contains { $0.id.hasPrefix("slack:CTRUTH:") }, "A muted room keeps its count but leaves the pet's badge and bubbles")
@@ -605,7 +605,7 @@ extension AppDelegate {
         slack.characters = chat.characters
         let now = Date().timeIntervalSince1970
         // Two conversations hold something new; the rest were read a moment ago.
-        slack.lastRead = ["DDS": now, "DJARVIS": now - 2000, "DCOW": now, "DJANG": now - 2000, "DRACCOON": now - 2000, "CHUB": now, "CCOW": now, "CTRUTH": now, "CTEAM": now]
+        slack.lastRead = ["DDS": now, "Dassistant": now - 2000, "DCOW": now, "DJANG": now - 2000, "DRACCOON": now - 2000, "CHUB": now, "CCOW": now, "CTRUTH": now, "CTEAM": now]
         slack.model.selected = Ddots.room
         // The record is kept in a folder of its own for the check. Three earlier months already hold a thread each.
         let shelf = DdotsArchive(root: FileManager.default.temporaryDirectory.appendingPathComponent("ddots-record-smoke-\(UUID().uuidString)"))
@@ -635,13 +635,13 @@ extension AppDelegate {
         check(model.unread["DRACCOON"] == 1 && model.stacked.count == 5, "The characters' own conversations stay behind their tab")
         check(model.ddotsOwner(there[0])?.profile == "system-doctor" && model.ddotsOwner(there[1]) == nil, "A thread there is whoever answered it, and nobody's until then")
         check(model.target == nil && model.postRoom == "CHUB" && model.recipient?.profile == Ddots.defaultTarget && model.outgoing("안녕") == "안녕" && model.outgoing("@SNS담당 안녕") == "@SNS담당 안녕", "A new post reaches the usual character without an automatic mention")
-        check(model.hubPost("안녕") == DdotsPost(shown: "안녕", sent: "안녕", called: []) && model.hubPost("@개인비서 안녕") == DdotsPost(shown: "@개인비서 안녕", sent: "<@UJARVIS> 안녕", called: ["UJARVIS"]) && model.hubPost("@SNS담당야 이거 봐")?.sent == "<@UCOW> 이거 봐",
+        check(model.hubPost("안녕") == DdotsPost(shown: "안녕", sent: "안녕", called: []) && model.hubPost("@개인비서 안녕") == DdotsPost(shown: "@개인비서 안녕", sent: "<@Uassistant> 안녕", called: ["Uassistant"]) && model.hubPost("@SNS담당야 이거 봐")?.sent == "<@UCOW> 이거 봐",
               "The call is a real mention, also under another name the character answers to: \(String(describing: model.hubPost("@개인비서 안녕")))")
         check(model.hubPost("") == DdotsPost(shown: "", sent: "", called: []), "Files alone reach the usual character without a call")
-        if let jarvis = model.ddotsMembers.first(where: { $0.profile == Ddots.defaultTarget }) {
-            model.aim(jarvis)
-            check(model.hubPost("안녕")?.sent == "<@UJARVIS> 안녕" && model.hubPost("")?.sent == "<@UJARVIS>", "Pressing the usual face calls it for text and files")
-            model.aim(jarvis)
+        if let assistant = model.ddotsMembers.first(where: { $0.profile == Ddots.defaultTarget }) {
+            model.aim(assistant)
+            check(model.hubPost("안녕")?.sent == "<@Uassistant> 안녕" && model.hubPost("")?.sent == "<@Uassistant>", "Pressing the usual face calls it for text and files")
+            model.aim(assistant)
         }
         check(model.place(of: there[0]) == "#workspace", "A thread of the channel says where it is")
         let draftBody = "### 안내 메일 초안\n\n> 예약 실행이라 발송하지 않았습니다. 발송은 승인 전입니다."
@@ -828,9 +828,9 @@ extension AppDelegate {
         model.openFind(); model.findQuery = "석 달"
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [self] in
             guard let group = model.findGroups.first, let message = group.matches.first,
-                  group.room == "DJARVIS", !model.threads.contains(where: { $0.id == group.id }) else { smokeFailed("Whole search finds a month outside the loaded record") }
+                  group.room == "Dassistant", !model.threads.contains(where: { $0.id == group.id }) else { smokeFailed("Whole search finds a month outside the loaded record") }
             model.onFindReveal?(group, message)
-            guard model.selected == "DJARVIS", model.open.contains(group.id), model.threads.contains(where: { $0.id == group.id }) else { smokeFailed("An old record search result loads its month and opens its room") }
+            guard model.selected == "Dassistant", model.open.contains(group.id), model.threads.contains(where: { $0.id == group.id }) else { smokeFailed("An old record search result loads its month and opens its room") }
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [self] in
                 guard model.scrollTarget == message.id else { smokeFailed("Old record result scrolls to the matching line") }
                 capture(destination: destination.appendingPathComponent("ddots-find-old"))
@@ -922,7 +922,7 @@ extension AppDelegate {
         check(model.rooms.first?.id == Ddots.room && model.rooms.first?.name == "workspace" && model.selected == Ddots.room && model.isDdots, "ddots is the first room and stays chosen: \(model.rooms.map(\.name))")
         let inRoom = ChatCharacter.preferred.filter { !Ddots.excluded.contains($0) }
         check(model.ddotsMembers.map(\.profile) == inRoom && inRoom.count == 4 && model.members[Ddots.room]?.map(\.profile) == [Ddots.defaultTarget], "Every character but the ones left out is in ddots, in the usual order: \(model.ddotsMembers.map(\.name))")
-        check(model.threads.map(\.room) == ["DJANG", "DCOW", "DJARVIS", "DCOW", "DJARVIS", "DDS", "DJANG", "DJARVIS"], "What the record keeps comes first, then the conversations as one line of time: \(model.threads.map(\.room))")
+        check(model.threads.map(\.room) == ["DJANG", "DCOW", "Dassistant", "DCOW", "Dassistant", "DDS", "DJANG", "Dassistant"], "What the record keeps comes first, then the conversations as one line of time: \(model.threads.map(\.room))")
         guard let shelf = slack.archive else { smokeFailed("The check keeps a record") }
         slack.fileQueue.sync {}
         let quiet = CommandLine.arguments.contains("--ui-smoke-ddots-quiet")
@@ -941,10 +941,10 @@ extension AppDelegate {
         check(model.rooms.last?.id == Ddots.stack, "Even pinned, the tab stays at the bottom: \(model.rooms.map(\.id))")
         model.pin(Ddots.stack, slot: nil)
         model.toggleStack()
-        check(Array(model.rooms.map(\.id).suffix(6)) == [Ddots.stack, "DDS", "DJARVIS", "DCOW", "DJANG", "DRACCOON"], "Unfolded, its conversations follow it: \(model.rooms.map(\.id))")
+        check(Array(model.rooms.map(\.id).suffix(6)) == [Ddots.stack, "DDS", "Dassistant", "DCOW", "DJANG", "DRACCOON"], "Unfolded, its conversations follow it: \(model.rooms.map(\.id))")
         model.toggleStack()
         check(model.rooms.map(\.id) == [Ddots.room, Ddots.group(1), Ddots.group(2), Ddots.group(3), Ddots.stack] && model.pins.allSatisfy(\.isEmpty), "Folded again, the tab is back at the bottom: \(model.rooms.map(\.id))")
-        check(model.stacked.map(\.id) == ["DDS", "DJARVIS", "DCOW", "DJANG", "DRACCOON"] && model.members[Ddots.stack]?.count == 5, "Behind it are all of them, characters first: \(model.stacked.map(\.id))")
+        check(model.stacked.map(\.id) == ["DDS", "Dassistant", "DCOW", "DJANG", "DRACCOON"] && model.members[Ddots.stack]?.count == 5, "Behind it are all of them, characters first: \(model.stacked.map(\.id))")
         // Channels put in no section are in the first; two or more fold behind its tab. One alone shows as itself.
         check(model.groups[1]?.map(\.id) == ["CCOW", "CTRUTH", "CTEAM"] && model.rowZones[Ddots.room] == 0 && model.rowZones[Ddots.stack] == 4,
               "ddots stands above the sections; the channels fill the first and the direct conversations are the fourth: \(model.rowZones)")
@@ -980,7 +980,7 @@ extension AppDelegate {
         check(model.sections == [2], "The last section stays")
         model.sections = Ddots.defaultSections; model.onZones?()
         check(model.stackWaiting && model.unread[Ddots.stack] == nil && model.unread["DRACCOON"] == 1, "Folded, the tab only marks that something waits; the count belongs to the room: \(model.unread)")
-        check(model.target == nil && model.recipient?.profile == Ddots.defaultTarget && model.postRoom == "DJARVIS", "A new post goes to the usual character by default")
+        check(model.target == nil && model.recipient?.profile == Ddots.defaultTarget && model.postRoom == "Dassistant", "A new post goes to the usual character by default")
         check(model.notices.map(\.title) == ["개인비서 질문", "알림"], "The notice counts what waits across every character: \(model.notices.map(\.title))")
         check(slackWide && pet.chatSize.width == preferredChatSize.width + SlackSidebar.width, "ddots is a room of the Slack side, so the window is as wide as there")
         var heldPlace: CGFloat?
@@ -1030,7 +1030,7 @@ extension AppDelegate {
             check(model.target == nil && model.recipient?.profile == "default", "새 글 goes back to the picked face")
             model.pick(cow, foldable: false); model.reply(cow); model.draft = "영어로도 한 줄 붙여줘"; model.requestScroll(cow.id)
             model.toggleStack()
-            check(model.stackOpen && Array(model.rooms.map(\.id).suffix(6)) == [Ddots.stack, "DDS", "DJARVIS", "DCOW", "DJANG", "DRACCOON"],
+            check(model.stackOpen && Array(model.rooms.map(\.id).suffix(6)) == [Ddots.stack, "DDS", "Dassistant", "DCOW", "DJANG", "DRACCOON"],
                   "Pressing the tab unfolds the conversations under it: \(model.rooms.map(\.id))")
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [self] in
@@ -1227,7 +1227,7 @@ extension AppDelegate {
         smokeCheck(square?.size == NSSize(width: SlackRoomPictures.side, height: SlackRoomPictures.side), "A channel's picture is kept as a small square: \(String(describing: square?.size))")
         let styled = DdotsConfig.shared.appearance["roomPictures"] != nil
         if styled {
-            smokeCheck(Ddots.roomPictures.count == 4, "The 학원, 보고방, SNS담당방 and secret room pictures load from the app bundle: \(Ddots.roomPictures.keys.sorted())")
+            smokeCheck(Ddots.roomPictures.count == 4, "The 학습 채널, 보고 채널, SNS담당방 and secret room pictures load from the app bundle: \(Ddots.roomPictures.keys.sorted())")
         } else {
             smokeCheck(Ddots.roomPictures.isEmpty, "Without local room picture settings, no bundled room pictures are applied")
         }
@@ -1249,7 +1249,7 @@ extension AppDelegate {
         smokeCheck(Ddots.avatar(existing, name: "새우튀김") == existing, "An existing profile picture takes precedence")
         let model = slack.model
         let rooms = [SlackRoom(id: "CCOW", name: "SNS담당방", direct: false),
-                     SlackRoom(id: "CHIPPO", name: "업무비서방", direct: false),
+                     SlackRoom(id: "Coffice", name: "업무비서방", direct: false),
                      SlackRoom(id: "CMAINT", name: "maintencance", direct: false)]
         let cast = [(profile: "sns-manager", name: "SNS담당"),
                     (profile: "work-assistant", name: "업무비서"),

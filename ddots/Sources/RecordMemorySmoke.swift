@@ -43,10 +43,10 @@ extension AppDelegate {
 
         // A line of the month that is not read back: the one already written is not written again, a new one is written once.
         func message(_ ts: String, _ at: Double, _ body: String) -> ChatMessage {
-            ChatMessage(id: "slack:DJARVIS:" + ts, fromUser: false, speaker: "개인비서", body: body, date: Date(timeIntervalSince1970: at), sessionID: original.thread)
+            ChatMessage(id: "slack:Dassistant:" + ts, fromUser: false, speaker: "개인비서", body: body, date: Date(timeIntervalSince1970: at), sessionID: original.thread)
         }
         // The line already written, as Slack gives it again, and a reply under it said later the same month.
-        slack.record(scanned: ["DJARVIS": [message(original.ts, original.at, original.text), message(String(format: "%.6f", original.at + 60), original.at + 60, "석 달 전에 덧붙인 말이야.")]])
+        slack.record(scanned: ["Dassistant": [message(original.ts, original.at, original.text), message(String(format: "%.6f", original.at + 60), original.at + 60, "석 달 전에 덧붙인 말이야.")]])
         await until("the waiting lines are written") { slack.recordWaiting.isEmpty && !slack.readingBack && !slack.recordWriting && slack.recordBacklog.isEmpty }
         slack.fileQueue.sync {}
         let month = shelf.read(month: oldest)

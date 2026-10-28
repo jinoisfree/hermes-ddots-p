@@ -19,10 +19,17 @@ struct SlackMessage: Equatable, Codable {
     /// Coloured notes attached to the post. A post is repainted when its status changes, so these are compared too.
     var marks: [ChatMark] = []
     var files: [ChatFile] = []
-    var hermesReplyState: HermesReplyState?
+    var hermesReplyState: HermesReplyState? {
+        didSet { if oldValue != hermesReplyState { hermesReplyEvidence = nil } }
+    }
+    var hermesReplyEvidence: HermesReplyEvidence?
+    var effectiveHermesReplyState: HermesReplyState? {
+        if let evidence = hermesReplyEvidence { return evidence.state() }; return hermesReplyState
+    }
     var hermesButtons: [String]?
     var hermesChecklist: [String]?
     var hermesChecklistSelected: [String]?
+    var hermesChecklistCanSkip: Bool?
     /// Colour of the bar beside each block attachment's quoted lines, in order, as Slack draws it; "" for grey.
     var quoteColors: [String]?
     var time: Double { Double(ts) ?? 0 }
@@ -64,6 +71,9 @@ struct SlackMessage: Equatable, Codable {
             return id == "hermes_reply_checklist" || id.hasPrefix("hermes_reply_checklist:")
         }
         let checklistElements = checklist.flatMap { $0["elements"] as? [[String: Any]] ?? [] }
+        hermesChecklistCanSkip = checklistElements.contains {
+            $0["type"] as? String == "button" && $0["action_id"] as? String == "hermes_reply_checklist_skip"
+        }
         let legacyOptions = checklistElements.filter { $0["type"] as? String == "checkboxes" }
         let toggles = checklistElements.filter {
             ($0["action_id"] as? String ?? "").hasPrefix("hermes_reply_checklist_toggle_") && $0["type"] as? String == "button"
@@ -72,19 +82,10 @@ struct SlackMessage: Equatable, Codable {
             + toggles.compactMap { $0["value"] as? String }
         hermesChecklistSelected = legacyOptions.flatMap { $0["initial_options"] as? [[String: Any]] ?? [] }.compactMap { $0["value"] as? String }
             + toggles.filter { $0["style"] as? String == "primary" }.compactMap { $0["value"] as? String }
-        // Answered status includes the clicked label, which may itself say “종결” or “처리 완료”.
-        if statusText.contains("답변 받음") { hermesReplyState = .working }
-        else if statusText.contains("✅ 처리 완료") || statusText.contains("처리 완료 · 종결") { hermesReplyState = .closed }
-        else if !buttons.isEmpty || !checklist.isEmpty { hermesReplyState = .asking }
-        // Colour alone is not Hermes identity: ordinary coloured reports keep their old interpretation.
-        else if !statuses.isEmpty, attachments.count == 1 {
-            switch SlackText.hexColor(attachments[0]["color"] as? String ?? "").uppercased() {
-            case "#E01E5A": hermesReplyState = .asking
-            case "#ECB22E": hermesReplyState = .working
-            case "#2EB67D": hermesReplyState = .closed
-            default: break
-            }
-        }
+        hermesReplyEvidence = HermesReplyEvidence(statusText: statusText, hasStatus: !statuses.isEmpty,
+            hasControls: !buttons.isEmpty || !checklist.isEmpty,
+            color: attachments.count == 1 ? SlackText.hexColor(attachments[0]["color"] as? String ?? "") : nil)
+        hermesReplyState = hermesReplyEvidence?.state()
         var own = json["blocks"] as? [[String: Any]] ?? [], quoted = attachments.map { $0["blocks"] as? [[String: Any]] ?? [] }
         let title = own.first?["type"] as? String == "header" ? (own.first?["text"] as? [String: Any])?["text"] as? String : nil
         // A titled report without an attachment (its title had no status mark) gets the bar too in ddots:
@@ -359,9 +360,10 @@ struct SlackNoticeItem: Identifiable, Equatable {
 }
 
 enum SlackNotice {
+    private static var rules: ConversationRules { DdotsConfig.shared.conversation }
     /// Statuses that need nothing more are left out of the notice.
-    static let settled: Set<String> = ["답변 완료", "종결"]
-    static let settledText = "✅ 답변 완료"
+    static var settled: Set<String> { Set(rules.list("settled")) }
+    static var settledText: String { rules.text("settledText") }
     /// Only presentation and clipboard text use this spelling; source marks keep their original words.
     static func displayStatus(_ text: String) -> String { isSettled(text) ? settledText : text }
     private static let leadingEmoji = try? NSRegularExpression(pattern: #"^:[a-zA-Z0-9_+\-]+:"#)
@@ -390,54 +392,32 @@ enum SlackNotice {
         guard let request = pendingApproval(thread), let asked = spoken.lastIndex(where: { $0.id == request.id }) else { return true }
         return stated >= asked
     }
-    static let unanswered = "아직 답 안 함"
-    static let draft = "초안 올려놨어. 승인 기다리는 중"
+    static var unanswered: String { rules.text("unanswered") }
+    static var draft: String { rules.text("draft") }
     static let questionID = "question"
-    static let questionColor = "#ECB22E"
+    static var questionColor: String { rules.color("questionColor") }
 
     /// A character asks outright ("승인해줘", "승인하면 보낼게") or names the word to answer with ("`승인`이라고 답해줘").
     /// A report of what already happened ("승인받고 보냈어", "`승인`이라고 답해서 보냈어") is not a request.
-    private static let approval: [NSRegularExpression] = {
-        // A verb left as an order or handed over with 줘·주세요; "해서", "했어" and "줘서" tell of something done.
-        let asked = #"((?![가-힣])|\s*(줘(?!서)|주))"#
-        return [
-            #"승인(을|이)?\s*((만|좀|다시|한\s*번\s*더)\s*)*(하면|해\s*줘(?!서)|해\s*주|해\s*줄래|해\s*\?|부탁|기다|필요|요청|할래|할까|바라|받아야|줘(?!서)|주면)"#,
-            #"승인[^\n.!?]{0,14}?(이?라고|한\s*마디)만?\s*((다시|한\s*번(\s*더|만)?|정확히|꼭|바로|그냥)\s*)*"#
-                + #"(((답(장|변)?|말씀?|입력)\s*)?(해\#(asked)|하면)|(보내|적어|남겨|써|알려)\#(asked)|보내면|적으면|남기면|쓰면)"#,
-        ].compactMap { try? NSRegularExpression(pattern: $0) }
-    }()
-
-    /// Saying there is nothing to approve makes the whole post a non-request.
-    private static let nothingWaiting = try? NSRegularExpression(pattern: #"승인(을|이)?\s*(기다리는|해\s*주실|해\s*줄|할|받을|드릴)[^\n.!?]{0,14}없"#)
-
     /// The words the buttons send. Hermes reads "승인" as yes and "거부" as no; "거절" is not on its list.
-    static let approveText = "승인"
-    static let denyText = "거부"
+    static var approveText: String { rules.text("approveText") }
+    static var denyText: String { rules.text("denyText") }
     /// Hermes's own command: it opens a new thread that carries this conversation on, with everything said so far.
-    static let branchText = "/branch"
+    static var branchText: String { rules.text("branchText") }
     /// From this many replies on, a thread's button for carrying it on stands out.
-    static let longThread = 50
+    static var longThread: Int { Int(rules.number("longThread")) }
 
     static func requestsApproval(_ body: String) -> Bool {
-        guard body.contains("승인") else { return false }
         let own = body.split(whereSeparator: { $0.isNewline }).filter { !$0.trimmingCharacters(in: .whitespaces).hasPrefix(">") }.joined(separator: "\n")
-        if nothingWaiting?.firstMatch(in: own, range: NSRange(own.startIndex..., in: own)) != nil { return false }
-        return approval.contains { $0.firstMatch(in: own, range: NSRange(own.startIndex..., in: own)) != nil }
+        if rules.matches("nothingWaiting", own) { return false }
+        return rules.matches("approval1", own) || rules.matches("approval2", own)
     }
-
-    private static let sentLearning = try? NSRegularExpression(pattern: #"승인 없이 보낸 답장 중 내가 직접 쓴 것\s+[0-9]+건이야"#)
-    private static let learningReport = [
-        #"(?:답변 원칙|배운 일하는 방법|배워서 바로 반영한 내용)\s+[0-9]+건이야"#,
-        #"(?<![가-힣A-Za-z])학습승인(?=[^가-힣A-Za-z]|이라고|으로|이라|은)[^\n]{0,160}(?:답해(?!서)|답하면|알려\s*줘(?!서)|남겨\s*줘(?!서)|적어\s*줘(?!서)|검토해(?!서))"#
-    ].compactMap { try? NSRegularExpression(pattern: $0) }
 
     /// Patterns are immutable and shared: row rendering must not compile them for every message.
     static func isLearningReport(_ body: String) -> Bool {
-        guard body.contains("답변 원칙") || body.contains("배운 일하는 방법") || body.contains("배워서 바로 반영한 내용") || body.contains("학습승인") else { return false }
         let own = body.split(whereSeparator: { $0.isNewline }).filter { !$0.trimmingCharacters(in: .whitespaces).hasPrefix(">") }.joined(separator: "\n")
-        let range = NSRange(own.startIndex..., in: own)
-        if sentLearning?.firstMatch(in: own, range: range) != nil { return false }
-        return learningReport.contains { $0.firstMatch(in: own, range: range) != nil }
+        if rules.matches("sentLearning", own) { return false }
+        return rules.matches("learningReport1", own) || rules.matches("learningReport2", own)
     }
 
     static func isLearningReport(_ thread: SlackThread) -> Bool {
@@ -446,23 +426,18 @@ enum SlackNotice {
 
     /// A mail draft laid out for the user that has not gone out yet ("메일 초안 … 발송하지 않았습니다", "발송은 승인 전").
     /// It names no answer word, so the buttons say in plain words what to do with the mail.
-    private static let mailDraft = try? NSRegularExpression(pattern: #"메일\s*초안"#)
-    private static let mailWaiting = try? NSRegularExpression(pattern: #"(발송|전송|보내)\s*(하지|지)\s*않았|(발송|전송)(은|이)?\s*(승인\s*)?전|승인\s*전|아직\s*(안\s*)?(발송|전송|보내|보냈)|발송\s*대기"#)
-    private static let mailSent = try? NSRegularExpression(pattern: #"(발송|전송)(을|이|은)?\s*(했|완료|됐|마쳤|끝났)|(?<!안\s)(?<!안)보냈(어|습니다|어요|다)"#)
     static func isMailDraft(_ body: String) -> Bool {
-        guard body.contains("메일") else { return false }
-        let range = NSRange(body.startIndex..., in: body)
-        guard mailDraft?.firstMatch(in: body, range: range) != nil, mailWaiting?.firstMatch(in: body, range: range) != nil else { return false }
-        return mailSent?.firstMatch(in: body, range: range) == nil
+        guard rules.matches("mailDraft", body), rules.matches("mailWaiting", body) else { return false }
+        return !rules.matches("mailSent", body)
     }
     static func isMailDraft(_ thread: SlackThread) -> Bool {
         pendingApproval(thread).map { isMailDraft($0.body) } ?? false
     }
-    static let mailApproveText = "승인, 발송해"
-    static let mailDenyText = "거부, 발송하지 마"
+    static var mailApproveText: String { rules.text("mailApproveText") }
+    static var mailDenyText: String { rules.text("mailDenyText") }
 
     static func answerText(_ thread: SlackThread, approve: Bool) -> String {
-        if isLearningReport(thread) { return approve ? "학습승인" : "학습거절" }
+        if isLearningReport(thread) { return approve ? rules.text("learningApprove") : rules.text("learningDeny") }
         if isMailDraft(thread) { return approve ? mailApproveText : mailDenyText }
         return approve ? approveText : denyText
     }
@@ -472,13 +447,25 @@ enum SlackNotice {
         assessment(thread, confirmed: confirmed).pending
     }
 
+    /// A notification's colour or learning-report heading alone must not wave the phone.
+    /// The request must still be unanswered and explicitly ask the owner to act.
+    static func requestsPetReply(_ message: ChatMessage) -> Bool {
+        guard !message.fromUser else { return false }
+        if message.effectiveHermesReplyState == .working || message.effectiveHermesReplyState == .closed { return false }
+        if !message.hermesButtons.isEmpty || !message.hermesChecklist.isEmpty { return true }
+        let own = message.body.split(whereSeparator: \.isNewline)
+            .filter { !$0.trimmingCharacters(in: .whitespaces).hasPrefix(">") }.joined(separator: "\n")
+        return own.contains("[[버튼:") || requestsApproval(own) || isMailDraft(own)
+            || rules.matches("learningReport2", own)
+    }
+
     /// Hide the old draft status after confirmation without changing the source or copied conversation.
     static func displayed(_ thread: SlackThread, confirmed: Set<String>) -> SlackThread {
         var shown = thread
         if let exchange = approvalExchange(thread), exchange.finished {
             func repaint(_ message: inout ChatMessage) {
                 guard message.id == exchange.request.id else { return }
-                message.quoteColors = message.quoteColors.map { ["#ECB22E", "#E01E5A"].contains($0.uppercased()) ? approvedColor : $0 }
+                message.quoteColors = message.quoteColors.map { [rules.color("workingColor"), rules.color("askingColor")].contains($0.uppercased()) ? approvedColor : $0 }
             }
             repaint(&shown.root)
             for index in shown.replies.indices { repaint(&shown.replies[index]) }
@@ -490,12 +477,12 @@ enum SlackNotice {
         return shown
     }
 
-    static let approvedColor = "#2EB67D"
-    private static let yes: Set<String> = ["승인", "전송", "발송", "발송해", mailApproveText, "응", "응응", "ㅇㅇ", "네", "예", "좋아", "진행", "그래", "오케이", "ok", "yes"]
+    static var approvedColor: String { rules.color("approvedColor") }
+    private static var yes: Set<String> { Set(rules.list("yes").map { $0.lowercased() }) }
     private static func approvalExchange(_ thread: SlackThread) -> (request: ChatMessage, answer: ChatMessage?, finished: Bool)? {
         guard thread.loaded else { return nil }
         let spoken = thread.messages.filter { $0.fromUser || !SlackText.isThinking($0.body) }
-        guard let asked = spoken.lastIndex(where: { !$0.fromUser && ($0.hermesReplyState != nil || $0.body.contains("[[버튼:") || isLearningReport($0.body) || requestsApproval($0.body) || isMailDraft($0.body)) }) else { return nil }
+        guard let asked = spoken.lastIndex(where: { !$0.fromUser && ($0.effectiveHermesReplyState != nil || $0.body.contains("[[버튼:") || isLearningReport($0.body) || requestsApproval($0.body) || isMailDraft($0.body)) }) else { return nil }
         let answered = spoken[(asked + 1)...].firstIndex(where: \.fromUser)
         let answer = answered.map { spoken[$0] }
         let said = answer?.body.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines.union(.punctuationCharacters)).lowercased() ?? ""
@@ -507,7 +494,7 @@ enum SlackNotice {
     /// A later ordinary request reopens an older Hermes exchange too.
     static func hermesState(_ thread: SlackThread) -> HermesReplyState? {
         guard let exchange = approvalExchange(thread) else { return nil }
-        return exchange.finished ? .closed : exchange.request.hermesReplyState
+        return exchange.finished ? .closed : exchange.request.effectiveHermesReplyState
     }
     static func replyLabels(_ thread: SlackThread) -> [String] {
         pendingApproval(thread)?.hermesButtons ?? []
@@ -515,20 +502,25 @@ enum SlackNotice {
     static func checklistLabels(_ thread: SlackThread) -> [String] {
         pendingApproval(thread)?.hermesChecklist ?? []
     }
+    static func checklistSkipAnswer(_ thread: SlackThread) -> String? {
+        guard let request = pendingApproval(thread), !request.hermesChecklist.isEmpty,
+              request.hermesChecklistCanSkip else { return nil }
+        return rules.text("checklistSkip")
+    }
     static func checklistToggle(labels: [String], selected: Set<String>, label: String, isOn: Bool) -> Set<String> {
         var next = selected.intersection(labels)
         guard labels.contains(label) else { return next }
         if isOn { next.insert(label) } else { next.remove(label) }
-        guard labels.count > 1, labels.first == "전체" else { return next }
-        if label == "전체" { return isOn ? Set(labels) : [] }
-        if Set(labels.dropFirst()).isSubset(of: next) { next.insert("전체") }
-        else { next.remove("전체") }
+        guard labels.count > 1, labels.first == rules.text("checklistAll") else { return next }
+        if label == rules.text("checklistAll") { return isOn ? Set(labels) : [] }
+        if Set(labels.dropFirst()).isSubset(of: next) { next.insert(rules.text("checklistAll")) }
+        else { next.remove(rules.text("checklistAll")) }
         return next
     }
     static func checklistAnswer(_ thread: SlackThread, selected: Set<String>) -> String? {
         let labels = checklistLabels(thread).filter { selected.contains($0) }
         guard !labels.isEmpty else { return nil }
-        return "선택: " + (labels.contains("전체") ? "전체" : labels.joined(separator: ", "))
+        return rules.text("checklistPrefix") + (labels.contains(rules.text("checklistAll")) ? rules.text("checklistAll") : labels.joined(separator: ", "))
     }
     static func hermesAnswer(_ thread: SlackThread, label: String) -> String? {
         replyLabels(thread).contains(label) ? label : nil
@@ -538,16 +530,16 @@ enum SlackNotice {
     static func assessment(_ thread: SlackThread, confirmed: Set<String> = []) -> (pending: ChatMessage?, state: ChatMark?) {
         guard let exchange = approvalExchange(thread) else { return (nil, nil) }
         if exchange.finished { return (nil, ChatMark(color: approvedColor, text: settledText)) }
-        switch exchange.request.hermesReplyState {
-        case .working: return (nil, ChatMark(color: questionColor, text: "처리 중"))
+        switch exchange.request.effectiveHermesReplyState {
+        case .working: return (nil, ChatMark(color: questionColor, text: rules.text("workingText")))
         case .closed: return (nil, ChatMark(color: approvedColor, text: settledText))
         default: break
         }
         guard let answer = exchange.answer else {
-            return confirmed.contains(exchange.request.id) ? (nil, nil) : (exchange.request, ChatMark(color: questionColor, text: "답을 기다리는 중"))
+            return confirmed.contains(exchange.request.id) ? (nil, nil) : (exchange.request, ChatMark(color: questionColor, text: rules.text("waitingText")))
         }
         let said = answer.body.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines.union(.punctuationCharacters)).lowercased()
-        return (nil, (yes.contains(said) || (isLearningReport(exchange.request.body) && said == "학습승인")) ? ChatMark(color: approvedColor, text: "승인됨") : nil)
+        return (nil, (yes.contains(said) || (isLearningReport(exchange.request.body) && said == rules.text("learningApprove"))) ? ChatMark(color: approvedColor, text: rules.text("approvedText")) : nil)
     }
     /// What a thread waits on, as a coloured note: a question still open, or a request the user approved.
     static func state(_ thread: SlackThread, confirmed: Set<String> = []) -> ChatMark? { assessment(thread, confirmed: confirmed).state }
@@ -555,9 +547,9 @@ enum SlackNotice {
     static let alertID = "alert"
     /// The lines of the notice that a thread's bell can mark as read.
     static func hasBell(_ item: SlackNoticeItem) -> Bool { item.id == alertID || item.id.hasPrefix(questionID + ":") }
-    static let alertColor = "#36C5F0"
+    static var alertColor: String { rules.color("alertColor") }
     /// How long a character's own post keeps counting as a notification when nobody answers it.
-    static let alertWindow: TimeInterval = 24 * 3600
+    static var alertWindow: TimeInterval { rules.number("alertWindow") }
 
     /// What still waits for the user in a room, oldest first within each line: customer messages nobody answered,
     /// each character's approval requests (the ones that offer 승인·거절·의견), notifications (threads a character
@@ -944,14 +936,10 @@ enum SlackText {
         "blush": "😊", "woman-bowing": "🙇‍♀️", "birthday": "🎂", "zap": "⚡️", "arrow_right_hook": "↪️",
     ]
 
-    private static let thinking = try? NSRegularExpression(pattern: #"^[◐◓◑◒🤔\s]*생각\s*중\s*(\.{2,}|…)?\s*$"#)
-    /// Hermes posts a "생각 중..." line while it works and later replaces it with the answer.
-    /// It is a sign that someone is writing, not something that was said.
+    /// Compiled once per configuration revision, including the fast-path vocabulary.
     static func isThinking(_ body: String) -> Bool {
-        guard body.contains("생각") else { return false }
         let first = String(body.drop(while: { $0.isNewline }).prefix(while: { !$0.isNewline }))
-        guard let thinking, !first.isEmpty else { return false }
-        return thinking.firstMatch(in: first, range: NSRange(first.startIndex..., in: first)) != nil
+        return !first.isEmpty && DdotsConfig.shared.conversation.matches("thinking", first)
     }
 
     /// Slack's attachment colours as `#RRGGBB`: its three named ones, or a hex value with or without the mark.
@@ -1028,10 +1016,12 @@ struct SlackState: Codable {
         result.slackBroadcast = message.broadcast
         result.files = message.files
         result.marks = message.marks.map { ChatMark(color: $0.color, text: SlackText.display($0.text, users: users)) }
-        result.hermesReplyState = message.hermesReplyState
+        result.hermesReplyState = message.effectiveHermesReplyState
+        result.hermesReplyEvidence = message.hermesReplyEvidence
         result.hermesButtons = message.hermesButtons ?? []
         result.hermesChecklist = message.hermesChecklist ?? []
         result.hermesChecklistSelected = message.hermesChecklistSelected ?? []
+        result.hermesChecklistCanSkip = message.hermesChecklistCanSkip ?? false
         result.quoteColors = message.quoteColors ?? []
         return result
     }
@@ -1067,9 +1057,15 @@ struct SlackState: Codable {
 
 /// Bounded memo for edited-in-place Slack status messages. Confined to the Slack queue.
 struct SlackThinkingMemo {
+    private var rulesGeneration = -1
+    private mutating func refreshRules() {
+        let generation = DdotsConfig.shared.generation
+        if rulesGeneration != generation { entries.removeAll(); rulesGeneration = generation }
+    }
     private var entries: [String: (text: String, value: Bool)] = [:]
     private(set) var evaluations = 0
     mutating func value(ts: String, text: String) -> Bool {
+        refreshRules()
         if let cached = entries[ts], cached.text == text { return cached.value }
         if entries.count >= 8192 { entries.removeAll(keepingCapacity: true) }
         let result = SlackText.isThinking(text)
@@ -1107,6 +1103,11 @@ struct SlackDiagnosticsGate {
 /// Value cache: copies can be prepared on the Slack queue before publishing on main.
 /// Retains only the current room/thread data and never hides a newly received message.
 struct SlackPublishCache {
+    private var rulesGeneration = -1
+    private mutating func refreshRules() {
+        let generation = DdotsConfig.shared.generation
+        if rulesGeneration != generation { rooms.removeAll(); latest.removeAll(); incoming = []; rulesGeneration = generation }
+    }
     private struct Room {
         var threads: [SlackThread]
         var latest: ChatMessage?
@@ -1118,6 +1119,7 @@ struct SlackPublishCache {
     private(set) var incoming: [ChatMessage] = []
     private(set) var roomBuilds = 0
     mutating func prepare(_ threads: [String: [SlackThread]], excluding: Set<String>) {
+        refreshRules()
         var changed = excluded != excluding
         excluded = excluding
         for room in Array(rooms.keys) where threads[room] == nil { rooms[room] = nil; latest[room] = nil; changed = true }
@@ -1134,6 +1136,11 @@ struct SlackPublishCache {
 }
 
 struct SlackUnreadCache {
+    private var rulesGeneration = -1
+    private mutating func refreshRules() {
+        let generation = DdotsConfig.shared.generation
+        if rulesGeneration != generation { entries.removeAll(); rulesGeneration = generation }
+    }
     private struct Entry {
         var thread: SlackThread
         var lastRead: Double, roomRead: Double, replyRead: Double
@@ -1142,6 +1149,7 @@ struct SlackUnreadCache {
     private var entries: [String: Entry] = [:]
     private(set) var evaluations = 0
     mutating func count(_ thread: SlackThread, lastRead: Double, roomRead: Double, threadRead: [String: Double]) -> Int {
+        refreshRules()
         let replyRead = threadRead[thread.id] ?? 0
         if let old = entries[thread.id], old.thread == thread, old.lastRead == lastRead, old.roomRead == roomRead, old.replyRead == replyRead { return old.count }
         let value = SlackUnread.count([thread], lastRead: lastRead, roomRead: roomRead, threadRead: threadRead)
@@ -1154,6 +1162,11 @@ struct SlackUnreadCache {
 
 /// Main-owner value cache. Time-dependent items are valid only between root/expiry boundaries.
 struct SlackNoticeMemo {
+    private var rulesGeneration = -1
+    private mutating func refreshRules() {
+        let generation = DdotsConfig.shared.generation
+        if rulesGeneration != generation { entries.removeAll(); previous = []; interval = nil; petApprovalInput = nil; rulesGeneration = generation }
+    }
     private struct Entry {
         var thread: SlackThread; var confirmed: Set<String>
         var assessment: (pending: ChatMessage?, state: ChatMark?)
@@ -1176,6 +1189,7 @@ struct SlackNoticeMemo {
     private(set) var petApprovalEvaluations = 0
     var count: Int { entries.count }
     private mutating func entry(_ thread: SlackThread, confirmed: Set<String>) -> Entry {
+        refreshRules()
         if let old = entries[thread.id], old.thread == thread, old.confirmed == confirmed { return old }
         let result = Entry(thread: thread, confirmed: confirmed, assessment: SlackNotice.assessment(thread, confirmed: confirmed), settled: SlackNotice.isSettled(thread, confirmed: confirmed))
         if entries.count >= 512 { entries.removeAll(keepingCapacity: true) }
@@ -1187,18 +1201,20 @@ struct SlackNoticeMemo {
     /// Both pet timers read this. Reuse the whole decision until its inputs change, even when the room has more
     /// threads than the per-thread cache can retain. A completed request may still offer buttons, but never waves.
     mutating func needsPetApproval(_ threads: [SlackThread], rooms: Set<String>, confirmed: Set<String>) -> Bool {
+        refreshRules()
         let input = PetApprovalInput(threads: threads, rooms: rooms, confirmed: confirmed)
         if petApprovalInput == input { return petApproval }
         petApproval = threads.contains { thread in
             guard rooms.contains(thread.room) else { return false }
             let notice = entry(thread, confirmed: confirmed)
-            return notice.assessment.pending != nil && !notice.settled
+            return notice.assessment.pending.map(SlackNotice.requestsPetReply) == true && !notice.settled
         }
         petApprovalInput = input
         petApprovalEvaluations += 1
         return petApproval
     }
     mutating func items(_ threads: [SlackThread], now: Date = Date(), dismissed: [String: Double], confirmed: Set<String>) -> [SlackNoticeItem] {
+        refreshRules()
         let stamp = now.timeIntervalSince1970
         if let interval, interval.contains(stamp), previous == threads, self.dismissed == dismissed, self.confirmed == confirmed { return value }
         let result = SlackNotice.items(threads, now: now, dismissed: dismissed, confirmed: confirmed)

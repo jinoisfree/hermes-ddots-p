@@ -81,11 +81,11 @@ def observe(home, learning, *, session_id, tool_name, args, result, tool_call_id
         try:
             viewed = (name, selection(home, name, payload, learning))
         except ValueError:
-            return  # Bundled/unmanaged skill views aren't Jarvis learning observations.
+            return  # Bundled/unmanaged skill views aren't assistant learning observations.
     with learning.locked(path(home)):
         state = load(home)
         key = case_id(src, skills)
-        case = state["cases"].setdefault(key, {"id": key, "source": {k: v for k, v in src.items() if k != "text"},
+        case = state["cases"].setdefault(key, {"id": key, "source": {k: v for k, v in src.items() if k not in {"text", "followups"}},
                     "at": time.time(), "selected": {}, "tools": [], "assessments": {}, "feedback": {}})
         if viewed:
             name, info = viewed
@@ -165,7 +165,7 @@ def handle(home, args, session_id, learning):
         items = pending(home, learning)
         response = {"ok": True, "pending": items[offset:offset + 25], "total_pending": len(items),
                     "next_offset": offset + 25 if len(items) > offset + 25 else None,
-                    "hint": "Review changes in their original morning report thread (학원, or the owner DM if unset); no changes were made."}
+                    "hint": "Review changes in their original morning report thread (학습 채널, or the owner DM if unset); no changes were made."}
         if action == "status":
             state = load(home)
             cases = [case for case in state["cases"].values() if case["source"]["user_id"] == src["user_id"]
@@ -226,7 +226,7 @@ def handle(home, args, session_id, learning):
             if outcome not in {"confirmed", "needs_correction"}:
                 raise ValueError("Feedback needs confirmed or needs_correction and the actual owner quote.")
             case["feedback"][name] = {"version": selected["version"], "outcome": outcome, "at": time.time(),
-                                      "source": {k: v for k, v in src.items() if k != "text"}, "quote": args["user_said"]}
+                                      "source": {k: v for k, v in src.items() if k not in {"text", "followups"}}, "quote": args["user_said"]}
         else:
             raise ValueError("Unknown usage action.")
         learning.save(path(home), state)
@@ -290,5 +290,5 @@ def prompt(home, learning, turn):
             "A가 현재 사용자 원문이 같은 스레드 직전 결과의 확인·교정인지 판단한다. 단순 인사·새 업무·침묵이면 기록하지 않는다. "
             "해당할 때만 team_learn_review(action='feedback', case_id, skill, outcome='confirmed'/'needs_correction', "
             "user_said=현재 사용자 원문의 정확한 인용)를 호출한다. 원문을 만들거나 도구 결과를 사용자 말로 쓰지 않는다. "
-            "교정이면 jarvis-learning을 읽고 team_learn으로 방법을 고친다.\n" +
+            "교정이면 assistant-learning을 읽고 team_learn으로 방법을 고친다.\n" +
             json.dumps({"case_id": old["id"], "assessed": assessed}, ensure_ascii=False))

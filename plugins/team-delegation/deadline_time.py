@@ -7,7 +7,7 @@ KST = ZoneInfo('Asia/Seoul')
 
 DEADLINE = re.compile(
     r'(?<!\d)(?:(\d{4})\s*(?:[-./]|년\s*))?(\d{1,2})\s*(?:[./-]|월\s*)(\d{1,2})(?:일)?(?!\d)'
-    r'(?:(?:T|\s+)(?:(오전|오후)\s*)?(\d{1,2})(?::|시\s*)(\d{2})?(?:분)?(?::00)?(Z|[+-]\d{2}:\d{2})?)?')
+    r'(?:(?:T|\s+)(?:(오전|오후)\s*)?(\d{1,2})(?::|시\s*)(\d{2})?(?:분)?(?::(\d{2}(?:[.,]\d+)?))?(Z|[+-]\d{2}:\d{2})?)?')
 
 
 def extract(text, *, now=None, required=True):
@@ -15,7 +15,9 @@ def extract(text, *, now=None, required=True):
     year_now = (now or datetime.now(KST)).astimezone(KST).year
     values = []
     for match in DEADLINE.finditer(str(text or '')):
-        year, month, day, period, hour, minute, zone = match.groups()
+        year, month, day, period, hour, minute, second, zone = match.groups()
+        if second and any(c not in '0.,' for c in second):
+            raise ValueError('deadline_minute_precision_required')
         value = f'{int(year or year_now):04d}-{int(month):02d}-{int(day):02d}'
         if hour is not None:
             h = int(hour)
@@ -75,7 +77,7 @@ def label(value):
 
 
 NOTE_STAMP = re.compile(r'(?:\d{4}[-./]\d{1,2}[-./]\d{1,2}|\d{1,2}/\d{1,2}|\d{1,2}월\s*\d{1,2}일)'
-                        r'(?:(?:T|\s+)(?:(오전|오후)\s*)?(\d{1,2})(?::|시\s*)(\d{2})?(?:분)?(?::00)?(Z|[+-]\d{2}:\d{2})?)?')
+                        r'(?:(?:T|\s+)(?:(오전|오후)\s*)?(\d{1,2})(?::|시\s*)(\d{2})?(?:분)?(?::(\d{2}(?:[.,]\d+)?))?(Z|[+-]\d{2}:\d{2})?)?')
 
 
 def note_value(text, parse_day):
@@ -85,7 +87,9 @@ def note_value(text, parse_day):
     day = parse_day(match.group(0))
     if not day:
         return None
-    period, hour, minute, zone = match.groups()
+    period, hour, minute, second, zone = match.groups()
+    if second and any(c not in '0.,' for c in second):
+        return None
     if hour is None:
         return day
     h = int(hour)

@@ -10,13 +10,20 @@ restart never kills it) calls ``tick`` every two minutes:
                "그 제안에 따라 진행해"; nothing to do -> short report
   implementing Paseo implements, tests, ./sync, commits with the job marker and writes result.json
   reported     report in the 조직개편안 thread with [[버튼: 확인 | 롤백]]
-  확인          push the marked commits (owner click = push approval), repaint green
+  확인          the Paseo conversation pushes the marked commits (owner click = push approval) so
+               Paseo records the push and paints its workspace blue; 진단담당 then checks the remote
+               itself and pushes only what the conversation left out
   롤백          revert the marked commits, write the reverted mirror files back to the live paths,
                ./sync, restart the gateway when code changed, push the revert when the original
                had reached the remote
 
-Paseo never pushes. Commits are identified by the marker in their subject, never by trust in
-the agent's own report.
+Paseo pushes only after the owner's 확인, exactly the targets 진단담당 names. Commits are identified by
+the marker in their subject, never by trust in the agent's own report.
+
+2026-10-28 사용자 결정: 조직개편안은 소유자가 버튼·번호로 승인한 항목만 넘어오고(``org_review_auto`` 끔),
+진단 결함·매일 점검·새 오류는 03:00 ``night_batch``가 묻지 않고 한 작업(kind ``night``)으로 넘긴다.
+00:00~08:29 KST에는 ``tick``이 Slack에 새 글을 올리지 않고 ``held``에 모아 두며, 스레드가 아직 없는
+새벽 작업의 글은 08:30 아침 시스템 보고가 스레드를 붙인 뒤 올린다.
 """
 from __future__ import annotations
 
@@ -56,6 +63,7 @@ MIRRORS = (('hermes/', ROOT), ('launchd/', Path.home() / 'Library/LaunchAgents')
 # Owner decision 2026-10-25: 일반개발, Opus 5.5 medium only.
 RUN_ARGS = ['--provider', 'claude', '--model', 'claude-opus-5-5', '--thinking', 'medium', '--mode', 'bypassPermissions']
 AGENT_TIMEOUT = 3 * 3600
+PUSH_TIMEOUT = 1800
 NO_FILE_GRACE = 180
 WAIT_NOTICE = 3 * 3600
 FRESH_EDIT = 3600
@@ -83,8 +91,9 @@ def load(home=HOME):
 
 def settings(home=HOME):
     cfg = O.config(home).get('paseo_autofix') or {}
-    result = {'enabled': False, 'incidents': False, 'daily_incident_cap': INCIDENT_CAP_DEFAULT, **(cfg if isinstance(cfg, dict) else {})}
-    if (type(result['enabled']) is not bool or type(result['incidents']) is not bool
+    result = {'enabled': False, 'incidents': False, 'org_review_auto': False, 'daily_incident_cap': INCIDENT_CAP_DEFAULT,
+              **(cfg if isinstance(cfg, dict) else {})}
+    if (type(result['enabled']) is not bool or type(result['incidents']) is not bool or type(result['org_review_auto']) is not bool
             or type(result['daily_incident_cap']) is not int or not 1 <= result['daily_incident_cap'] <= 20):
         raise ValueError('Invalid paseo_autofix settings')
     return result
@@ -151,7 +160,9 @@ def item_material(items):
 
 
 def analysis_prompt(key, items, path, kind='org_review'):
-    subject = (f'진단담당이 진단에서 확정한 프로그램 결함({key})의 수정 요청' if kind == 'incident' else f'진단담당의 {key} 조직개편안')
+    subject = {'incident': f'진단담당이 진단에서 확정한 프로그램 결함({key})의 수정 요청',
+               'night': f'진단담당이 새벽에 모은 진단 결함·매일 점검·새 오류({key})의 수정 요청',
+               }.get(kind, f'진단담당의 {key} 조직개편안(소유자가 승인한 항목)')
     return ('진행 방식: 일반개발. 사람이 답하지 않는 자동 실행이다. 질문 도구를 쓰지 말고 진행 방식·모델도 묻지 마라.\n'
             f'너는 {subject}을 검토하는 Hermes-desktop-pet 담당이다. 먼저 AGENTS.md와 관련 docs를 읽고, '
             '항목마다 실제 코드·설정·기록으로 근거를 확인해 진행 또는 보류를 판단하라.\n'
@@ -177,12 +188,24 @@ def implement_prompt(key, numbers, path):
             '질문 도구를 쓰지 마라.\n'
             'AGENTS.md 절차를 따른다: 실행 원본 수정, 플러그인 사본 맞춤과 --check, 게이트웨이 Python 테스트, 관련 docs 갱신, ./sync. '
             f'커밋 메시지 첫 줄은 Hermes-desktop-pet와 hermes-agent 모두 반드시 "{mark} "로 시작한다. '
-            '다른 작업의 미커밋 변경은 커밋에 넣지 않는다. 푸시는 하지 마라(소유자가 결과 보고의 확인 버튼으로 승인한다). '
+            '다른 작업의 미커밋 변경은 커밋에 넣지 않는다. 푸시는 하지 마라(소유자가 결과 보고의 확인 버튼으로 승인하면 진단담당이 이 대화에 푸시를 맡긴다). '
             '플러그인 .py나 본체를 바꿨으면 AGENTS.md의 게이트웨이 재시작 절차(처리 중인 턴 확인, 재시작, 연결·오류 기록 확인)를 따른다. '
             '테스트가 실패한 항목은 변경을 되돌리고 실패로 적는다.\n'
             f'끝나면 {path} 에 JSON 하나만 써라: '
             '{"items":[{"n":1,"status":"완료","summary":"200자 이내"}],"tests":[{"command":"실행한 명령","exit_code":0}],'
             '"restarted":false,"notes":"1000자 이내, 고치지 않은 의심 사항과 실제로 본 범위"} status는 완료·보류·실패 중 하나.')
+
+
+def push_prompt(targets):
+    commands = '\n'.join(f"git -C {t['repository']} push {t['remote']} {t['commit']}:refs/heads/{t['branch']}" for t in targets)
+    return ('진단담당: 소유자가 Slack 결과 보고의 확인 버튼으로 아래 푸시를 명시적으로 승인했다'
+            '(2026-10-25 소유자 결정: 확인 클릭이 표식 커밋의 푸시 승인). 질문 도구를 쓰지 마라. 파일은 고치지 마라.\n'
+            '대상마다 아래 명령을 다른 명령과 묶지 않은 단독 셸 명령으로 그대로 실행하라. 옵션을 붙이지 말고, 실패하면 '
+            'pull/rebase/merge/강제 푸시로 우회하지 말고 출력만 보고하라.\n' + commands + '\n'
+            '실행 뒤 git -C <저장소> ls-remote <원격> refs/heads/<브랜치>로 원격 해시를 확인하고, 다르면 fetch 뒤 '
+            'merge-base --is-ancestor <커밋> <원격>/<브랜치>로 포함 여부를 확인하라.\n'
+            f'끝에 "푸시대상: {json.dumps(targets, ensure_ascii=False)}" 줄을 쓰고, 모든 대상이 원격에 포함됐을 때만 '
+            '"작업상태: 푸시" 줄을 써라.')
 
 
 def read_json(path):
@@ -300,10 +323,89 @@ def needs_restart(files, agent_commits):
 # ---------------------------------------------------------------- reports
 
 
-def say(home, job, text):
-    """Post into the 조직개편안 thread (owner DM with 진단담당)."""
+HOLD_QUIET = False  # set by ``tick``: the launchd runner stays silent 00:00~08:29 (2026-10-28 사용자 결정)
+
+
+def quiet(now=None):
+    """00:00~08:29 KST: no new Slack posts from 진단담당's background work (2026-10-28 사용자 결정)."""
+    now = datetime.fromtimestamp(time.time() if now is None else now, O.KST)
+    return (now.hour, now.minute) < (8, 30)
+
+
+def post(home, job, text):
     return str(R.slack(home, 'chat.postMessage', {'channel': job['channel'], 'thread_ts': job['thread_ts'], 'text': text,
                                                   'parse': 'none', 'link_names': False, 'unfurl_links': False})['ts'])
+
+
+def say(home, job, text, role=None):
+    """Post into the job's report thread; held (returns None) while quiet or before the thread exists."""
+    if not job.get('thread_ts') or (HOLD_QUIET and quiet()):
+        job.setdefault('held', []).append({'text': text, 'role': role})
+        return None
+    return post(home, job, text)
+
+
+def flush_held(home, job):
+    """Post what ``say`` held, in order, once the thread exists and the quiet hours are over."""
+    held = job.get('held') or []
+    if not held or not job.get('thread_ts') or quiet():
+        return
+    while held:
+        row = held[0]
+        ts = post(home, job, row['text'])
+        if row.get('role') == 'report':
+            job['report_ts'] = ts
+        held.pop(0)
+    job.pop('held', None)
+
+
+def attach_thread(home, channel, thread_ts):
+    """The 08:30 아침 시스템 보고 becomes the thread of every 새벽 작업 that has none yet."""
+    keys = []
+    with L.locked(state_path(home)):
+        state = load(home)
+        for key, job in state['jobs'].items():
+            if job.get('kind') == 'night' and not job.get('thread_ts'):
+                job.update(channel=channel, thread_ts=thread_ts)
+                keys.append(key)
+        if keys:
+            L.save(state_path(home), state)
+    return keys
+
+
+def enqueue_night(home, key, items, record_ids, now=None):
+    """03:00 새벽 작업: one Paseo job, no owner question; results wait for the morning thread."""
+    if not enabled(home) or not items:
+        return None
+    with L.locked(state_path(home)):
+        state = load(home)
+        if key in state['jobs']:
+            return 'duplicate'
+        state['jobs'][key] = {'key': key, 'kind': 'night', 'status': 'queued', 'record_ids': list(record_ids),
+                              'items': [dict(item, n=n) for n, item in enumerate(items, 1)],
+                              'channel': O.CHANNEL, 'thread_ts': None, 'queued_at': now or time.time()}
+        L.save(state_path(home), state)
+    return 'queued'
+
+
+def record_receipt(home, key, source_ts, receipt_ts):
+    """Remember the acknowledgment actually posted by the poller or gateway hook."""
+    with L.locked(state_path(home)):
+        state = load(home)
+        job = state['jobs'].get(key, {})
+        if job.get('receipt_source') == source_ts:
+            job['receipt_ts'] = receipt_ts
+            save(home, state)
+
+
+def finish_reply(home, job, text):
+    if job.get('receipt_ts'):
+        try:
+            R.update_message(home, job['channel'], job['receipt_ts'], text)
+            return job['receipt_ts']
+        except Exception as exc:
+            print(f'autofix receipt update failed ({type(exc).__name__}); posting result', file=sys.stderr)
+    return say(home, job, text)
 
 
 def paint(home, job, status, note):
@@ -321,17 +423,23 @@ def short(sha):
 
 def result_report(job):
     key = job['key']
-    heading = f"진단담당 자동 수정 결과 — {R.escape(job['items'][0]['title'])}" if job.get('kind') == 'incident' else f'진단담당 자동개편 결과 — {key}'
+    heading = {'incident': f"진단담당 자동 수정 결과 — {R.escape(job['items'][0]['title'])}",
+               'night': f'진단담당 새벽 자동 수정 결과 — {key}'}.get(job.get('kind'), f'진단담당 자동개편 결과 — {key}')
+    # Approved 조직개편안 items keep the owner's numbers (2026-10-28).
+    number = lambda n: (job.get('orig') or {}).get(str(n), n)
     lines = [f'*🔴 {heading}*']
+    if job.get('kind') == 'night':
+        lines.append('*항목*')
+        lines.extend(f"• {i['n']}번 {R.escape(i['title'])}" for i in job['items'])
     lines.append('*Paseo 판단*')
     for row in job.get('analysis') or []:
-        lines.append(f"• {row['n']}번 {row['decision']} — {R.escape(row['reason'])}")
+        lines.append(f"• {number(row['n'])}번 {row['decision']} — {R.escape(row['reason'])}")
     result = job.get('result')
     if result:
         lines.append('*결과*')
         for row in result['items']:
             mark = '✅' if row['status'] == '완료' else '⏸️' if row['status'] == '보류' else '❌'
-            lines.append(f"• {mark} {row['n']}번 {row['status']} — {R.escape(row['summary'])}")
+            lines.append(f"• {mark} {number(row['n'])}번 {row['status']} — {R.escape(row['summary'])}")
         if result.get('notes'):
             lines.append('*메모*\n' + '\n'.join('> ' + line for line in R.escape(result['notes']).splitlines() if line.strip()))
         if result['tests']:
@@ -362,13 +470,17 @@ def result_report(job):
 # ---------------------------------------------------------------- state machine
 
 
-def enqueue(home, key, report):
-    """Called by org_review.daily after delivering a report with items; idempotent."""
+def enqueue(home, key, report, orig=None):
+    """조직개편안 items for Paseo: all of them (``org_review_auto``) or the owner's approved ones; idempotent.
+
+    ``orig`` maps the job's 1..n back to the report's item numbers."""
     with L.locked(state_path(home)):
         state = load(home)
         if key not in state['jobs']:
             state['jobs'][key] = {'key': key, 'status': 'queued', 'items': report['items'], 'channel': report['channel'],
                                   'thread_ts': report['thread_ts'], 'queued_at': time.time()}
+            if orig:
+                state['jobs'][key]['orig'] = {str(k): v for k, v in orig.items()}
             L.save(state_path(home), state)
 
 
@@ -490,10 +602,19 @@ def decide_cap(home, key, choice, now=None):
 
 
 def incident_thread(home, channel, thread):
-    """Key of the 진단 결함 job whose report thread this is, or None."""
+    """Key of the 진단 결함·새벽 작업 job whose report thread this is, or None."""
     state = O.read(state_path(home), {'jobs': {}})
     return next((k for k, j in (state.get('jobs') or {}).items()
-                 if j.get('kind') == 'incident' and j.get('channel') == channel and j.get('thread_ts') == thread), None)
+                 if j.get('kind') in ('incident', 'night') and j.get('channel') == channel and j.get('thread_ts') == thread), None)
+
+
+def report_job(home, report_key):
+    """The 조직개편안 job a 확인/롤백 in that report's thread is for: the latest one with a result."""
+    jobs = load(home)['jobs']
+    keys = [k for k in jobs if k == report_key or k.startswith(report_key + '#')]
+    done = [k for k in keys if jobs[k]['status'] in ('reported', 'failed')]
+    pick = done or keys
+    return max(pick, key=lambda k: jobs[k].get('queued_at', 0)) if pick else report_key
 
 
 def deferred_items(home, n):
@@ -519,11 +640,15 @@ def request(home, key, action, ts):
         job = state['jobs'].get(key)
         if not job:
             return None
+        if job['status'] == 'confirming':
+            return '확인 처리 중이야. 끝나면 결과를 알릴게.'
         if job['status'] not in ('reported', 'failed'):
             return '아직 자동개편이 끝나지 않았어. 결과 보고 뒤에 눌러 줘.' if job['status'] not in ('confirmed', 'rolled_back', 'nothing') else '이미 처리된 작업이야.'
         if action == '롤백' and not any((job.get('commits') or {}).values()):
             action = '확인'
         job['action'] = {'kind': action, 'ts': ts}
+        job['receipt_source'] = ts
+        job.pop('receipt_ts', None)
         L.save(state_path(home), state)
     return '확인 접수. 원격에 올린 뒤 결과를 알릴게.' if action == '확인' else '롤백 접수. 되돌린 뒤 결과를 알릴게.'
 
@@ -547,7 +672,7 @@ def start(home, job):
 
 
 def open_agent(job, prompt):
-    title = f'진단담당 자동 수정 {job["key"]}' if job.get('kind') == 'incident' else f'진단담당 자동개편 {job["key"]}'
+    title = {'incident': f'진단담당 자동 수정 {job["key"]}', 'night': f'진단담당 새벽 수정 {job["key"]}'}.get(job.get('kind'), f'진단담당 자동개편 {job["key"]}')
     return paseo('run', '-d', *RUN_ARGS, '--cwd', str(SETTING), '--title', title, '--label', 'source=system-doctor-autofix',
                  prompt)['agentId']
 
@@ -558,7 +683,7 @@ def agent_status(job):
 
 def finish_report(home, job, status):
     job['status'] = status
-    job['report_ts'] = say(home, job, result_report(job))
+    job['report_ts'] = say(home, job, result_report(job), role='report')
 
 
 def fail(home, job, error):
@@ -624,7 +749,7 @@ def advance(home, job):
             if not numbers:
                 job['commits'] = {'setting': [], 'agent': []}
                 job['status'] = 'nothing'
-                job['report_ts'] = say(home, job, result_report(job).replace('🔴', '🟢', 1).replace('\n[[버튼: 확인]]', ''))
+                job['report_ts'] = say(home, job, result_report(job).replace('🔴', '🟢', 1).replace('\n[[버튼: 확인]]', ''), role='report')
                 return False
             sh([PASEO, 'send', job['agent_id'], '--no-wait', '--prompt', implement_prompt(key, numbers, folder / 'result.json')])
             job.update(status='implementing', phase_at=time.time())
@@ -635,9 +760,21 @@ def advance(home, job):
             job['error'] = '실패한 검사가 있다. 결과를 확인해 줘.'
         finish_report(home, job, 'reported')
         return False
+    if job['status'] == 'confirming':
+        try:
+            status = agent_status(job)
+        except Exception:
+            status = None
+        if status == 'running':
+            if time.time() - job['phase_at'] <= PUSH_TIMEOUT:
+                return True
+            sh([PASEO, 'stop', job['agent_id']], check=False)
+            job['push_note'] = 'Paseo 대화가 30분 안에 푸시를 끝내지 않아 멈췄다.'
+        finish_confirm(home, job)
+        return False
     action = (job.get('action') or {}).get('kind')
     if job['status'] in ('reported', 'failed') and action == '확인':
-        confirm(home, job)
+        return confirm(home, job)
     elif job['status'] in ('reported', 'failed') and action == '롤백':
         if busy(own=(job.get('agent_id', ''),)):
             return False
@@ -645,27 +782,65 @@ def advance(home, job):
     return job['status'] in ACTIVE
 
 
+def push_targets(job):
+    return [{'repository': str(REMOTES[name][0]), 'remote': REMOTES[name][1], 'branch': REMOTES[name][2], 'commit': commits[0]}
+            for name, commits in (job.get('commits') or {}).items() if commits]
+
+
 def confirm(home, job):
+    """Hand the approved push to the job's own Paseo conversation, so Paseo holds the push evidence."""
+    targets = push_targets(job)
+    job.pop('push_note', None)
+    if targets and job.get('agent_id'):
+        try:
+            if agent_status(job) == 'running':
+                return False  # the owner may still be talking to it; push once it is idle
+            sh([PASEO, 'send', job['agent_id'], '--no-wait', '--prompt', push_prompt(targets)])
+            job.pop('action', None)
+            job.update(status='confirming', phase_at=time.time())
+            return True
+        except Exception as exc:
+            job['push_note'] = f'Paseo 대화에 푸시를 맡기지 못했다 ({type(exc).__name__}).'
+    finish_confirm(home, job)
+    return False
+
+
+def finish_confirm(home, job):
+    """Accept what the conversation pushed only when the remote contains it; push the rest directly."""
+    via_paseo = job['status'] == 'confirming'
     pushed, problems = {}, []
     for name, commits in (job.get('commits') or {}).items():
         if commits:
             repo, remote, branch = REMOTES[name]
-            outcome = push(repo, remote, branch, commits[0])
+            if via_paseo and on_remote(repo, remote, branch, commits[0]):
+                outcome = {'ok': True, 'by': 'paseo'}
+            else:
+                outcome = {**push(repo, remote, branch, commits[0]), 'by': 'hermes'}
             pushed[name] = {'commit': commits[0], **outcome}
             if not outcome['ok']:
                 problems.append(f"{name}: {outcome.get('output', '')} (원격 {outcome['remote_head'][:7]})")
+    direct = [name for name, row in pushed.items() if row['by'] == 'hermes' and row['ok']]
+    notes = [job.get('push_note', '')]
+    if direct:
+        notes.append(('Paseo 대화가 올리지 않아 ' if via_paseo else '') + '진단담당이 직접 올린 대상(' + ', '.join(direct)
+                     + ')은 Paseo 작업에 파란불이 켜지지 않는다.')
+    job['push_note'] = ' '.join(n for n in notes if n)
     job['pushed'] = pushed
     job['status'] = 'confirmed' if not problems else 'failed'
     job.pop('action', None)
     if not pushed:
+        finish_reply(home, job, f'*🟢 진단담당 자동개편 확인 완료 — {job["key"]}*\n추가로 올릴 커밋이 없어 확인 처리했다.')
         paint(home, job, 'done', '확인')
         return
     lines = [f"*{'🟢' if not problems else '🔴'} 진단담당 자동개편 {'푸시 완료' if not problems else '푸시 실패'} — {job['key']}*"]
     for name, row in pushed.items():
         repo, remote, branch = REMOTES[name]
-        lines.append(f"• {repo.name} {remote}/{branch} `{short(row['commit'])}` — {'원격 반영 확인' if row['ok'] else '반영 안 됨'}")
+        by = 'Paseo 대화가 올림, ' if row['by'] == 'paseo' else ''
+        lines.append(f"• {repo.name} {remote}/{branch} `{short(row['commit'])}` — {by}{'원격 반영 확인' if row['ok'] else '반영 안 됨'}")
     lines.extend('• ' + R.escape(p) for p in problems)
-    say(home, job, '\n'.join(lines))
+    if job['push_note']:
+        lines.append('• ' + R.escape(job['push_note']))
+    finish_reply(home, job, '\n'.join(lines))
     paint(home, job, 'done' if not problems else 'failed', '확인·푸시' if not problems else '푸시 실패')
 
 
@@ -708,13 +883,15 @@ def rollback(home, job):
     lines = [f"*{'🟢' if ok else '🔴'} 진단담당 자동개편 롤백 {'완료' if ok else '실패'} — {job['key']}*"]
     lines.extend(f"• {name} 되돌림 커밋 `{short(sha)}`" for name, sha in done.items() if sha)
     lines.extend('• ' + R.escape(n) for n in notes)
-    say(home, job, '\n'.join(lines))
+    finish_reply(home, job, '\n'.join(lines))
     paint(home, job, 'declined' if ok else 'failed', '롤백' if ok else '롤백 실패')
 
 
 def tick(home=HOME):
+    global HOLD_QUIET
     if not enabled(home):
         return
+    HOLD_QUIET = True
     with L.locked(Path(home) / 'state/paseo-autofix-run.json'):
         with L.locked(state_path(home)):
             jobs = sorted(load(home)['jobs'])
@@ -723,6 +900,7 @@ def tick(home=HOME):
                 state = load(home)
                 job = state['jobs'][key]
             try:
+                flush_held(home, job)
                 holding = advance(home, job)
             except Exception as exc:
                 print(f'autofix {key} step failed: {type(exc).__name__}: {str(exc)[:300]}', file=sys.stderr)
@@ -733,6 +911,12 @@ def tick(home=HOME):
                 latest = state['jobs'].get(key, {})
                 if 'action' in latest and 'action' not in job and job.get('status') in ('reported', 'failed'):
                     job['action'] = latest['action']
+                    job['receipt_source'] = latest.get('receipt_source')
+                    job.pop('receipt_ts', None)
+                if latest.get('receipt_source') == job.get('receipt_source') and latest.get('receipt_ts'):
+                    job['receipt_ts'] = latest['receipt_ts']
+                if latest.get('thread_ts') and not job.get('thread_ts'):
+                    job.update(channel=latest['channel'], thread_ts=latest['thread_ts'])  # attached by the morning report
                 state['jobs'][key] = job
                 save(home, state)
             if holding:

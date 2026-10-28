@@ -295,6 +295,16 @@ struct ConversationTests {
         _ = restored.update(messages: [], now: t0, chatOpen: false, muted: false)
         check(restored.update(messages: old, now: t0.addingTimeInterval(1), chatOpen: false, muted: false) == nil && restored.reminders.isEmpty, "reminder for a pruned message is dropped")
 
+        var readEngine = NudgeEngine(reminders: [reply.id: t0.addingTimeInterval(50)])
+        _ = readEngine.update(messages: [reply], now: t0, chatOpen: false, muted: false)
+        _ = readEngine.update(messages: [reply], now: t0.addingTimeInterval(51), chatOpen: false, muted: false, readIDs: [reply.id])
+        check(readEngine.current == nil && readEngine.reminders.isEmpty, "read Slack or chat receipt cancels scheduled reminder")
+        var openedEngine = NudgeEngine(reminders: [reply.id: t0.addingTimeInterval(50)])
+        _ = openedEngine.update(messages: [reply], now: t0, chatOpen: false, muted: false)
+        _ = openedEngine.update(messages: [reply], now: t0.addingTimeInterval(2), chatOpen: true, muted: false)
+        check(openedEngine.reminders.isEmpty, "opening cancels reminder for available messages")
+        check(NudgeEngine.visible(shown, now: t0.addingTimeInterval(100), chatOpen: false) == nil, "expired nudge cannot animate between message polls")
+
         // Hermes record
         let home = FileManager.default.temporaryDirectory.appendingPathComponent("ddots-hermes-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: home) }

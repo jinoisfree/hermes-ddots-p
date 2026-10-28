@@ -76,6 +76,9 @@ class Reader:
     def __call__(self, kind, identifier):
         scopes = self.td.personal_scopes
         if kind == 'notes':
+            import obsidian_notes
+            if status := obsidian_notes.legacy_company_status(identifier):
+                raise SourceReadError(status, 'legacy_company_note_not_migrated')
             meta = scopes.native_metadata(self.td, kind, {'note_id':identifier}, {})
             owner = scopes.scope_of(self.cfg, kind, meta['current'])
             identity = meta.get('original')

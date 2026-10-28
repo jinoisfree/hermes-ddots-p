@@ -42,6 +42,7 @@ WORK_ERROR_REASONS = {
     'unsupported_work_source': '지원하지 않는 원본 종류예요',
     'linked_task_sources_conflict': '연결된 원본의 할 일 내용이 서로 달라요',
     'ambiguous_task_deadline': '할 일의 마감 날짜가 불명확해 소유자 확인이 필요해요',
+    'note_structure_preserved': '구역이 나뉜 메모라 할 일 완료 표시 말고는 다른 원본의 변경을 옮기지 않았어요',
     'reminder_read_failed': '미리알림을 읽지 못했어요',
     'title_write_pending': '제목 반영 확인이 필요해 멈췄어요. 자동 재실행하지 않아요',
     'unknown_error': '분류되지 않은 오류가 반복됐어요. 로컬 로그 확인이 필요해요',
@@ -49,6 +50,48 @@ WORK_ERROR_REASONS = {
 NON_TARGET_REASONS = frozenset(WORK_ERROR_REASONS) - {
     'linked_task_sources_conflict', 'ambiguous_task_deadline', 'reminder_read_failed', 'unknown_error', 'title_write_pending'}
 TRANSIENT_REASONS = {'reminder_read_failed', 'unknown_error'}
+
+
+CONTENT_WARNINGS = {  # work_sync.Engine warning lines -> fixed reason codes for 진단담당
+    '본문·할 일 반영 확인이 필요해 멈췄어요': 'work_content_write_uncertain',
+    '앞선 본문·할 일 반영이 불명확해': 'work_content_pending_uncertain',
+    '두 원본이 서로 다르게 바뀌었어요': 'work_content_conflict',
+    '노션 다음 마감 반영 확인이 필요해': 'work_content_write_uncertain',
+}
+
+
+def content_warning_code(line):
+    return next((code for text, code in CONTENT_WARNINGS.items() if text in line), None)
+
+
+def request_warning_diagnosis(common_id, reason):
+    """Bounded program call to 진단담당 (team-kit diagnosis_requests); None means tell the owner directly."""
+    try:
+        script = Path(__file__).resolve().parents[1] / 'team-kit/diagnosis_requests.py'
+        values = {'kind': 'work_watch_warning', 'common_id': common_id, 'error_type': reason,
+                  'failures': 1, 'since': time.time()}
+        result = subprocess.run([sys.executable, str(script), '--program-request'], input=json.dumps(values),
+                                text=True, capture_output=True, timeout=10)
+        response = json.loads(result.stdout)
+        return response.get('request_id') if response.get('ok') else None
+    except Exception:
+        return None
+
+
+def diagnosis_status(root, request_id):
+    try:
+        row = json.loads((Path(root) / 'shared/diagnosis-requests' / f'{request_id}.json').read_text())
+        status = str(row.get('status') or 'missing')
+        # 2026-10-28: 낮 요청은 진단담당이 새벽 3시에 모아 판정한다. 기다리는 동안은 1시간 기한을 적용하지 않는다.
+        return 'deferred' if status == 'pending' and row.get('deferred') == 'night' else status
+    except (OSError, ValueError):
+        return 'missing'
+
+
+def quiet_hours(now=None):
+    """00:00~08:29 KST: 새벽 판정 결과를 소유자에게 바로 내보내지 않는다(2026-10-28 사용자 결정)."""
+    now = datetime.fromtimestamp(time.time() if now is None else now, seoul())
+    return (now.hour, now.minute) < (8, 30)
 
 
 def work_error_reason(exc):
@@ -315,6 +358,11 @@ class Calendar:
         if not after or after.get('title') != title:
             raise RuntimeError('calendar title verification failed')
 
+    def set_notes(self, event, notes):
+        company_scope_guard('calendar', {'action': 'update', 'event_id': event['calendarItemIdentifier'], 'expected_start': event['start']}, strict=True)
+        if self.tools()._calendar_event_set_notes(event, notes) is None:
+            raise RuntimeError('calendar notes verification failed')
+
     def move(self, event, start, end):
         company_scope_guard('calendar', {'action': 'update', 'event_id': event['calendarItemIdentifier'], 'expected_start': event['start']})
         if self.tools()._calendar_event_move(event, start, end) is None:
@@ -469,6 +517,18 @@ class Sync:
         self.reports = []  # one Block Kit report per Notion page / linked work
         self.lines = None  # bullets for the Notion page being processed
         self.batch = None  # note lines queued for one write per note
+        self.completion = None  # work_completion.Completion when enabled
+        self.warning_diagnosis = None  # request_warning_diagnosis in production: 진단담당 first (2026-10-26)
+        self.warning_meta = {}  # warning line -> (common_id, reason code)
+        self.conflict_asks = []  # (common_id, title) content conflicts released to the owner: ask with buttons
+        self.resolved = []  # (common_id, outcome) conflicts the content sync closed this pass
+
+    def work_report(self, item, lines):
+        head = f'*연결된 업무 반영 — {item.get("title") or "제목 확인 불가"}*'
+        self.messages.append('\n'.join([head, *lines]))
+        url = next((r.get('metadata', {}).get('url') for r in item.get('knowledge_refs', []) if r.get('ref_type') == 'notion_page'), None)
+        self.reports.append({'title': item.get('title') or '제목 확인 불가', 'url': url, 'subtitle': '연결된 업무 반영',
+                             'lines': lines, 'when': datetime.now(seoul()).strftime('%-m/%-d %H:%M'), 'fallback': head})
 
     def say(self, line):
         (self.lines if self.lines is not None else self.messages).append(line)
@@ -476,6 +536,21 @@ class Sync:
     def persist(self):
         if not self.dry:
             save(self.path, self.state)
+
+    def drop_repeated_standing(self, cid, lines):
+        """Standing states (warnings, skipped or past-due reminders) recur on every pass until
+        someone acts; report them once per work and again only after they change or clear.
+        Change lines (written, created, moved...) are always reported."""
+        standing = [line for line in lines if line.startswith('• ⚠️') or
+                    line.startswith(('• 할 일 미리알림 skipped:', '• 할 일 미리알림 past_due:'))]
+        reported = self.state.setdefault('standing_reports', {})
+        signature = hashlib.sha256('\n'.join(standing).encode()).hexdigest() if standing else None
+        repeated = signature is not None and reported.get(cid) == signature
+        if reported.get(cid) != signature:
+            if signature: reported[cid] = signature
+            else: reported.pop(cid, None)
+            self.persist()
+        return [line for line in lines if line not in standing] if repeated else lines
 
     def report(self, key, message):
         if key not in self.state['notices']:
@@ -785,11 +860,19 @@ class Sync:
         if status=='conflict':
             current['revisions'] = self.work_revisions(item)
         transitioned = old is None or (old.get('status'),old.get('reason')) != (status,reason)
+        warn = transitioned
+        if reason in TRANSIENT_REASONS:
+            # Same 3-consecutive-run rule as the plain error path: one failed read is not "repeated".
+            current['count'] = 1 if transitioned else old.get('count', 1) + 1
+            warn = current['count'] == 3
         if old != current:
             health[cid] = current
-            if transitioned and status != 'ok':
+            # 'unsupported' (e.g. several calendar originals in one work) is a design limit the owner
+            # cannot act on: keep it in the state, do not report it (2026-10-26).
+            if warn and status not in ('ok', 'unsupported'):
                 label = WORK_ERROR_REASONS.get(reason, '원본 조회·연결 상태를 확인해 주세요')
                 errors.append(f'• ⚠️ 「{item.get("title") or "제목 확인 불가"}」 — {label}')
+                self.warning_meta[errors[-1]] = (cid, reason)
             self.persist()
             return transitioned
         return False
@@ -836,6 +919,14 @@ class Sync:
                 if not self.dry and any(d.get('old_id') for d in decisions):
                     item = self.store.get(cid)
                 allowed = {(d['domain'],d['source_id']) for d in decisions if d['status']=='ok'}
+                if self.content_engine is not None:
+                    authority = getattr(getattr(self.content_engine, 'sources', None), 'authority', None)
+                    if authority:
+                        try:authority(item, allowed)
+                        except Exception as exc:
+                            self.work_health(item, 'transient', 'authoritative_original_unavailable', errors)
+                            log_work_error(self.path.parent.parent, cid, 'authoritative_original_unavailable', exc)
+                            continue
                 item = {**item, 'sources':[r for r in item['sources'] if (r['domain'],r['source_id']) in allowed],
                         'knowledge_refs':[r for r in item.get('knowledge_refs',[]) if
                             r['ref_type']!='notion_page' or ('notion',r['external_id']) in allowed]}
@@ -847,16 +938,44 @@ class Sync:
                 if health.get('status')=='conflict' and health.get('links')==signature:
                     revisions = self.work_revisions(item)
                     if revisions is not None and revisions==health.get('revisions'):
+                        if self.completion is not None and not self.dry:
+                            # 진행도 is a status mark, independent of the content conflict.
+                            self.lines = []
+                            self.completion.fill_progress(item)
+                            lines, self.lines = self.lines, None
+                            if lines:
+                                self.work_report(item, lines)
                         continue
             self.lines = []
             self.batch = {}
             try:
+                if self.completion is not None and not self.dry and item['status'] == 'active':
+                    # 진행도 first: a content conflict or read error below must not hold back the status mark.
+                    self.completion.fill_progress(item)
                 if self.content_engine is not None:
                     outcome = self.content_engine.run(item)
+                    if outcome.get('resolved'):
+                        self.resolved.append((cid, outcome['resolved']))
                     if self.link_lifecycle is not None:
                         self.work_health(item, outcome.get('connection_status','ok'), outcome.get('connection_reason','read_ok'), errors)
+                    warned = False
                     for line in outcome['messages']:
+                        code = content_warning_code(line)
+                        if code and self.warning_diagnosis is not None:
+                            # Content-sync warnings follow the 진단담당-first route too, once per work and reason.
+                            warned = True
+                            key = f'work-error:{cid}:{code}'
+                            if key not in self.state['notices']:
+                                self.state['notices'].append(key)
+                                errors.append(f'• ⚠️ 「{item.get("title") or "제목 확인 불가"}」 — {line.removeprefix("• ⚠️ ")}')
+                                self.warning_meta[errors[-1]] = (cid, code, item.get('title') or '제목 확인 불가')
+                            continue
                         self.say(line)
+                    if not warned and self.warning_diagnosis is not None:
+                        self.state['notices'] = [k for k in self.state['notices']
+                                                 if not k.startswith(f'work-error:{cid}:work_content_')]
+                    if self.completion is not None:
+                        self.completion.check({**item, 'status': self.store.get(cid)['status']})
                     if outcome['handled']:
                         self.state['work_failures'].pop(cid, None)
                         self.persist()
@@ -891,17 +1010,25 @@ class Sync:
                         for key in self.state['notices'])
                     if not skip and not already and (reason not in TRANSIENT_REASONS or count >= 3):
                         errors.append(f'• ⚠️ 「{item.get("title") or "제목 확인 불가"}」 — {WORK_ERROR_REASONS[reason]}')
+                        self.warning_meta[errors[-1]] = (cid, reason)
                         self.state['notices'].append(prefix + reason)
                     self.persist()
             finally:
                 self.batch = None
                 lines, self.lines = self.lines, None
+                lines = self.drop_repeated_standing(cid, lines)
                 if lines:
-                    head = f'*연결된 업무 반영 — {item.get("title") or "제목 확인 불가"}*'
-                    self.messages.append('\n'.join([head, *lines]))
-                    url = next((r.get('metadata', {}).get('url') for r in item.get('knowledge_refs', []) if r.get('ref_type') == 'notion_page'), None)
-                    self.reports.append({'title': item.get('title') or '제목 확인 불가', 'url': url, 'subtitle': '연결된 업무 반영',
-                                         'lines': lines, 'when': datetime.now(seoul()).strftime('%-m/%-d %H:%M'), 'fallback': head})
+                    self.work_report(item, lines)
+
+        if self.completion is not None:
+            # Works completed in conversation or by a reminder are no longer in the active loop.
+            for item in self.completion.completed_items():
+                self.lines = []
+                self.completion.check(item)
+                lines, self.lines = self.lines, None
+                if lines:
+                    self.work_report(item, lines)
+            self.completion.finish_pass()
 
         if self.link_lifecycle is not None and not self.dry:
             # Migration and watcher share the same durable transition journal.
@@ -933,7 +1060,9 @@ class Sync:
                              'transient':'권한 또는 일시적 조회 실패로 처리를 미뤘어요',
                              'conflict':'연결된 원본 내용이 서로 달라요'}[data['status']]
                     errors.append(f'• ⚠️ 「{title}」 (`{event["common_id"]}`) — {label} ({data["domain"]})')
+                    self.warning_meta[errors[-1]] = (event['common_id'], 'link_' + data['status'])
             self.persist()
+        errors = self.route_warnings(errors)
         if errors:
             head = '*🟡 연결된 업무 확인 필요*'
             text = '\n'.join([head, *errors])
@@ -941,6 +1070,42 @@ class Sync:
             self.reports.append({'title': '연결된 업무 확인 필요', 'url': None,
                                  'subtitle': '연결 업무 감시 오류 요약', 'lines': errors,
                                  'when': datetime.now(seoul()).strftime('%-m/%-d %H:%M'), 'fallback': text})
+
+    def route_warnings(self, errors):
+        """2026-10-26 사용자 결정: '확인 필요' warnings go to 진단담당 first. The owner gets a warning only
+        when 진단담당 says the owner must fix the original, the diagnosis fails or is refused (limits,
+        disabled), or no verdict arrives within an hour. A program defect reaches the owner as 진단담당's
+        report-room result (with the existing autofix flow); a recovered one stays silent."""
+        if self.dry or self.warning_diagnosis is None:
+            return errors
+        pending = self.state.setdefault('warning_diagnoses', {})
+        owner, now = [], time.time()
+        def release(line, meta, note=''):
+            # 2026-10-27: a content conflict reaches the owner as a question with a button per original.
+            if meta and meta[1] == 'work_content_conflict' and len(meta) > 2:
+                self.conflict_asks.append((meta[0], meta[2]))
+            else:
+                owner.append(line + note)
+        for rid, row in list(pending.items()):
+            status = diagnosis_status(self.path.parent.parent.parent.parent, rid)
+            if status == 'deferred' or (row.get('night') and quiet_hours(now)):
+                row['night'] = True  # the verdict comes at 03:00; release only after 08:30
+                continue
+            if status in {'normal', 'posted', 'night_done'}:
+                pending.pop(rid)
+            elif status == 'owner_needed':
+                release(row['line'], row.get('meta')); pending.pop(rid)
+            elif status in {'failed', 'no_post', 'missing'} or now - row['at'] > 3600:
+                release(row['line'], row.get('meta'), ' _(진단담당 진단을 받지 못해 그대로 알려요)_'); pending.pop(rid)
+        for line in errors:
+            meta = self.warning_meta.get(line)
+            rid = meta and self.warning_diagnosis(meta[0], meta[1])
+            if rid:
+                pending[rid] = {'line': line, 'at': now, 'meta': list(meta)}
+            else:
+                release(line, meta)
+        self.persist()
+        return owner
 
     def sync_work(self, item):
         cid = item['common_id']
@@ -1168,7 +1333,8 @@ def main(*, dry_run=False):
                     title_sync=settings.get('title_sync', True) is True)
         from link_lifecycle import Lifecycle
         from source_identity import production_reader
-        sync.link_lifecycle = Lifecycle(store, production_reader)
+        import obsidian_store
+        sync.link_lifecycle = Lifecycle(store, production_reader, preserve_notion=obsidian_store.enabled(home))
         sync.execution_reads = True
         import work_sync
         import work_sources
@@ -1181,6 +1347,11 @@ def main(*, dry_run=False):
         sync.content_engine = work_sync.configured(home, work_sources.Sources(home, reader=sync.reader, notes=sync.notes, calendar=sync.calendar),
             store, settings, dry_run=dry_run, reminders=sync_task_reminders)
         sync.link_decisions_enabled = settings.get('link_decisions') is True
+        sync.warning_diagnosis = request_warning_diagnosis
+        import work_completion
+        completion = settings.get('completion') if isinstance(settings.get('completion'), dict) else {}
+        if sync.content_engine is not None and completion.get('enabled') is True and completion.get('since'):
+            sync.completion = work_completion.Completion(sync, since=completion['since'])
         try:
             output = sync.run()
         except Exception as exc:
@@ -1200,6 +1371,24 @@ def main(*, dry_run=False):
                 missed = [output]
             if missed:
                 print('\n\n'.join(missed))
+
+        if not dry_run and (sync.conflict_asks or sync.resolved):
+            import conflict_decisions
+            try:
+                for cid, resolved in sync.resolved:
+                    conflict_decisions.close(home, cid, resolved)
+                missed = conflict_decisions.ask(home, sync.conflict_asks)
+                if missed:
+                    print('\n'.join(f'연결된 업무 확인 필요: 「{title}」 — 두 원본이 서로 다르게 바뀌어 충돌로 보류했어요.'
+                                    for _, title in missed))
+            except Exception as exc:
+                log_work_error(home, 'conflict-decisions', 'conflict_ask_failed', exc)
+
+        if sync.completion is not None and not dry_run:
+            try:
+                sync.completion.flush_asks()
+            except Exception as exc:
+                log_work_error(home, 'completion', 'completion_ask_failed', exc)
 
         if sync.link_decisions_enabled and not dry_run and sync.state.get('pending_link_decisions'):
             from link_decisions import Decisions, Inventory

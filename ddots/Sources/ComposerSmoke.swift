@@ -7,7 +7,7 @@ extension AppDelegate {
         let sample = SlackModel()
         sample.source = .slack; sample.selected = Ddots.room
         let root = ChatMessage(id: "smoke-post", fromUser: true, speaker: "", body: "합성 새 글", date: Date(), profile: "")
-        var thread = SlackThread(id: "smoke-thread", room: "DJARVIS", ts: "100.1", root: root, replies: [], replyCount: 0, loaded: true, latest: 100, latestFromUser: true)
+        var thread = SlackThread(id: "smoke-thread", room: "Dassistant", ts: "100.1", root: root, replies: [], replyCount: 0, loaded: true, latest: 100, latestFromUser: true)
         let answer = ChatMessage(id: "smoke-answer", fromUser: false, speaker: "개인비서", body: "합성 답변", date: Date(), profile: "personal-secretary")
         sample.writeNewPost()
         sample.followPost(room: thread.room, ts: thread.ts, revision: sample.beginPost())

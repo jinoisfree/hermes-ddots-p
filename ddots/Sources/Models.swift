@@ -69,6 +69,10 @@ struct ConnectionInfo: Codable, Identifiable, Equatable {
 }
 
 enum PetTaskSummary {
+    /// A pinned task retains its text, but completion is only a short animation.
+    static func animationState(_ item: WorkItem, at now: Date) -> WorkState {
+        item.state == .responded && now.timeIntervalSince(item.updatedAt) >= 20 ? .idle : item.state
+    }
     static func runningHeadline(_ tasks: [WorkItem]) -> String? {
         let running = tasks.filter { $0.state == .running }
         guard running.count > 1 else { return nil }

@@ -240,7 +240,8 @@ def deliver(home, text):
                                             'unfurl_links': False, 'unfurl_media': False})
 
 
-def run(root, home, *, hours=24, dry_run=False, now=None):
+def prepare(root, home, *, hours=24, now=None):
+    """Read the same window and pending kinds; no delivery or state mutation."""
     now = time.time() if now is None else now
     state_path = Path(home) / "state/error-digest.json"
     state = load_state(state_path)
@@ -258,25 +259,40 @@ def run(root, home, *, hours=24, dry_run=False, now=None):
     new = {**pending, **new}
     if len(new) > MAX_SIGNATURES:
         raise ValueError('pending digest capacity exceeded')
-    result = format_digest(new)
+    return {"path": state_path, "state": state, "groups": groups, "new": new}
+
+
+def stage_pending(prepared):
+    # Pending is an unacknowledged send intent, never the confirmed baseline.
+    state = {**prepared['state'], 'pending': prepared['new']}
+    save_state(prepared['path'], state)
+
+
+def acknowledge(prepared):
+    state = prepared['state']
+    seen = dict(state['signatures'])
+    for key, item in {**prepared['groups'], **prepared['new']}.items():
+        seen[key] = {"last_seen": max(item["last_seen"], seen.get(key, {}).get("last_seen", 0))}
+    state = {k: v for k, v in state.items() if k != 'pending'}
+    state.update(version=STATE_VERSION, initialized=True, signatures=dict(sorted(
+        seen.items(), key=lambda pair: (-pair[1]["last_seen"], pair[0]))[:MAX_SIGNATURES]))
+    save_state(prepared['path'], state)
+
+
+def run(root, home, *, hours=24, dry_run=False, now=None):
+    prepared = prepare(root, home, hours=hours, now=now)
+    result = format_digest(prepared['new'])
     if hours != 24:
         result = result.replace("지난 24시간", f"지난 {hours}시간", 1)
     if dry_run:
         return result
     if result:
-        state['pending'] = new
-        save_state(state_path, state)
+        stage_pending(prepared)
         receipt = deliver(home, result)
         if not (isinstance(receipt, dict) and receipt.get('ok') is True and receipt.get('ts')
                 and receipt.get('channel') == 'REPLACE_SLACK_ID'):
             raise ValueError('digest delivery unconfirmed')
-    for key, item in {**groups, **new}.items():
-        seen[key] = {"last_seen": max(item["last_seen"], seen.get(key, {}).get("last_seen", 0))}
-    state.pop('pending', None)
-    state.update(version=STATE_VERSION, initialized=True, signatures=dict(sorted(
-        seen.items(), key=lambda pair: (-pair[1]["last_seen"], pair[0]))[:MAX_SIGNATURES]))
-    save_state(state_path, state)
-    # Cron's deliver target remains configured; empty stdout prevents a second post.
+    acknowledge(prepared)
     return ""
 
 

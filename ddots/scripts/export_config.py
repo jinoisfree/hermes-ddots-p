@@ -116,6 +116,27 @@ def samples_for(base):
         texts += [prefix + '일정 알려줘', prefix + ' 메일 읽어줘']
     return list(dict.fromkeys(texts))
 
+# Conversation rules are metadata, not an arbitrary settings dictionary.
+CONVERSATION_KEYS = {'texts': ['settledText', 'unanswered', 'draft', 'approveText', 'denyText', 'branchText', 'mailApproveText', 'mailDenyText', 'checklistSkip', 'checklistAll', 'checklistPrefix', 'learningApprove', 'learningDeny', 'workingText', 'waitingText', 'approvedText', 'denyLabel', 'mailApproveLabel', 'reviseLabel', 'mailReviseLabel', 'learningReviseLabel'], 'colors': ['questionColor', 'approvedColor', 'alertColor', 'askingColor', 'workingColor', 'closedColor'], 'patterns': ['nothingWaiting', 'sentLearning', 'mailDraft', 'mailWaiting', 'mailSent', 'thinking', 'approval1', 'approval2', 'learningReport1', 'learningReport2'], 'sets': ['settled', 'yes', 'workingStatus', 'closedStatus'], 'numbers': ['longThread', 'alertWindow']}
+
+def conversation_contract(raw):
+    if not isinstance(raw, dict) or type(raw.get('schema')) is not int or raw['schema'] != 1:
+        return None
+    result = {'schema': 1}
+    for group, keys in CONVERSATION_KEYS.items():
+        values = mapping(raw.get(group))
+        selected = {}
+        for key in keys:
+            value = values.get(key)
+            if group == 'sets':
+                if isinstance(value, list) and all(isinstance(v, str) for v in value): selected[key] = value
+            elif group == 'numbers':
+                if type(value) in (int, float): selected[key] = value
+            elif isinstance(value, str): selected[key] = value
+        if selected: result[group] = selected
+    safe(result)
+    return result
+
 def export(home, agent_source=None):
     home = Path(home)
     config = yaml_load(home / 'config.yaml')
@@ -163,6 +184,8 @@ def export(home, agent_source=None):
                   solo=dict(team_bots=sorted(team),listener_bots=sorted(listeners),excluded_rooms=sorted(excluded)),
                   defaults={'recipient':base['profiles']['fallback']},
                   features={'homeRoom':str(hub.get('channel_id') or '')})
+    conversation = conversation_contract(mapping(config.get("ddots")).get("conversation"))
+    if conversation is not None: result["conversation"] = conversation
     safe(result)
     return result
 

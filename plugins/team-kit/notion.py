@@ -711,7 +711,7 @@ def note(config: Any) -> str:
     if writable(config) == set():
         return ("[Notion] 이 프로필은 Notion을 보기만 할 수 있다. 연결에 지정된 페이지에만 접근한다. "
                 "읽기: databases(목록), schema(열과 선택지), query(행 조회), page(한 항목의 속성과 본문), search, users. "
-                "jarvis-work-sources를 열어 조회 범위와 근거를 확인한다.")
+                "assistant-work-sources를 열어 조회 범위와 근거를 확인한다.")
     if config.get('full_api') is True:
         return ('[Notion] 연결에 공유된 모든 페이지·표에서 생성은 즉시, 수정은 먼저 실행하고 후보고, 삭제만 도구 승인을 받는다. '
                 'api_help로 공식 문서 API 46개와 입력 스키마를 찾고 api(operation, params, body)로 실행한다. '
@@ -724,7 +724,7 @@ def note(config: Any) -> str:
                 'rollback은 같은 대화의 최근 변경을 30분 안 복원하며 이후 24시간 안에는 확인을 받는다. 복원이 삭제를 수반하면 승인을 받는다. '
                 '동시 수정은 덮어쓰지 않고, 미확인 쓰기·비동기 작업은 성공으로 보고하거나 반복하지 않는다. '
                 'API에서 복원 불가한 원본 첨부·댓글/보기 삭제 등은 제한을 보고한다. 예약·배경 쓰기는 차단한다. '
-                'Notion 자체의 연결 공유·권한·요금제 제한은 API 오류를 근거로 알린다. hippo-notion 스킬을 참고한다.')
+                'Notion 자체의 연결 공유·권한·요금제 제한은 API 오류를 근거로 알린다. office-notion 스킬을 참고한다.')
     limited = ("" if writable(config) is None else
                " 만들거나 고칠 수 있는 곳은 설정에 지정된 표와 그 하위 항목뿐이고, 나머지는 보기만 한다. 범위 밖 변경은 도구가 거부하니 시도하지 말고 사용자에게 알린다.")
     allowed, config_error = _no_approval(config)
@@ -752,18 +752,18 @@ def note(config: Any) -> str:
 SCHEMA = {
     "name": "notion",
     "description": (
-        "Use batch(title, operations) for multiple changes and one tool approval; do not ask approval separately in prose. "
-        "rollback(key?) restores the latest change in this conversation: immediate within 30 minutes, confirmed key within 24 hours. "
-        "Preserve existing text and attachments. Pass page.last_edited as seen_last_edited; plaintext edits of nonempty text require it. "
-        "Original text below the last line with 5+ ━ must be kept; replace_all=true only for an explicitly requested full rewrite. "
-        "update text supports {append: text} or {replace: {find: text, with: text}}. Check verification and content_loss. "
-        "Read and, after the user approves, change the Notion pages and databases this profile's connection can reach. "
-        "Reading: action 'databases' | 'search' (query) | 'schema' (database_id) | 'query' (database_id, filter?, sorts?, "
-        "page_size<=50, cursor?) | 'page' (page_id) | 'users'. Changes: 'create' (database_id + properties for a new row, "
-        "or parent_page_id + title for a sub-page; paragraphs optional), 'update' (page_id + properties), "
-        "'append' (page_id + paragraphs, after? top-level block id), 'edit' (page_id + blocks, up to 20 text/checked/color changes), 'trash' (page_id). Ids may be Notion links. For photos, add {type: image, path: absolute local path, caption?: text}; for other files (PDF, XLSX, DOCX, HWP, mail attachments) {type: file, path, caption?}; up to 10 per call. "
-        "Text spans support bold/italic/underline/strike/code/color/link; paragraphs support children (2 nested levels), callout/toggle/quote/divider. Use heading_2/heading_3 for text size. "
-        "Property values are plain: text, number, option name, list of option names, 'YYYY-MM-DD' or {start, end}, true/false, list of people names."),
+        "Use batch(title, operations) for multiple changes and one tool approval; no separate prose approval. "
+        "rollback(key?) restores this conversation's latest change: immediate within 30 minutes, confirmed key within "
+        "24 hours. Preserve text and attachments, including original text below the last line with 5+ ━. "
+        "replace_all=true requires an explicit full rewrite request. Pass page.last_edited as seen_last_edited for "
+        "plaintext edits of nonempty text. update text accepts {append: text} or {replace: {find: text, with: text}}. "
+        "Check verification and content_loss. Read and, after the user approves, change reachable Notion "
+        "pages/databases. Reads: databases, search(query), schema(database_id), query(database_id, filter?, sorts?, "
+        "page_size<=50, cursor?), page(page_id), users. Writes: create(database_id+properties or parent_page_id+title; "
+        "paragraphs?), update(page_id+properties), append(page_id+paragraphs, after? top-level block id), "
+        "edit(page_id+blocks, max20 text/checked/color changes), trash(page_id). IDs may be Notion links. Rich "
+        "paragraphs, images/files (max10), nesting and spans: see paragraphs parameter. Use heading_2/heading_3 for "
+        "text size. Properties: text, number, option name(s), YYYY-MM-DD or {start,end}, boolean, people names."),
     "parameters": {"type": "object", "properties": {
         "action": {"type": "string", "enum": sorted(READ | WRITE)},
         "database_id": {"type": "string"}, "page_id": {"type": "string"}, "parent_page_id": {"type": "string"},

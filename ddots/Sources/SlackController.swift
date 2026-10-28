@@ -195,6 +195,23 @@ final class SlackController {
         } else { onEnterIMessage?() }
     }
     private(set) var incoming: [ChatMessage] = []
+    /// Same room/thread watermarks as the badge. Scanning cursors (ddotsThrough) are not read receipts.
+    var readNudgeIDs: Set<String> {
+        let candidates = Set(incoming.map(\.id))
+        let reads = snapshot.threadRead.merging(syncedThreadRead, uniquingKeysWith: max)
+        var result = Set<String>()
+        for (room, threads) in snapshot.threads {
+            for thread in threads {
+                for message in thread.messages where candidates.contains(message.id) {
+                    let remote = message.id == thread.root.id ? (snapshot.roomRead[room] ?? 0)
+                        : max(reads[thread.id] ?? 0, message.slackBroadcast ? (snapshot.roomRead[room] ?? 0) : 0)
+                    if message.date.timeIntervalSince1970 <= max(lastRead[room] ?? 0, remote) { result.insert(message.id) }
+                }
+            }
+        }
+        return result
+    }
+
     var unreadTotal: Int { model.unreadTotal }
 
     init() {

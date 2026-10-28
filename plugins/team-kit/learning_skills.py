@@ -108,7 +108,7 @@ def locate(home, name):
                if p.parent.name == name and not any(x.startswith(".") for x in p.relative_to(root).parts)]
     if len(matches) > 1:
         raise ValueError("Multiple local skills have this name; resolve the duplicate first.")
-    category = settings(home).get("skill_folder", "jarvis")
+    category = settings(home).get("skill_folder", "assistant")
     if (not isinstance(category, str) or not category or category.startswith(".")
             or "/" in category or "\\" in category or "\x00" in category):
         raise ValueError("learning.skill_folder must be a single non-hidden folder name.")
@@ -333,7 +333,7 @@ def event(data, name, summary, files, src, quote, *, via="conversation", origin=
             active = value["after"] is not None
     entry = {"kind": "skill", "topic": "스킬: " + name, "skill": name, "rule": summary, "active": active,
              "version": uuid.uuid4().hex, "updated_at": time.time(), "user_said": quote,
-             "source": {k: v for k, v in src.items() if k != "text"}, "via": via,
+             "source": {k: v for k, v in src.items() if k not in {"text", "followups"}}, "via": via,
              "origin": origin, "evidence": evidence, "fingerprints": fingerprints, "files": files,
              "lesson": copy.deepcopy(lesson if lesson is not None else (previous or {}).get("lesson", {})),
              "before_lesson": copy.deepcopy((previous or {}).get("lesson", {}))}

@@ -51,6 +51,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     var loginCheckbox: NSButton?
     /// What the bubble is out for, so the same thing does not bring it out twice.
     var bubbleAlert: String?, shownBubbleAlert: String?
+    var approvalBubbleMessageID: String?
     var loginStatusLabel: NSTextField?
     var loginSettingsButton: NSButton?
     var loginChangeFailed = false
@@ -557,6 +558,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 else if CommandLine.arguments.contains("--ui-smoke-responses") { self.verifyResponses(destination: destination) }
                 else if CommandLine.arguments.contains("--ui-smoke-slack") { Task { @MainActor in await self.measureHeaderSlide(destination: destination); self.verifySlack(destination: destination) } }
                 else if CommandLine.arguments.contains("--ui-smoke-ddots") { self.verifyDdots(destination: destination) }
+                else if CommandLine.arguments.contains("--ui-smoke-approval-bubble") { self.verifyApprovalBubble(destination: destination) }
                 else if CommandLine.arguments.contains("--ui-smoke-chat") { self.verifyChatInteraction(destination: destination) }
                 else if CommandLine.arguments.contains("--ui-smoke-bubble-hidden") { self.verifyBubbleReveal(destination: destination) }
                 else { NSApp.terminate(nil) }
@@ -647,7 +649,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         pendingMessages = ChatTimeline.unresolved(pendingMessages, stored: storedMessages)
         StallTrace.shared.measure("chat.publish") { publishChat() }
         let waiting = nudges.reminders.count
-        _ = nudges.update(messages: nudgeMessages, now: Date(), chatOpen: chatExpanded, muted: !panel.isVisible)
+        _ = nudges.update(messages: nudgeMessages, now: Date(), chatOpen: chatExpanded, muted: !panel.isVisible, readIDs: nudgeReadIDs)
         if nudges.reminders.count != waiting { saveReminders() }
     }
     /// Replies from either side can raise a bubble over the pet.
@@ -657,6 +659,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let own = chatQuiet ? storedMessages.filter { nudges.reminders[$0.id] != nil } : storedMessages
         if own.isEmpty { return slack.incoming }
         return slack.incoming.isEmpty ? own : (own + slack.incoming).sorted(by: ChatTimeline.ordered)
+    }
+    var nudgeReadIDs: Set<String> {
+        slack.readNudgeIDs.union(storedMessages.filter { $0.date <= unread.lastRead }.map(\.id))
     }
     var unreadTotal: Int { (chatQuiet ? 0 : unread.count) + slack.unreadTotal }
     /// True when ddots has the window to itself: it is on and Slack is connected, so there is no iMessage side to open.
@@ -716,7 +721,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         guard !isSmoke, !model.paused else { return }
         let nudgeStart = StallTrace.now
         let waiting = nudges.reminders.count
-        _ = nudges.update(messages: nudgeMessages, now: Date(), chatOpen: chatExpanded, muted: !panel.isVisible)
+        _ = nudges.update(messages: nudgeMessages, now: Date(), chatOpen: chatExpanded, muted: !panel.isVisible, readIDs: nudgeReadIDs)
         if nudges.reminders.count != waiting { saveReminders() }
         StallTrace.shared.detail("slack.changed.nudges", milliseconds: (StallTrace.now-nudgeStart)*1000)
         let petStart = StallTrace.now
@@ -1127,10 +1132,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         guard !isPreview else { return }
         pet.bubbleText.avatarName = nil; pet.bubbleText.avatar = nil; pet.chatAnimation = nil
         bubbleAlert = nil
+        approvalBubbleMessageID = nil
         currentConnectOffer = nil
         if model.paused {
             setBubbleActions([])
             pet.state = .idle; pet.headline = "\(model.identity.subject) 쉬고 있어요"; pet.subtitle = "메뉴에서 다시 시작할 수 있어요"; return
+        }
+        if let approval = slack.model.petApproval {
+            let message = approval.message
+            approvalBubbleMessageID = message.id
+            bubbleAlert = "approval:\(message.id)"
+            setBubbleActions([])
+            pet.state = .waiting
+            pet.headline = "\(message.speaker) · 답변이 필요해요"
+            let reason = ChatText.preview(approval.reason)
+            pet.subtitle = reason.isEmpty ? "확인할 요청이 있어요 · 눌러서 스레드 보기" : reason
+            pet.bubbleText.avatar = Ddots.avatar(chat.avatars[message.profile], name: message.speaker)
+            pet.bubbleText.avatarName = message.speaker
+            return
         }
         if let notice = installedUpdateNotice, Date() < notice.until {
             setBubbleActions([]); pet.state = .idle; pet.headline = notice.text; pet.subtitle = ""; return
@@ -1146,7 +1165,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             return
         }
         // A waiting or failed task is never covered by a chat nudge.
-        let nudge = urgent == nil && !chatExpanded ? nudges.current : nil
+        let nudge = urgent == nil ? NudgeEngine.visible(nudges.current, now: Date(), chatOpen: chatExpanded) : nil
         if let nudge {
             setBubbleActions(PetAction.bubble(for: nudge.message.body, events: chat.calendarEvents, at: nudge.message.date))
             bubbleAlert = "message:\(nudge.message.id):\(nudge.reminder)"
@@ -1182,7 +1201,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let focused = model.tasks.first { $0.id == currentSnapshot?.screenFocus?.taskID && $0.state == .running }
         let eligible = model.tasks.first { $0.state == .running || ($0.state == .responded && Date().timeIntervalSince($0.updatedAt) < 20) }
         if let item = urgent ?? selected ?? focused ?? eligible {
-            pet.state = item.state
+            pet.state = PetTaskSummary.animationState(item, at: Date())
             pet.headline = "\(item.provider.name) · \(item.state.label)"
             pet.subtitle = active > 1 ? "\(active)개 작업 진행 중 · 클릭하면 대화창" : "\(item.project.isEmpty ? item.shortID : item.project) · 클릭하면 대화창"
             if urgent == nil, let headline = PetTaskSummary.runningHeadline(model.tasks) {
@@ -1399,17 +1418,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         if pet.genieActive { pet.endGenie() }
         pet.invalidateGeniePicture()
         pageGeneration += 1; chat.loadingOlder = false; chat.resetPage()
+        let approvalTarget = approvalBubbleMessageID
         genieWork("publishChat") { publishChat() }
         bubbleMotion.glide(now: ProcessInfo.processInfo.systemUptime)
         chatExpanded = true; pet.chatExpanded = true; panel.chatExpanded = true
         // A plain opening starts at the newest line. A bubble or link below can still choose its own target.
         chat.expanded = true; slack.chatOpen = true
         // Opening from a bubble lands on the conversation the bubble was about.
-        if let shown = nudges.current?.message {
+        if let approvalTarget {
+            slack.reveal(approvalTarget)
+        } else if let shown = nudges.current?.message {
             // With ddots on and Slack connected there is no iMessage side to go to; the window opens where it was.
             if shown.id.hasPrefix("slack:") { slack.reveal(shown.id) } else if IMessageFeature.enabled && !ddotsOnly { slack.model.source = .imessage }
         }
-        nudges.dismiss(); updatePet()
+        nudges.dismiss()
+        _ = nudges.update(messages: nudgeMessages, now: Date(), chatOpen: true, muted: false, readIDs: nudgeReadIDs)
+        saveReminders(); updatePet()
         if let anchor = placementTarget?.anchorOrigin { placePet(at: anchor) } else { constrainPosition() }
         if let reopeningAnchor { resizedBelow = true; placePet(at:reopeningAnchor) }
         if let target = placementTarget { beginPerchTransition(opening:true,placement:target) }

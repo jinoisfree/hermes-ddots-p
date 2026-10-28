@@ -78,12 +78,12 @@ def matches(message, marker):
 
 def item_messages(text, kind, number):
     """One item per message; only its last bounded continuation carries actions."""
-    marker = "\n[[버튼: " + " | ".join(f"{kind} {number}번 {action}" for action in ("승인", "거절", "수정")) + "]]"
+    marker = "\n[[버튼: " + " | ".join(f"{kind} {number}번{suffix}" for suffix in ("만 승인", "만 거절", " 수정")) + "]]"
     pages = chunks([text], limit=2800 - len(marker))
     pages[-1] += marker
     return pages
 
 
 def review_part(text):
-    match = re.search(r"\n\[\[버튼: (학습|스킬) (\d+)번 승인 \| \1 \2번 거절 \| \1 \2번 수정\]\]\s*\Z", text)
+    match = re.search(r"\n\[\[버튼: (학습|스킬) (\d+)번(?:만)? 승인 \| \1 \2번(?:만)? 거절 \| \1 \2번 수정\]\]\s*\Z", text)
     return dict(text=text, **({"review_kind": match[1], "item": int(match[2])} if match else {}))

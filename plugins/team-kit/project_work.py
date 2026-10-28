@@ -65,8 +65,13 @@ def transport(home, learning, session_id):
                ("owner_id", "USER_ID"), ("profile", "PROFILE"), ("message_id", "MESSAGE_ID"))}
     if values["chat_id"] != cfg.get("channel_id"):
         return None
+    # The primary bot serializes its own profile as None. Accept that wire form
+    # only at the explicitly registered default home; named profiles stay strict.
+    if not values['profile'] and cfg.get('profile_homes', {}).get('default') == str(Path(home)):
+        values['profile'] = 'default'
     if not all(values.values()) or values["profile"] not in PROFILES:
-        raise ValueError("Project transport identity is incomplete.")
+        missing = ', '.join(name for name, value in values.items() if not value)
+        raise ValueError("Project transport identity is incomplete: " + (missing or 'invalid profile') + '.')
     configured_homes = cfg.get("profile_homes", {})
     if configured_homes and str(Path(home)) != configured_homes.get(values["profile"]):
         raise ValueError("Project profile does not match its registered home.")
@@ -209,7 +214,7 @@ def gmail_native_write(tool, args):
             and str(args.get("action") or "").strip().lower() in GMAIL_NATIVE_WRITES | {"send"})
 
 
-def guard(home, learning, *, tool_name, args, session_id, turn_id="", tool_call_id="", **_):
+def guard(home, learning, *, tool_name, args, session_id, turn_id="", tool_call_id="", claim_approval=True, **_):
     consultation = learning.extension("project_consult").guard(home, learning, tool_name, args)
     if consultation:
         return consultation
@@ -237,7 +242,7 @@ def guard(home, learning, *, tool_name, args, session_id, turn_id="", tool_call_
         args = args or {}
         if args.get("channel") != turn["source"]["chat_id"] or args.get("action") != "thread" or args.get("ts") != turn["source"]["thread_id"]:
             return {"action": "block", "message": "프로젝트 자동 조회는 현재 스레드로 제한된다."}
-    if isinstance(args, dict) and args.get("approved") is True and not gmail_native_write(tool_name, args):
+    if claim_approval and isinstance(args, dict) and args.get("approved") is True and not gmail_native_write(tool_name, args):
         cfg = settings(home, learning)
         try:
             ProjectStore(cfg["store_path"]).claim_write(turn["project"], turn["source"]["profile"], tool_name, args, turn["source"]["message_id"])

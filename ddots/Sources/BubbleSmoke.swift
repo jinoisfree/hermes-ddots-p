@@ -57,3 +57,55 @@ extension AppDelegate {
         }
     }
 }
+
+extension AppDelegate {
+    func verifyApprovalBubble(destination: URL) {
+        Task { @MainActor [self] in
+            isPreview = false; model.tasks = []; model.paused = false
+            chat.typing = []; pet.bubbleAlwaysShown = false
+            pet.pointerLocation = { NSPoint(x: -5000, y: -5000) }
+            collapseChat()
+            var snapshot = SlackBridge.Snapshot()
+            snapshot.status = .connected
+            snapshot.rooms = [SlackRoom(id: "SYNTH", name: "합성 요청")]
+            var request = ChatMessage(id: "slack:SYNTH:100.1", fromUser: false, speaker: "진단담당",
+                body: "점검 결과를 반영할까요?", date: Date())
+            request.hermesReplyState = .asking
+            request.hermesButtons = ["반영해", "보류"]
+            let thread = SlackThread(id: request.id, room: "SYNTH", ts: "100.1", root: request,
+                replies: [], replyCount: 0, loaded: true, latest: Date().timeIntervalSince1970, latestFromUser: false)
+            var notification = thread
+            notification.root.body = "배운 일하는 방법 3건이야"
+            notification.root.hermesButtons = []
+            notification.root.hermesReplyState = .asking
+            notification.root.hermesReplyEvidence = HermesReplyEvidence(statusText: "알림", hasStatus: true, hasControls: false, color: SlackNotice.questionColor)
+            snapshot.threads["SYNTH"] = [notification]
+            slack.model.source = .slack; slack.model.selected = "SYNTH"
+            slack.acceptSnapshot(snapshot)
+            updatePet()
+            smokeCheck(!slack.model.needsPetApproval && approvalBubbleMessageID == nil && pet.state != .waiting,
+                "A red learning notification neither waves the phone nor pins a reply bubble")
+            snapshot.threads["SYNTH"] = [thread]
+            slack.model.source = .slack; slack.model.selected = "SYNTH"
+            slack.acceptSnapshot(snapshot)
+            updatePet()
+            smokeCheck(pet.state == .waiting && pet.subtitle == request.body, "Phone reason matches the pending request")
+            try? await Task.sleep(nanoseconds: 4_000_000_000)
+            smokeCheck(pet.bubbleShown && !pet.bubbleStowed, "Approval bubble stays visible beyond the alert timer without hover")
+            capture(destination: destination.appendingPathComponent("approval-held"))
+            pet.onClick?(1)
+            try? await Task.sleep(nanoseconds: 1_000_000_000)
+            smokeCheck(chatExpanded && slack.model.focusThread == thread.id && slack.model.open.contains(thread.id), "Click opens the pending request thread")
+            collapseChat()
+            request.hermesReplyState = .working
+            snapshot.threads["SYNTH"]![0].root = request
+            slack.acceptSnapshot(snapshot)
+            updatePet()
+            try? await Task.sleep(nanoseconds: 4_000_000_000)
+            smokeCheck(!slack.model.needsPetApproval && approvalBubbleMessageID == nil, "Answered request clears phone target")
+            smokeCheck(!pet.bubbleShown, "Answered request releases the persistent bubble")
+            try? "PASS: reason, persistent bubble, thread click, answered cleanup\n".write(to: destination.appendingPathComponent("approval-checks.txt"), atomically: true, encoding: .utf8)
+            NSApp.terminate(nil)
+        }
+    }
+}

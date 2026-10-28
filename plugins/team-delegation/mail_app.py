@@ -1,7 +1,8 @@
 """Stand-in for Gmail: the same mailbox through the Mac Mail app.
 
-Used only when the Gmail API cannot be reached. Reads the inbox and sends an already approved
-message from that account. Never moves, flags or deletes.
+Also watches configured company POP accounts. work-assistant's full-tools route can move, mark,
+trash and compose mail and manage account-scoped Hermes rules after native owner approval.
+It never permanently deletes mail or runs scripts/forwarding from a rule.
 """
 from __future__ import annotations
 
@@ -9,11 +10,17 @@ import json
 import re
 import subprocess
 import time
+from pathlib import Path
 from datetime import datetime, timedelta, timezone
 
 KST = timezone(timedelta(hours=9))
 SCAN = 500
 ID_PATTERN = r"m[0-9]{1,18}"
+
+try:
+    from . import mail_search
+except ImportError:
+    import mail_search
 
 JXA = r"""
 function accountBoxes(account) {
@@ -55,8 +62,36 @@ function run(argv) {
     return JSON.stringify({sent: message.send() === true, recipients: a.to.length + a.cc.length, attached: attached});
   }
 
+  function references(m) {
+    const headers = String(m.allHeaders() || "").slice(0, 65536).replace(/\r?\n[ \t]+/g, " ");
+    const result = [], seen = new Set();
+    for (const line of headers.split(/\r?\n/)) {
+      if (!/^(In-Reply-To|References):/i.test(line)) continue;
+      for (const id of (line.match(/<[^<>\s]{1,300}>/g) || [])) {
+        if (!seen.has(id.toLowerCase())) { seen.add(id.toLowerCase()); result.push(id); }
+        if (result.length >= 50) return result;
+      }
+    }
+    return result;
+  }
   const meta = m => ({id: "m" + m.id(), rfc_id: m.messageId(), from: m.sender(), subject: m.subject(),
-                      ts: Math.floor(m.dateReceived().getTime() / 1000)});
+                      ts: Math.floor(m.dateReceived().getTime() / 1000), references: references(m)});
+  if (a.op === "hydrate") {
+    const items=[];
+    for (const id of a.ids) {
+      const hit=selected.flatMap(box=>box.messages.whose({id:Number(id.slice(1))})());
+      if (!hit.length) return JSON.stringify({error:"MAIL_APP_NOT_FOUND"});
+      items.push(meta(hit[0]));
+    }
+    return JSON.stringify({items});
+  }
+  if (a.op === "cache_detail") {
+    const hit=selected.flatMap(box=>box.messages.whose({id:a.id})());
+    if (!hit.length) return JSON.stringify({error:"MAIL_APP_NOT_FOUND"});
+    const m=hit[0];
+    return JSON.stringify({item:{id:"m"+m.id(),body:String(m.content()||""),
+      attachments:m.mailAttachments().map(f=>String(f.name()))}});
+  }
   if (a.op === "read" || a.op === "download") {
     const hit = selected.flatMap(box => box.messages.whose({id: a.id})());
     if (!hit.length) return JSON.stringify({error: "MAIL_APP_NOT_FOUND"});
@@ -76,11 +111,14 @@ function run(argv) {
   for (const box of selected) {
     const messages = box.messages;
     const ids = messages.id(), dates = messages.dateReceived(), senders = messages.sender(), subjects = messages.subject();
-    const order = ids.map((_, i) => i).sort((x,y) => dates[y]-dates[x]).slice(0,a.scan);
+    let order = ids.map((_, i) => i).sort((x,y) => dates[y]-dates[x]);
+    if (a.scan) order = order.slice(0,a.scan);
     for (const i of order) rows.push({id: "m"+ids[i], from:senders[i]||"", subject:subjects[i]||"",
       ts:Math.floor(dates[i].getTime()/1000), message:messages[i]});
   }
   rows.sort((x,y) => y.ts-x.ts);
+  if (a.op === "inventory") return JSON.stringify({account_id:String(account.id()),
+    items:rows.map(r=>({id:r.id,from:r.from,subject:r.subject,ts:r.ts}))});
   const items = [], seen = new Set();
   for (const row of rows) {
     if (items.length >= a.limit) break;
@@ -89,7 +127,8 @@ function run(argv) {
     if (a.since && row.ts < a.since) continue;
     if (row.from.toLowerCase().includes(a.account)) continue;
     if (!a.terms.every(t => (row.from+" "+row.subject).toLowerCase().includes(t))) continue;
-    items.push({id:row.id, from:row.from, subject:row.subject, ts:row.ts, rfc_id:row.message.messageId()});
+    items.push({id:row.id, from:row.from, subject:row.subject, ts:row.ts, rfc_id:row.message.messageId(),
+      references:references(row.message)});
   }
   return JSON.stringify({items: items});
 }
@@ -104,11 +143,11 @@ def valid_id(value) -> bool:
     return isinstance(value, str) and re.fullmatch(ID_PATTERN, value) is not None
 
 
-def _call(payload: dict, runner=None) -> dict:
+def _call(payload: dict, runner=None, *, script=None, timeout=60) -> dict:
     execute = runner or subprocess.run
     try:
-        proc = execute(["/usr/bin/osascript", "-l", "JavaScript", "-e", JXA, json.dumps(payload)],
-                       capture_output=True, text=True, timeout=60, check=False)
+        proc = execute(["/usr/bin/osascript", "-l", "JavaScript", "-e", script or JXA, json.dumps(payload)],
+                       capture_output=True, text=True, timeout=timeout, check=False)
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise MailAppError("MAIL_APP_UNAVAILABLE:" + type(exc).__name__) from exc
     if proc.returncode != 0:
@@ -135,6 +174,10 @@ def _clean(item) -> dict:
               "ts": item["ts"], "snippet": "", "source": "mail_app"}
     if isinstance(item.get("rfc_id"), str) and item["rfc_id"]:
         result["rfc_id"] = item["rfc_id"]
+    refs = item.get("references", [])
+    if not isinstance(refs, list) or not all(isinstance(ref, str) for ref in refs):
+        raise MailAppError("MAIL_APP_INVALID_RESPONSE")
+    result["references"] = list(dict.fromkeys(ref for ref in refs[:50] if len(ref) <= 302))
     return result
 
 
@@ -169,14 +212,34 @@ def query_terms(query: str) -> tuple[list[str], int]:
     return terms, since
 
 
-def search(account: str, query: str, limit: int, runner=None, *, all_mailboxes=False) -> list[dict]:
-    terms, since = query_terms(query)
-    payload = {"op": "list", "account": _account(account), "since": since, "terms": terms,
-               "limit": limit, "scan": SCAN, "all_mailboxes": all_mailboxes}
-    items = _call(payload, runner).get("items")
-    if not isinstance(items, list):
-        raise MailAppError("MAIL_APP_INVALID_RESPONSE")
-    return [_clean(item) for item in items]
+def search(account: str, query: str, limit: int, runner=None, *, all_mailboxes=False, cache_root=None) -> list[dict]:
+    account = _account(account)
+    base = {'account': account, 'all_mailboxes': all_mailboxes}
+    def inventory():
+        return _call({**base, 'op': 'inventory', 'scan': None}, runner, timeout=10)
+    def detail(mid, timeout):
+        return _call({**base, 'op': 'cache_detail', 'id': int(mid[1:])}, runner, timeout=timeout).get('item', {})
+    def hydrate(ids):
+        items = _call({**base, 'op': 'hydrate', 'ids': ids}, runner, timeout=10).get('items')
+        if not isinstance(items, list) or {x.get('id') for x in items} != set(ids):
+            raise MailAppError('MAIL_APP_INVALID_RESPONSE')
+        return [_clean(item) for item in items]
+    try:
+        result = mail_search.search(account, query, limit, inventory, detail, hydrate, cache_root=cache_root)
+        return mail_search.SearchResults([{**_clean(item), 'matched_fields': item['matched_fields'],
+            **({'references_unknown': True} if item.get('references_unknown') else {})} for item in result], result.coverage)
+    except ValueError as exc:
+        raise MailAppError(str(exc)) from exc
+
+
+def fill_index(account: str, *, cache_root, seconds=45, runner=None):
+    """Only reads Mail content/attachment names; never changes read status or mailboxes."""
+    base = {'account': _account(account), 'all_mailboxes': True}
+    def inventory(timeout):
+        return _call({**base, 'op': 'inventory', 'scan': None}, runner, timeout=timeout)
+    def detail(mid, timeout):
+        return _call({**base, 'op': 'cache_detail', 'id': int(mid[1:])}, runner, timeout=timeout).get('item', {})
+    return mail_search.fill(base['account'], inventory, detail, cache_root=cache_root, seconds=seconds)
 
 
 def read(account: str, message_id: str, runner=None, *, all_mailboxes=False) -> dict:
@@ -244,3 +307,14 @@ def accounts(runner=None) -> list[dict]:
         for x in rows):
         raise MailAppError("MAIL_APP_INVALID_RESPONSE")
     return [{"name":x["name"], "addresses":[a.casefold() for a in x["addresses"]], "enabled":x["enabled"]} for x in rows]
+
+
+def full_tools(request, *, preview=False, runner=None):
+    """Bounded Mail operations. Callers enforce ownership and native button approval."""
+    try:
+        from . import full_mail_tools
+    except ImportError:
+        import full_mail_tools
+    full_mail_tools.validate({k: v for k, v in request.items() if not k.startswith('_')}, mail=True)
+    script = Path(__file__).with_name('mail_app_tools.js').read_text()
+    return _call({**request, 'preview': preview}, runner, script=script)

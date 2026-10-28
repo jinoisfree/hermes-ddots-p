@@ -39,6 +39,15 @@ def task(text, *, done=False, identifier=None, now=None):
         ambiguous = False
     except ValueError:
         due, ambiguous = None, True
+        if done:
+            # A finished task often gains its completion date ('… | 10/7 08:30 완료 (10/26 완료 처리)').
+            # It needs no reminder, so its first date is its deadline instead of an owner question.
+            match = dates.DEADLINE.search(due_text)
+            try:
+                due = match and dates.extract(match.group(0), now=now)
+                ambiguous = False
+            except ValueError:
+                due = None
     if len(parts) == 1 and due:
         name = dates.DEADLINE.sub('', name).strip(' :：,|까지') or parts[0].strip()
     return {'text': name, 'due': due, 'done': bool(done),
@@ -67,6 +76,48 @@ def from_text(title, text, *, now=None, due=None):
     return semantic({'title': title, 'tasks': tasks, 'body': '\n'.join(body)})
 
 
+FLAT_ROW = re.compile(r'^- (본문|할 일): ')
+MARK_ROW = re.compile(r'^(\s*-\s(?:[^:\[\n]+:\s)?)\[([ xX])\](.*)$')
+
+
+def structured_summary(summary):
+    """A memo summary with sections or nested rows (not just '- 본문:'/'- 할 일:' rows written by the
+    linked-work sync). Rewriting it as flat rows destroys its layout (CIIE, 2026-10-26)."""
+    return any(line.strip() and not FLAT_ROW.match(line) for line in str(summary or '').splitlines())
+
+
+def task_key(text):
+    """Task identity across originals: dates and spacing differ by representation, not by meaning."""
+    return re.sub(r'[\s()（）:：,·.]+', '', dates.DEADLINE.sub('', str(text or '')))
+
+
+def structured_desired(own, wanted):
+    """What a structured memo can take from another original: completion of the same task (matched by
+    task_key) and the title. Its own text, dates, body and layout stay as they are."""
+    done = {}
+    for row in wanted.get('tasks', []):
+        done.setdefault(task_key(row['text']), []).append(row['done'])
+    tasks = []
+    for row in own.get('tasks', []):
+        options = done.get(task_key(row['text'])) or []
+        tasks.append({**row, 'done': options[0]} if len(options) == 1 else dict(row))
+    return {**own, 'title': wanted.get('title') or own.get('title'), 'tasks': tasks}
+
+
+def flip_marks(summary, tasks):
+    """Set the checkbox of each task row in document order; None if the rows and tasks do not align."""
+    lines, rows = str(summary).splitlines(), []
+    for index, line in enumerate(lines):
+        if MARK_ROW.match(line):
+            rows.append(index)
+    if len(rows) != len(tasks):
+        return None
+    for index, row in zip(rows, tasks):
+        head, _, tail = MARK_ROW.match(lines[index]).groups()
+        lines[index] = head + ('[x]' if row['done'] else '[ ]') + tail
+    return '\n'.join(lines)
+
+
 def render(content):
     rows = ['[업무 본문]', content.get('body') or '', '[할 일]']
     for row in content.get('tasks', []):
@@ -79,6 +130,21 @@ def next_due(content):
     return min((r['due'] for r in content.get('tasks', []) if r.get('due') and not r.get('done')), default=None)
 
 
+def due_target(tasks, page_due):
+    """The Notion '다음 마감' a page should carry, from its own explicitly dated tasks (2026-10-28).
+
+    The earliest open dated task wins. Undated or unreadable tasks never clear the page's own date:
+    it is cleared only when it was the date of a task that is now done and no open task has a date.
+    A date-only task on the page's day keeps the page's time."""
+    if any(r.get('ambiguous') and not r.get('done') for r in tasks):
+        return page_due
+    wanted = min((r['due'] for r in tasks if r.get('due') and not r.get('done')), default=None)
+    if wanted is None:
+        finished = {r['due'] for r in tasks if r.get('due') and r.get('done')}
+        return None if page_due in finished else page_due
+    return page_due if len(wanted) == 10 and str(page_due or '')[:10] == wanted else wanted
+
+
 def reconcile(previous, incoming, *, reserved=()):
     """Keep task identity across edits; an unmatched replacement keeps its old positional identity."""
     out = [dict(row) for row in incoming]
@@ -86,15 +152,17 @@ def reconcile(previous, incoming, *, reserved=()):
     for row in out:
         if row.get('source_id') in by_id:
             row['key'] = by_id[row['source_id']]
+    assigned = {row['key'] for row in out if row.get('key')}
     old_names = [normalized(row['text']) for row in previous]
     new_names = [normalized(row['text']) for row in out]
     matcher = difflib.SequenceMatcher(a=old_names, b=new_names, autojunk=False)
     for opcode, i, j, k, end in matcher.get_opcodes():
         if opcode == 'equal' or (opcode == 'replace' and j-i == end-k):
             for old, new in zip(previous[i:j], out[k:end]):
-                if old.get('key') and not new.get('key'):
+                if old.get('key') and old['key'] not in assigned and not new.get('key'):
                     new['key'] = old['key']
-    used = {r.get('key') for r in previous} | set(reserved)
+                    assigned.add(old['key'])
+    used = {r.get('key') for r in previous} | set(reserved) | assigned
     for index, row in enumerate(out):
         if 'key' not in row:
             key = digest([row['text'], index, sorted(k for k in used if k)])[:24]

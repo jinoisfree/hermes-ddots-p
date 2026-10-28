@@ -13,8 +13,9 @@ def references(item):
 
 
 class Lifecycle:
-    def __init__(self, store, reader):
+    def __init__(self, store, reader, *, preserve_notion=False):
         self.store,self.reader=store,reader
+        self.preserve_notion=preserve_notion
 
     def inspect(self, item, *, dry_run=False):
         """Return decisions and transitions. Missing manual replacements need owner choice.
@@ -68,6 +69,8 @@ class Lifecycle:
                     status,reason,failure='transient',exc.reason,exc
                 except Exception as exc:
                     status,reason,failure='transient','calendar_candidate_read_failed',exc
+            if self.preserve_notion and kind=='notion' and status=='missing':
+                status,reason='transient','notion_authority_unavailable'
             changed=not previous or (previous['status'],previous['reason']) != (status,reason)
             if not dry_run:
                 event=self.store.record_source_state(item['common_id'],kind,sid,status,reason,identity=trusted)

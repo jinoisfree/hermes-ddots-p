@@ -9,6 +9,44 @@ struct ContactsFailure: Error {
     var fields: [String: Any] = [:]
 }
 
+enum KeySet { case snapshot, vcard }
+
+// Core Data userInfo keys are spelled out to avoid importing Core Data.
+// Error text is bounded and masks paths/emails because framework messages can embed record values.
+func boundedText(_ value: String?, limit: Int = 240) -> Any {
+    guard var clean = value, !clean.isEmpty else { return NSNull() }
+    clean = clean.replacingOccurrences(of: #"(/[^\s/:\"'<>]+){2,}/?"#, with: "<path>", options: .regularExpression)
+    clean = clean.replacingOccurrences(of: #"[^\s@\"'<>]+@[^\s@\"'<>]+"#, with: "<email>", options: .regularExpression)
+    return String(clean.prefix(limit))
+}
+func errorRow(_ error: NSError, depth: Int) -> [String: Any] {
+    // Allow-listed fields only; never the userInfo values themselves, which may hold contact data.
+    var row: [String: Any] = ["depth": depth, "domain": String(error.domain.prefix(80)), "code": error.code,
+        "user_info_keys": error.userInfo.keys.sorted().prefix(12).map { String($0.prefix(60)) }]
+    if let key = error.userInfo["NSValidationErrorKey"] as? String { row["validation_key"] = String(key.prefix(60)) }
+    let affected = (error.userInfo["NSAffectedObjectsErrorKey"] as? [Any] ?? []) +
+        [error.userInfo["NSValidationErrorObject"]].compactMap { $0 }
+    if !affected.isEmpty {
+        row["affected_types"] = Array(Set(affected.map { String(String(describing: type(of: $0)).prefix(60)) })).sorted().prefix(5).map { $0 }
+    }
+    if let exception = error.userInfo["NSUnderlyingException"] as? NSException {
+        row["exception_name"] = String(exception.name.rawValue.prefix(80))
+    }
+    return row
+}
+func errorChain(_ error: NSError) -> [[String: Any]] {
+    var rows: [[String: Any]] = []
+    var queue: [(NSError, Int)] = [(error, 0)]
+    while !queue.isEmpty && rows.count < 6 {
+        let (current, depth) = queue.removeFirst()
+        rows.append(errorRow(current, depth: depth))
+        guard depth < 3 else { continue }
+        if let next = current.userInfo[NSUnderlyingErrorKey] as? NSError { queue.append((next, depth + 1)) }
+        for next in (current.userInfo["NSDetailedErrors"] as? [NSError] ?? []).prefix(3) { queue.append((next, depth + 1)) }
+    }
+    return rows
+}
+
 func rejectNoteWrites(_ args: [String: Any]) throws {
     if args.keys.contains(where: { $0.lowercased().contains("note") }) {
         throw ContactsFailure(code: "CONTACTS_NOTE_WRITE_UNSUPPORTED")
@@ -69,16 +107,20 @@ func duplicates(_ contact: CNContact, phones: [[String: String]], emails: [[Stri
 
 final class Executor {
     let store = CNContactStore()
-    var notesAvailable = true
     var before: Any = null
     var after: Any = null
     var mutationCalls = 0
-    var applied = false
+    var applied: Bool? = false
     var action = ""
+    var stage = "arguments"
+    var saveVerification: String? = nil
 
     func envelope(_ fields: [String: Any]) -> [String: Any] {
         var value: [String: Any] = ["before": before, "after": after, "executorVersion": executorVersion,
-                                    "action": action, "mutation_calls": mutationCalls, "applied": applied]
+                                    "action": action, "mutation_calls": mutationCalls,
+                                    "applied": applied.map { $0 as Any } ?? null]
+        if let saveVerification { value["save_verification"] = saveVerification }
+        if fields["ok"] as? Bool == false { value["failure_stage"] = stage }
         value.merge(fields) { _, new in new }
         return value
     }
@@ -91,38 +133,31 @@ final class Executor {
         @unknown default: return "limited_or_unknown"
         }
     }
-    func keys() -> [CNKeyDescriptor] {
-        var result: [CNKeyDescriptor] = [CNContactIdentifierKey, CNContactFamilyNameKey, CNContactGivenNameKey,
-            CNContactOrganizationNameKey, CNContactDepartmentNameKey, CNContactJobTitleKey,
-            CNContactPhoneNumbersKey, CNContactEmailAddressesKey, CNContactPostalAddressesKey,
-            CNContactImageDataAvailableKey, CNContactTypeKey, CNContactNamePrefixKey, CNContactMiddleNameKey,
-            CNContactPreviousFamilyNameKey, CNContactNameSuffixKey, CNContactNicknameKey,
-            CNContactPhoneticGivenNameKey, CNContactPhoneticMiddleNameKey, CNContactPhoneticFamilyNameKey,
-            CNContactPhoneticOrganizationNameKey, CNContactBirthdayKey, CNContactNonGregorianBirthdayKey,
-            CNContactImageDataKey, CNContactThumbnailImageDataKey, CNContactDatesKey, CNContactUrlAddressesKey,
-            CNContactRelationsKey, CNContactSocialProfilesKey, CNContactInstantMessageAddressesKey].map { $0 as CNKeyDescriptor }
-        result.append(CNContactFormatter.descriptorForRequiredKeys(for: .fullName))
-        if notesAvailable { result.append(CNContactNoteKey as CNKeyDescriptor) }
-        return result
+    // NOTE needs the com.apple.developer.contacts.notes entitlement, so it is never requested here;
+    // Contacts.app automation is the note path. Saves use the snapshot set, vCard export/backup the wider set.
+    static let snapshotKeys: [String] = [CNContactIdentifierKey, CNContactFamilyNameKey, CNContactGivenNameKey,
+        CNContactOrganizationNameKey, CNContactDepartmentNameKey, CNContactJobTitleKey,
+        CNContactPhoneNumbersKey, CNContactEmailAddressesKey, CNContactPostalAddressesKey,
+        CNContactImageDataAvailableKey, CNContactTypeKey]
+    static let vcardKeys: [String] = snapshotKeys + [CNContactNamePrefixKey, CNContactMiddleNameKey,
+        CNContactPreviousFamilyNameKey, CNContactNameSuffixKey, CNContactNicknameKey,
+        CNContactPhoneticGivenNameKey, CNContactPhoneticMiddleNameKey, CNContactPhoneticFamilyNameKey,
+        CNContactPhoneticOrganizationNameKey, CNContactBirthdayKey, CNContactNonGregorianBirthdayKey,
+        CNContactImageDataKey, CNContactThumbnailImageDataKey, CNContactDatesKey, CNContactUrlAddressesKey,
+        CNContactRelationsKey, CNContactSocialProfilesKey, CNContactInstantMessageAddressesKey]
+    func keys(_ set: KeySet = .snapshot) -> [CNKeyDescriptor] {
+        (set == .vcard ? Executor.vcardKeys : Executor.snapshotKeys).map { $0 as CNKeyDescriptor } +
+            [CNContactFormatter.descriptorForRequiredKeys(for: .fullName)]
     }
-    func fetch(_ identifier: String? = nil) throws -> [CNContact] {
-        func read() throws -> [CNContact] {
-            let request = CNContactFetchRequest(keysToFetch: keys())
-            if let identifier { request.predicate = CNContact.predicateForContacts(withIdentifiers: [identifier]) }
-            var rows: [CNContact] = []
-            try store.enumerateContacts(with: request) { contact, _ in rows.append(contact) }
-            return rows
-        }
-        do { return try read() }
-        catch let error as NSError where error.domain == CNErrorDomain && error.code == CNError.Code.unauthorizedKeys.rawValue {
-            // macOS can protect note reads with an additional entitlement; snapshots expose availability.
-            notesAvailable = false
-            return try read()
-        }
+    func fetch(_ identifier: String? = nil, _ set: KeySet = .snapshot) throws -> [CNContact] {
+        let request = CNContactFetchRequest(keysToFetch: keys(set))
+        if let identifier { request.predicate = CNContact.predicateForContacts(withIdentifiers: [identifier]) }
+        var rows: [CNContact] = []
+        try store.enumerateContacts(with: request) { contact, _ in rows.append(contact) }
+        return rows
     }
-    func snapshot(_ contact: CNContact) throws -> [String: Any] {
-        let containers = try store.containers(matching: CNContainer.predicateForContainerOfContact(withIdentifier: contact.identifier))
-        return ["identifier": contact.identifier, "display_name": displayName(contact),
+    func fields(_ contact: CNContact) -> [String: Any] {
+        ["identifier": contact.identifier, "display_name": displayName(contact),
                 "family_name": contact.familyName, "given_name": contact.givenName,
                 "organization": contact.organizationName, "department": contact.departmentName,
                 "job_title": contact.jobTitle,
@@ -133,9 +168,15 @@ final class Executor {
                     return ["label": row.label ?? "other", "street": a.street, "city": a.city,
                             "state": a.state, "postal_code": a.postalCode, "country": a.country]
                 },
-                "note": notesAvailable && contact.isKeyAvailable(CNContactNoteKey) ? contact.note as Any : null,
-                "note_available": notesAvailable, "has_image": contact.imageDataAvailable,
-                "container_names": containers.map { $0.name }]
+                "has_image": contact.isKeyAvailable(CNContactImageDataAvailableKey) ? contact.imageDataAvailable : false]
+    }
+    func snapshot(_ contact: CNContact) throws -> [String: Any] {
+        let containers = try store.containers(matching: CNContainer.predicateForContainerOfContact(withIdentifier: contact.identifier))
+        var value = fields(contact)
+        // The native executor never reads NOTE; include_note reads it through Contacts.app.
+        value.merge(["note": null, "note_available": false, "note_source": "not_read",
+                     "container_names": containers.map { $0.name }]) { _, new in new }
+        return value
     }
     func apply(_ args: [String: Any], to contact: CNMutableContact) throws {
         try rejectNoteWrites(args)
@@ -184,29 +225,28 @@ final class Executor {
             throw ContactsFailure(code: "CONTACTS_NAME_REQUIRED")
         }
     }
+    // A thrown save is not proof of rollback. Same-store reads may be cached,
+    // and display snapshots omit image bytes and original labels. Never retry on that basis.
     func commit(_ request: CNSaveRequest, using execute: ((CNSaveRequest) throws -> Void)? = nil) throws {
         mutationCalls = 1
+        stage = "save"
         do {
             if let execute { try execute(request) }
             else { try store.execute(request) }
         } catch {
-            // The save transaction failed. A later readback error must keep applied=true instead.
-            mutationCalls = 0
-            applied = false
+            saveVerification = "unknown"
+            applied = nil
             after = null
             throw error
         }
         applied = true
+        stage = "readback"
     }
-    func members(_ identifier: String) throws -> [CNContact] {
-        let request = CNContactFetchRequest(keysToFetch: keys())
+    func members(_ identifier: String, _ set: KeySet = .snapshot) throws -> [CNContact] {
+        let request = CNContactFetchRequest(keysToFetch: keys(set))
         request.predicate = CNContact.predicateForContactsInGroup(withIdentifier: identifier)
         var rows: [CNContact] = []
-        do { try store.enumerateContacts(with: request) { contact, _ in rows.append(contact) } }
-        catch let error as NSError where notesAvailable && error.domain == CNErrorDomain && error.code == CNError.Code.unauthorizedKeys.rawValue {
-            notesAvailable = false
-            return try members(identifier)
-        }
+        try store.enumerateContacts(with: request) { contact, _ in rows.append(contact) }
         return rows
     }
     func group(_ identifier: String) throws -> CNGroup {
@@ -222,11 +262,11 @@ final class Executor {
                 "member_ids": ids, "container_name": containers.first?.name ?? ""]
     }
     func vcard(_ contacts: [CNContact]) throws -> Data {
-        // Populate all serializable keys, but never request or save an entitled note value.
+        // NOTE is never fetched; an empty value only satisfies the serializer's key check on a throwaway copy.
         let clean = contacts.map { contact -> CNContact in
             let value = contact.mutableCopy() as! CNMutableContact
-            value.note = "" // In-memory serialization only, never a store update.
-            return value
+            value.note = "" // In-memory serialization only; this copy is never passed to a save request.
+            return value.copy() as! CNContact
         }
         guard clean.allSatisfy({ $0.areKeysAvailable([CNContactVCardSerialization.descriptorForRequiredKeys()]) }) else {
             throw ContactsFailure(code: "CONTACTS_EXPORT_KEYS_UNAVAILABLE")
@@ -302,11 +342,15 @@ final class Executor {
             throw ContactsFailure(code: "CONTACTS_ACTION_REFUSED")
         }
         if action == "create" || action == "update" { try rejectNoteWrites(args) }
+        stage = "authorize"
         if status() == "notDetermined" { _ = try? await store.requestAccess(for: .contacts) }
         guard status() == "authorized" else {
             throw ContactsFailure(code: "CONTACTS_PERMISSION_REQUIRED", fields: ["authorization_status": status()])
         }
-        if action == "access" { return envelope(["ok": true, "authorization_status": status()]) }
+        stage = "fetch"
+        if action == "access" {
+            return envelope(["ok": true, "authorization_status": status(), "native_note_keys_requested": false])
+        }
         if action == "containers" {
             let items = try store.containers(matching: nil).map {
                 ["identifier": $0.identifier, "name": $0.name,
@@ -329,13 +373,14 @@ final class Executor {
             let groupID = text(args, "group_id")
             guard (ids.isEmpty != groupID.isEmpty) && ids.count <= 500 else { throw ContactsFailure(code: "CONTACTS_EXPORT_TARGET_REQUIRED") }
             let rows: [CNContact]
-            if !groupID.isEmpty { _ = try group(groupID); rows = try members(groupID) }
+            if !groupID.isEmpty { _ = try group(groupID); rows = try members(groupID, .vcard) }
             else {
                 rows = try ids.map { id in
-                    guard let value = try fetch(id).first else { throw ContactsFailure(code: "CONTACTS_NOT_FOUND") }
+                    guard let value = try fetch(id, .vcard).first else { throw ContactsFailure(code: "CONTACTS_NOT_FOUND") }
                     return value
                 }
             }
+            stage = "serialize"
             return envelope(["ok": true, "vcf_base64": try vcard(rows).base64EncodedString(),
                              "items": try rows.map { try snapshot($0) }, "notes_included": false])
         }
@@ -400,26 +445,32 @@ final class Executor {
             return envelope(["ok": true, "items": items, "result_count": items.count, "truncated": matches.count > limit])
         }
         if action == "get" || action == "update" || action == "delete" {
-            guard !text(args, "contact_id").isEmpty, let contact = try fetch(text(args, "contact_id")).first else {
+            let id = text(args, "contact_id")
+            guard !id.isEmpty, let contact = try fetch(id, action == "delete" ? .vcard : .snapshot).first else {
                 throw ContactsFailure(code: "CONTACTS_NOT_FOUND")
             }
             before = try snapshot(contact)
             if action == "get" { after = before; return envelope(["ok": true]) }
+            stage = "validate"
             guard !text(args, "expected_name").isEmpty && text(args, "expected_name") == displayName(contact) else {
                 throw ContactsFailure(code: "CONTACTS_IDENTITY_MISMATCH")
             }
             if action == "delete" {
+                stage = "backup_check"
                 try checkBackup(args, data: vcard([contact]))
                 let save = CNSaveRequest(); save.delete(contact.mutableCopy() as! CNMutableContact)
                 try commit(save)
+                stage = "done"
                 return envelope(["ok": true, "target_id": contact.identifier])
             }
+            stage = "apply"
             let mutable = contact.mutableCopy() as! CNMutableContact
             try apply(args, to: mutable)
             let save = CNSaveRequest(); save.update(mutable)
             try commit(save)
             guard let refreshed = try fetch(mutable.identifier).first else { throw ContactsFailure(code: "CONTACTS_READBACK_FAILED") }
             after = try snapshot(refreshed)
+            stage = "done"
             return envelope(["ok": true, "target_id": mutable.identifier])
         }
         let existing = try fetch()
@@ -429,14 +480,26 @@ final class Executor {
         if !matches.isEmpty && (args["allow_duplicate"] as? Bool != true) {
             throw ContactsFailure(code: "CONTACTS_DUPLICATE", fields: ["matches": try matches.map { try snapshot($0) }])
         }
+        stage = "apply"
         let contact = CNMutableContact()
         try apply(args, to: contact)
         let save = CNSaveRequest(); save.add(contact, toContainerWithIdentifier: nil)
         try commit(save)
         guard let refreshed = try fetch(contact.identifier).first else { throw ContactsFailure(code: "CONTACTS_READBACK_FAILED") }
         after = try snapshot(refreshed)
+        stage = "done"
         return envelope(["ok": true, "target_id": contact.identifier])
     }
+}
+
+func nativeFailure(_ executor: Executor, _ error: NSError) -> [String: Any] {
+    let code = error.domain == CNErrorDomain && error.code == CNError.Code.authorizationDenied.rawValue
+        ? "CONTACTS_PERMISSION_REQUIRED" : "CONTACTS_NATIVE_ERROR"
+    var fields: [String: Any] = ["ok": false, "error": code, "authorization_status": executor.status(),
+                                 "native_error_domain": error.domain, "native_error_code": error.code,
+                                 "native_error_chain": errorChain(error)]
+    if executor.applied == nil { fields["execution_uncertain"] = true }
+    return executor.envelope(fields)
 }
 
 @main struct ContactsDirect {
@@ -453,10 +516,7 @@ final class Executor {
         } catch let error as ContactsFailure {
             response = executor.envelope(["ok": false, "error": error.code].merging(error.fields) { _, new in new })
         } catch let error as NSError {
-            let code = error.domain == CNErrorDomain && error.code == CNError.Code.authorizationDenied.rawValue
-                ? "CONTACTS_PERMISSION_REQUIRED" : "CONTACTS_NATIVE_ERROR"
-            response = executor.envelope(["ok": false, "error": code, "authorization_status": executor.status(),
-                                           "native_error_domain": error.domain, "native_error_code": error.code])
+            response = nativeFailure(executor, error)
         }
         if let data = try? JSONSerialization.data(withJSONObject: response, options: [.sortedKeys]),
            let string = String(data: data, encoding: .utf8) { print(string) }

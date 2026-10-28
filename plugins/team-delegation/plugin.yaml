@@ -3,8 +3,10 @@ version: 0.6.17
 description: "Governed workflow budgets, EventKit calendar executor, canonical ownership."
 author: starter_user
 provides_tools:
+  - media_save
   - task_reminders_sync
   - mail_work
+  - google_reauth
   - contacts_direct_lookup
   - contacts_direct_mutation
   - diagnosis_health_read

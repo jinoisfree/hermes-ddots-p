@@ -71,6 +71,14 @@ def gate(td, tool, args, decision, context):
     digests = {digest(row['tool'], row['arguments']) for row in plan}
     if digest(tool, args) not in digests:
         return {'action': 'block', 'message': '현재 쓰기가 전체 승인 계획에 없습니다.'}
+    mail_previews = []
+    mail_tools = getattr(td, 'full_mail_tools', None)
+    for row in plan:
+        if mail_tools is not None and row['tool'] == 'gmail_direct' and mail_tools.handles(td, row['arguments']):
+            preview = mail_tools.approval(td, row['arguments'], context)
+            if preview['action'] != 'approve':
+                return preview
+            mail_previews.append(preview['message'])
     key = 'request-writes:'+hashlib.sha256(json.dumps([identity, sorted(digests)]).encode()).hexdigest()
     with LOCK:
         prune()
@@ -80,7 +88,7 @@ def gate(td, tool, args, decision, context):
         PLANS[key] = {'scope': identity, 'digests': digests, 'used': set(), 'approved': False, 'at': time.monotonic()}
     return {'action': 'approve', 'rule_key': key, 'message': '승인하면 이번 요청의 전체 계획을 한 번에 실행합니다:\n'+
             '\n'.join(f'{i}. {row["tool"]}: '+json.dumps(row['arguments'], ensure_ascii=False, sort_keys=True)
-                      for i, row in enumerate(plan, 1))}
+                      for i, row in enumerate(plan, 1)) + '\n' + '\n'.join(mail_previews)}
 
 
 def response(pattern_key='', choice='', **_):

@@ -64,7 +64,7 @@ class Calendar:
         return json.loads(proc.stdout).get('events') or []
 
     def company(self, row):
-        """Same company-scope guard as the linked-work watcher; personal calendars stay with Jarvis."""
+        """Same company-scope guard as the linked-work watcher; personal calendars stay with assistant."""
         import notion_completion_sync
         try:
             notion_completion_sync.company_scope_guard(
@@ -77,7 +77,7 @@ class Calendar:
         return self.tools._calendar_event_add_alarm(row, minutes, self.runner)
 
 
-def run(state, calendar, *, minutes=5, days=7, now=None, dry_run=False):
+def run(state, calendar, *, minutes=5, days=7, now=None, dry_run=False, persist=None):
     """Returns (added, failed) labels; state['handled'] remembers every occurrence already decided."""
     now = now or datetime.now(timezone.utc)
     handled = state.setdefault('handled', {})
@@ -94,6 +94,12 @@ def run(state, calendar, *, minutes=5, days=7, now=None, dry_run=False):
     added, failed = [], []
     for row in rows:
         key = occurrence_key(row)
+        if not dry_run and handled.get(key, {}).get('status') == 'pending':
+            # A previous process ended after reserving the write. Report once, never replay.
+            handled[key]['status'] = 'failed'
+            failed.append(label(row))
+            if persist:
+                persist(state)
         if (key in handled or row.get('zoomMeeting') is not True or row.get('isAllDay')
                 or row.get('writable') is False or moment(row['start']) <= now + timedelta(minutes=minutes)):
             continue
@@ -107,7 +113,14 @@ def run(state, calendar, *, minutes=5, days=7, now=None, dry_run=False):
         if dry_run:
             added.append(label(row))
             continue
-        after = calendar.add_alarm(row, minutes)
+        # Reserve durably before the external call. A crash or timeout must never replay it.
+        handled[key] = {'start': row['start'], 'status': 'pending'}
+        if persist:
+            persist(state)
+        try:
+            after = calendar.add_alarm(row, minutes)
+        except Exception:
+            after = None
         # Never retry an unverified write: the owner hears about it once and decides.
         handled[key] = {'start': row['start'], 'status': 'added' if after else 'failed'}
         if after:
@@ -115,6 +128,8 @@ def run(state, calendar, *, minutes=5, days=7, now=None, dry_run=False):
             added.append(label(row))
         else:
             failed.append(label(row))
+        if persist:
+            persist(state)
     return added, failed
 
 
@@ -143,26 +158,34 @@ def main(*, dry_run=False):
         raise ValueError('unauthorized zoom alarm scope')
     path = home / 'state/zoom-alarm-sync.json'
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.with_suffix('.lock').open('w') as lock:
+    lock_path = path.with_suffix('.lock')
+    if any(p.is_symlink() for p in (path.parent, path, lock_path)):
+        raise ValueError('sync_state_symlink')
+    from work_content import save
+    with lock_path.open('a') as lock:
         try:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             return
         state = json.loads(path.read_text()) if path.exists() else {}
         try:
-            added, failed = run(state, Calendar(), minutes=minutes, days=days, dry_run=dry_run)
+            added, failed = run(state, Calendar(), minutes=minutes, days=days, dry_run=dry_run,
+                                persist=None if dry_run else lambda data: save(path, data))
             state['read_failures'] = 0
         except Exception as exc:
-            # A read failure writes nothing; only a streak reaches the owner.
+            if dry_run:
+                print(f'Zoom 알림 시험 조회 실패 ({type(exc).__name__}); 처리 기록은 변경하지 않았어요.')
+                return
+            # Write exceptions are handled per occurrence above. Unstarted writes remain untouched.
             state['read_failures'] = state.get('read_failures', 0) + 1
-            path.write_text(json.dumps(state, ensure_ascii=False, indent=1))
+            save(path, state)
             if state['read_failures'] == 3:
                 print(f'*🔴 Zoom 회의 알림 확인 필요*\n• ⚠️ 캘린더 조회가 3번 연속 실패해 Zoom 알림을 넣지 못하고 있어요 ({type(exc).__name__}). 권한과 연결 상태 확인이 필요해요.')
             return
         if dry_run:
             print('\n'.join(added) or '추가할 Zoom 회의 없음')
             return
-        path.write_text(json.dumps(state, ensure_ascii=False, indent=1))
+        save(path, state)
     if added or failed:
         import slack_report
         item = report(added, failed, minutes, datetime.now(seoul()).strftime('%-m/%-d %H:%M'))

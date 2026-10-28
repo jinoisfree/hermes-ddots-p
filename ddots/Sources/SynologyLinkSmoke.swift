@@ -15,7 +15,7 @@ extension AppDelegate {
             model.query = ""; model.draft = ""; model.replyTo = nil; model.picked = nil
             var one = ChatMessage(id: "drive-one", fromUser: false, speaker: "업무비서",
                 body: "찾았어요! [시험 보고서.pdf](" + link("ddots 점검용 없는 폴더/시험 보고서.pdf") + ") 이 파일이에요.", date: Date(), profile: "work-assistant")
-            one.slackUserID = "USMOKEHIPPO"
+            one.slackUserID = "USMOKEoffice"
             var many = one; many.id = "drive-many"
             many.body = "폴더에 12개가 있어요.\n" + (1...12).map { "- " + link("ddots 점검용 없는 폴더/가짜 \($0).xlsx") }.joined(separator: "\n")
             let thread = SlackThread(id: "drive-thread", room: "CCOW", ts: "5", root: one, replies: [many],
