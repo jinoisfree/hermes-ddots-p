@@ -40,7 +40,7 @@ DIET_DEFAULTS = dict(enabled=False, soul_bytes_max=15000, max_items=3,
 # Log kinds that record normal behaviour, not a fault: listed, but never a proposal's reason or an error signal.
 NOT_A_FAULT = {'웹 검색 결과 없음', '게이트웨이 종료 신호 기록', '예약 지침의 보이지 않는 글자 제거',
                '외부 플러그인 목록 자료 경고', '지난 승인 대기 무시'}
-COMMON_EVENT_TYPES = {'work_sync', 'task_reminder_deleted', 'auto_linked', 'note_source_replaced', 'created', 'linked', 'rollback_unlinked', 'knowledge_ref_linked',
+COMMON_EVENT_TYPES = {'scope_changed', 'scope_backfilled', 'private_task_conflict', 'work_sync', 'task_reminder_deleted', 'auto_linked', 'note_source_replaced', 'created', 'linked', 'rollback_unlinked', 'knowledge_ref_linked',
                       'knowledge_ref_unlinked', 'completed', 'reminder_completion_started',
                       'reminder_completed', 'reminder_completion_failed', 'notion_completion_sync',
                       'calendar_source_migrated', 'owner_relinked', 'relinked', 'source_state_changed'}

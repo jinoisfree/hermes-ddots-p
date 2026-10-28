@@ -140,7 +140,9 @@ class Native(old.Native):
         if authority:
             kind, identifier = authority
             source = read(kind, identifier)
-        if (item.get('status') != 'active' and kind != 'work') or source['closed']:
+        import obsidian_store
+        private_tasks=item.get('scope')=='private' and kind=='notes' and obsidian_store.is_id(identifier)
+        if (item.get('status') != 'active' and kind != 'work' and not private_tasks) or source['closed']:
             raise ValueError('source_closed')
         for ref_kind, ref_id in self.sources.references(item):
             if read(ref_kind, ref_id).get('closed'):
@@ -177,10 +179,12 @@ class Native(old.Native):
             raise ValueError('reminder_changed_before_write')
         if action == 'delete':
             cmd = ['delete', identifier, '--force']
-        elif action == 'complete':
-            cmd = ['complete', identifier]
+        elif action in {'complete','reopen'}:
+            cmd = ['edit',identifier,'--title',task,
+                   *(dates.reminder_options(due) if due else ['--clear-due','--clear-alarm']),
+                   '--complete' if action=='complete' else '--incomplete']
         else:
-            cmd = ['edit', identifier, '--title', task, *dates.reminder_options(due)]
+            cmd = ['edit', identifier, '--title', task, *(dates.reminder_options(due) if due else ['--clear-due','--clear-alarm'])]
         result = subprocess.run(['remindctl', *cmd, '--json', '--no-input', '--no-color'],
                                 capture_output=True, text=True, timeout=30)
         if result.returncode:
@@ -213,6 +217,21 @@ class Native(old.Native):
         identifier = self.sources.aliases.get(source['id'], source['id'])
         return {**source, **after, 'id': identifier, 'url': identifier}
 
+    def reverse_update(self, source, task, row):
+        """Only a private Obsidian task, under the same revision/preservation guard as completion."""
+        import obsidian_store
+        if source['kind']!='notes' or not obsidian_store.is_id(source['id']):
+            raise ValueError('private_obsidian_source_required')
+        self.check_source(source)
+        before=self.sources.read('notes',source['id'])
+        desired=content.semantic(before['content'])
+        hits=[r for r in desired['tasks'] if content.normalized(r['text'])==content.normalized(task['text']) and r.get('due')==task.get('due')]
+        if len(hits)!=1:raise ValueError('reverse_update_task_ambiguous')
+        hits[0].update(text=row['title'],due=fingerprint(row)['due'],done=bool(row.get('isCompleted')))
+        after=self.sources.apply('notes',source['id'],before,desired)
+        identifier=self.sources.aliases.get(source['id'],source['id'])
+        return {**source,**after,'id':identifier,'url':identifier}
+
     def check_source(self, source):
         current = (self.work_source(self.store.get(source['id']), source.get('draft_due')) if source['kind'] == 'work'
                    else self.sources.read(source['kind'], source['id']))
@@ -242,6 +261,10 @@ def sync(home, args, *, native=None, config=None, now=None, serialized=False):
     dry = args.get('dry_run') is True
     result = {'ok': True, 'common_id': item['common_id'], 'created': [], 'moved': [],
               'completed': [], 'deleted': [], 'skipped': [], 'past_due': [], 'no_due': [], 'mutation_calls': 0}
+    if item.get('reminder_policy')=='none':
+        return {**result,'applied':False,'skipped':[{'reason':'calendar_only_no_reminders'}]}
+    import obsidian_store
+    private=(item.get('scope')=='private' and source['kind']=='notes' and obsidian_store.is_id(source['id']))
     if source['kind'] == 'work' and not source['content']['tasks'][0]['due'] and item['status'] != 'completed':
         result['skipped'].append({'task': item['title'], 'reason': 'no_due'})
         return {**result, 'applied': False}
@@ -279,12 +302,52 @@ def sync(home, args, *, native=None, config=None, now=None, serialized=False):
                         work['managed'][key] = managed
                 if managed and managed.get('status') in {'pending', 'uncertain', 'excluded', 'deleted'}:
                     result['skipped'].append({'task': task['text'], 'reason': managed['status']}); continue
+                prefer_source=False
+                if private and managed and row:
+                    baseline=next((r for r in work['tasks'] if r.get('key')==key),None)
+                    prefer_source=bool(baseline and any(task.get(k)!=baseline.get(k) for k in ('text','due','done')))
+                    changed=(not unchanged_managed(row,managed['expected']) or
+                             bool(row.get('isCompleted'))!=managed.get('expected_done',bool((baseline or {}).get('done'))))
+                    if task.get('deleted'):
+                        managed['status']='excluded'
+                        result['skipped'].append({'task':task['text'],'reason':'source_removed_no_delete_propagation'})
+                        continue
+                    if changed:
+                        actual=fingerprint(row)
+                        expected=managed['expected']
+                        alarm=actual['due'] if actual['due'] and len(actual['due'])>10 else None
+                        safe=(actual['list']==expected['list'] and actual['notes']==expected['notes'] and
+                              actual['alarm'] in (expected['alarm'],alarm,None))
+                        if safe and prefer_source:
+                            if not dry:
+                                with native.store._connect() as conn:
+                                    native.store._event(conn,item['common_id'],'private_task_conflict',{'task_key':key,'winner':'obsidian'})
+                            managed.update(expected=actual,expected_done=bool(row.get('isCompleted')))
+                        elif safe:
+                            if dry:
+                                result['moved'].append({'task':task['text'],'reverse':True,'dry_run':True});continue
+                            managed.update(status='pending',reverse_before=source,reverse_after=row)
+                            content.save(path,state)
+                            try:
+                                source=native.reverse_update(source,task,row)
+                                task.update(text=row['title'],due=actual['due'],done=bool(row.get('isCompleted')))
+                                managed.update(status='linked',expected=actual,expected_done=task['done'])
+                                managed.pop('reverse_before',None);managed.pop('reverse_after',None)
+                                result['mutation_calls']+=1
+                                result['moved'].append({'task':task['text'],'reverse':True})
+                                content.save(path,state)
+                                continue
+                            except Exception:
+                                managed['status']='uncertain';result.update(ok=False,execution_uncertain=True)
+                                content.save(path,state)
+                                result['skipped'].append({'task':task['text'],'reason':'reverse_update_uncertain_manual_review'})
+                                break
                 if managed and (not row or not unchanged_managed(row, managed['expected'])):
                     managed['status'] = 'excluded'
                     result['skipped'].append({'task': task['text'], 'reason': 'user_modified_or_removed'}); continue
                 if managed and managed.get('completion_only') and (task.get('done') or task.get('deleted')):
                     continue
-                if row and row.get('isCompleted') and not task.get('done') and not task.get('deleted'):
+                if row and row.get('isCompleted') and not task.get('done') and not task.get('deleted') and not prefer_source:
                     if not dry:
                         managed['status'] = 'pending'; content.save(path, state)
                         try:
@@ -300,7 +363,11 @@ def sync(home, args, *, native=None, config=None, now=None, serialized=False):
                     task['done'] = True
                     result['completed'].append({'task': task['text'], 'reverse': True}); continue
                 action = ('delete' if task.get('deleted') else
+                          'reopen' if private and row and row.get('isCompleted') and not task.get('done') else
+                          'complete' if private and row and task.get('done') and
+                                        (row.get('title')!=task['text'] or fingerprint(row)['due']!=task.get('due')) else
                           ('complete' if row and not row.get('isCompleted') else None) if task.get('done') else
+                          ('update' if fingerprint(row)['due'] is not None else None) if private and row and not task.get('due') else
                           'delete' if row and not task.get('due') else
                           'update' if row and (row.get('title') != task['text'] or fingerprint(row)['due'] != task.get('due')) else
                           'create' if not row and not task.get('done') and task.get('due') else None)
@@ -309,11 +376,11 @@ def sync(home, args, *, native=None, config=None, now=None, serialized=False):
                         # Kept apart from 'skipped' so the 10-minute watcher does not report it.
                         result['no_due'].append({'task': task['text'], 'reason': 'no_due'})
                     continue
-                if action in {'create', 'update'} and dates.past(task['due'], now=now):
+                if action in {'create', 'update'} and task.get('due') and dates.past(task['due'], now=now) and (not private or action=='create'):
                     result['past_due'].append({'task': task['text'], 'due': task['due']}); continue
                 if action == 'create' and old.matching_reminders(rows, task['text'], config['list']):
                     result['skipped'].append({'task': task['text'], 'reason': 'existing_unmanaged_including_completed'}); continue
-                bucket = {'create': 'created', 'update': 'moved', 'complete': 'completed', 'delete': 'deleted'}[action]
+                bucket = {'create': 'created', 'update': 'moved', 'reopen':'moved', 'complete': 'completed', 'delete': 'deleted'}[action]
                 if dry:
                     result[bucket].append({'task': task['text'], 'dry_run': True}); continue
                 try:
@@ -345,10 +412,16 @@ def sync(home, args, *, native=None, config=None, now=None, serialized=False):
                         if len(after) != 1: raise RuntimeError('reminder_identity_unverified')
                         if action == 'complete':
                             if not after[0].get('isCompleted'): raise RuntimeError('completion_unverified')
+                        elif action=='reopen':
+                            if after[0].get('isCompleted'):raise RuntimeError('reopen_unverified')
+                        elif private and not task.get('due'):
+                            if fingerprint(after[0])['due'] is not None or after[0].get('title')!=task['text']:raise RuntimeError('reminder_due_clear_unverified')
                         elif not old.verify(after[0], task['due'], task['text'], config['list']):
                             raise RuntimeError('reminder_due_alarm_unverified')
+                        if private and (after[0].get('title')!=task['text'] or fingerprint(after[0])['due']!=task.get('due')):
+                            raise RuntimeError('private_task_fields_unverified')
                         if action == 'create': native.link(item, after[0], task, marker)
-                        work['managed'][key].update(status='linked', id=identifier, expected=fingerprint(after[0]))
+                        work['managed'][key].update(status='linked', id=identifier, expected=fingerprint(after[0]),expected_done=bool(after[0].get('isCompleted')))
                     result[bucket].append({'task': task['text'], 'reminder_id': identifier})
                     content.save(path, state)
                 except Exception:

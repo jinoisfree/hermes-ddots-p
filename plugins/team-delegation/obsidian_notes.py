@@ -24,12 +24,75 @@ NOTICE = ('업무비서의 모든 메모(ㅁ·Inbox·메일 반영·업무·예�
           'Apple 메모로 우회하거나 terminal로 승인 경계를 우회하지 않는다. ')
 
 
+def attachment_cache_roots():
+    home=Path.home()/'.hermes'
+    homes=[home,*sorted((home/'profiles').glob('*'))]
+    roots=[h/'cache'/kind for h in homes for kind in ('documents','images')]
+    from hermes_constants import get_hermes_dir, get_hermes_home
+    roots.extend([Path(get_hermes_dir('cache/documents','document_cache')),
+                  Path(get_hermes_home())/'cache/images'])
+    return list(dict.fromkeys(p.resolve() for p in roots))
+
+
+def original_attachment_name(src, raw):
+    """Strip gateway metadata only in its cache; recover Apple copies only by UUID AND bytes."""
+    roots=attachment_cache_roots()
+    match=re.fullmatch(r'(doc|img)_([0-9a-f]{12})_(.+)',src.name)
+    if not match:return src.name
+    if src.resolve().parent in roots:return match[3]
+    if src.parent.name!='note-files' or not re.search(r'_[0-9a-f]{16}\.[^.]+$',src.name):return src.name
+    names=set()
+    for root in roots:
+        for candidate in root.glob(match[1]+'_'+match[2]+'_*'):
+            try:
+                if candidate.is_file() and disk.digest(candidate.read_bytes())==disk.digest(raw):
+                    names.add(candidate.name.split('_',2)[2])
+            except OSError:
+                continue
+    return next(iter(names)) if len(names)==1 else src.name
+
+
+def attachment_name(name, number=1):
+    name=re.sub(r'[/\\\x00-\x1f\x7f-\x9f]','',name)
+    if not name or name in {'.','..'}:name='attachment'
+    suffix=Path(name).suffix
+    # Leave room for an extension and collision counter, without splitting UTF-8.
+    suffix=suffix.encode()[:80].decode('utf-8','ignore')
+    stem=name[:-len(Path(name).suffix)] if Path(name).suffix else name
+    counter=f' ({number})' if number>1 else ''
+    stem=stem.encode()[:255-len((suffix+counter).encode())].decode('utf-8','ignore')
+    return (stem or 'attachment')+counter+suffix
+
+
+def copy_attachment(store, destdir, src, raw):
+    name=original_attachment_name(src,raw)
+    number=1
+    while True:
+        target=store.path(str((destdir/attachment_name(name,number)).relative_to(store.root)),system=True)
+        try:
+            with target.open('xb') as f:f.write(raw)
+            return target
+        except FileExistsError:
+            if target.is_file() and target.read_bytes()==raw:return target
+            number+=1
+
+
 def selected(td):
     context=getattr(td,'_PLUGIN_CONTEXT',None)
     cfg=context.get_config('obsidian_notes',{}) if context else {}
     return cfg.get('enabled') is True and td.personal_roles.profile(td)=='work-assistant'
 
 def handles(identifier):return disk.is_id(identifier)
+
+
+def preserved_attachments(row):
+    """Check the vault's own links, including missing files omitted from attachment_paths."""
+    paths=list(row['attachment_paths'])
+    if row.get('missing_attachment_paths') or any(not Path(path).is_file() for path in paths):
+        raise ValueError('OBSIDIAN_ATTACHMENTS_NOT_PRESERVED: vault 첨부 파일이 없어 메모 수정을 중단했다. '
+                         '기존 첨부 파일을 복구하고 원본 상태를 확인해야 한다. '
+                         '기존 첨부를 attachments로 다시 넘기지 않는다. 자동 재시도하지 않는다.')
+    return paths
 
 
 def snapshot(td,identifier):
@@ -119,9 +182,10 @@ def sync_properties(td,row,common=None):
     if not cid:return row
     props={'common_id':cid,'notion':None}
     item=td._common_work_store().get(cid)
+    props['scope']=item.get('scope','private')
     urls=[]
     for ref in item.get('knowledge_refs',[]):
-        if ref['ref_type']=='notion_page':urls.append(ref.get('metadata',{}).get('url') or 'https://www.notion.so/'+ref['external_id'].replace('-',''))
+        if item.get('scope')!='private' and ref['ref_type']=='notion_page':urls.append(ref.get('metadata',{}).get('url') or 'https://www.notion.so/'+ref['external_id'].replace('-',''))
     if urls:props['notion']=urls[0] if len(urls)==1 else urls
     if all(row['properties'].get(k)==v for k,v in props.items()):return row
     return disk.Store().write(row['note_id'],row['markdown'],before=row,properties=props)
@@ -135,6 +199,8 @@ def mutate(td,args,context):
     if not args.get('approved') and not td._owner_chat_no_approval('apple_notes_direct_mutation',action,args):
         return td._mutation_preview('Obsidian pie1',action,{k:args[k] for k in ('title','note_id','folder','summary') if k in args})
     before=store.read(sid) if sid else None
+    if action=='update':preserved_attachments(before)
+    skipped_existing=0
     context['_obsidian_write_attempted']=True
     if context.get('_linked_title_authority') is td._LINKED_TITLE_AUTHORITY:
         expected=context.get('_linked_title_before') or {}
@@ -172,18 +238,26 @@ def mutate(td,args,context):
         removal=args.get('remove_existing')
         if removal:
             assets=[p for p in assets if not (removal=='all' or (removal=='images')==td._is_note_image(p))]
+        # Compare only attachments retained by THIS note, never a global vault index.
+        # Explicit replacement keeps its existing semantics: removed attachments can be re-added.
+        existing_paths={Path(path).resolve() for path in assets if Path(path).resolve().is_relative_to(store.root)}
+        existing_hashes=None
         destdir=store.path('attachments/'+sid.split(':')[1],system=True)
-        if supplied:destdir.mkdir(parents=True,exist_ok=True)
         if destdir.is_symlink() or not destdir.resolve().is_relative_to(store.root):raise ValueError('OBSIDIAN_SYMLINK_REFUSED')
         for value in supplied:
-            src=Path(value)
+            src=Path(value).expanduser()
+            if action=='update' and src.resolve() in existing_paths:
+                skipped_existing+=1
+                continue
             with disk.materialize():raw=src.read_bytes()
-            name=src.stem[:100]+'-'+disk.digest(raw)[:12]+src.suffix
-            target=store.path(str((destdir/name).relative_to(store.root)),system=True)
-            if target.exists():
-                if target.read_bytes()!=raw:raise ValueError('OBSIDIAN_ATTACHMENT_COLLISION')
-            else:
-                with target.open('xb') as f:f.write(raw)
+            if action=='update' and existing_paths:
+                if existing_hashes is None:
+                    with disk.materialize():existing_hashes={disk.digest(path.read_bytes()) for path in existing_paths}
+                if disk.digest(raw) in existing_hashes:
+                    skipped_existing+=1
+                    continue
+            destdir.mkdir(parents=True,exist_ok=True)
+            target=copy_attachment(store,destdir,src,raw)
             if str(target) not in assets:assets.append(str(target))
         progress=str(args.get('progress') or (td._note_progress(before['body_html']) if before else '') or ('진행중' if folder.startswith('02. Task Notes') else ''))
         html=td._notes_html(title,td._structured_note_body(summary,original,preview),[],
@@ -212,7 +286,7 @@ def mutate(td,args,context):
             parent=store.root/(before['folder'] if before else folder)
             import os
             for path in assets:
-                p=Path(path);rel=quote(os.path.relpath(p,parent),safe='/');label=p.name.replace('[','\\[').replace(']','\\]')
+                p=Path(path);rel=quote(os.path.relpath(p,parent),safe='/');label=p.name.replace('\\','\\\\').replace('[','\\[').replace(']','\\]')
                 body+=('![' if td._is_note_image(path) else '[')+label+']('+rel+')\n\n'
         row=store.write(sid,body,before=before,title=title,folder=folder)
     common=None
@@ -220,7 +294,8 @@ def mutate(td,args,context):
         common=td._register_approved_common_work_source(domain='notes',source_id=sid,title=row['title'],common_id=str(args.get('common_id') or ''))
         row=sync_properties(td,row,common)
     td._clear_pending_personal_owner()
-    result={'note_id':sid,'title':row['title'],'url':row['url'],'path':row['path'],'attachments':len(row['attachment_paths']),'content_loss':False}
+    result={'note_id':sid,'title':row['title'],'url':row['url'],'path':row['path'],'attachments':len(row['attachment_paths']),
+            'skipped_existing_attachments':skipped_existing,'content_loss':False}
     return json.dumps({'ok':True,'authority':'Obsidian pie1','action':action,'target_id':sid,'result':result,
                        'approved':True,'mutation_calls':1,'fallback_used':False,'tool_search_calls':0,
                        **({'common_work':common} if common is not None else {})},ensure_ascii=False)

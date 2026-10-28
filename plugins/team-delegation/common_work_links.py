@@ -176,6 +176,14 @@ class CommonWorkStore:
                         WHERE unlinked_at IS NULL;
                     """
                 )
+                columns = {row[1] for row in conn.execute('PRAGMA table_info(common_work)')}
+                for name, definition in (
+                    ('scope', "TEXT NOT NULL DEFAULT 'private' CHECK(scope IN ('private','shared'))"),
+                    ('scope_set_at', 'REAL'),
+                    ('reminder_policy', "TEXT NOT NULL DEFAULT 'tasks' CHECK(reminder_policy IN ('tasks','none'))"),
+                ):
+                    if name not in columns:
+                        conn.execute(f'ALTER TABLE common_work ADD COLUMN {name} {definition}')
                 conn.commit()
             finally:
                 conn.close()
@@ -248,8 +256,12 @@ class CommonWorkStore:
         sources: Iterable[Mapping[str, Any]],
         link_reason: str,
         common_id: str | None = None,
+        scope: str = 'private',
+        reminder_policy: str = 'tasks',
     ) -> dict[str, Any]:
         normalized_title = str(title or "").strip()
+        if scope not in {'private', 'shared'} or reminder_policy not in {'tasks', 'none'}:
+            raise CommonWorkError('invalid work scope or reminder policy')
         if not normalized_title:
             raise CommonWorkError("title is required")
         normalized_reason = str(link_reason or "").strip()
@@ -277,8 +289,8 @@ class CommonWorkStore:
         now = time.time()
         with self._connect() as conn:
             conn.execute(
-                "INSERT INTO common_work (common_id, title, status, created_at) VALUES (?, ?, 'active', ?)",
-                (identifier, normalized_title, now),
+                "INSERT INTO common_work (common_id, title, status, created_at,scope,scope_set_at,reminder_policy) VALUES (?, ?, 'active', ?,?,?,?)",
+                (identifier, normalized_title, now, scope, now, reminder_policy),
             )
             for source in normalized_sources:
                 conn.execute(
@@ -453,6 +465,9 @@ class CommonWorkStore:
             "common_id": item["common_id"],
             "title": item["title"],
             "status": item["status"],
+            "scope": item['scope'],
+            "scope_set_at": item['scope_set_at'],
+            "reminder_policy": item['reminder_policy'],
             "created_at": item["created_at"],
             "completed_at": item["completed_at"],
             "completion_state": completion_state,
@@ -706,6 +721,8 @@ class CommonWorkStore:
             )
         )
         normalized_session = str(source_session_id or "").strip() or None
+        if normalized_type == 'notion_page' and common_id:
+            self.require_notion(common_id)
         normalized_receipt = str(receipt_id or "").strip() or None
         if normalized_reason == "verified_workflow_evidence" and not normalized_receipt:
             raise CommonWorkError(
@@ -729,13 +746,15 @@ class CommonWorkStore:
                 if old:
                     return self.get(old[0]['common_id'])
                 common_id = self._new_id()
-                conn.execute("INSERT INTO common_work (common_id,title,status,created_at) VALUES (?,?,'active',?)", (common_id, new_work_title.strip(), now))
+                conn.execute("INSERT INTO common_work (common_id,title,status,created_at,scope,scope_set_at) VALUES (?,?,'active',?,'shared',?)", (common_id, new_work_title.strip(), now, now))
                 self._event(conn, common_id, 'created', {'knowledge_only': True, 'receipt_id': normalized_receipt})
             if conn.execute(
                 "SELECT 1 FROM common_work WHERE common_id = ?", (common_id,)
             ).fetchone() is None:
                 raise CommonWorkError(f"unknown common_id: {common_id}")
             try:
+                if normalized_type=='notion_page' and conn.execute('SELECT scope FROM common_work WHERE common_id=?',(common_id,)).fetchone()[0]!='shared':
+                    raise CommonWorkError('PRIVATE_WORK_NOTION_REFUSED')
                 conn.execute(
                     """
                     INSERT INTO knowledge_refs (
@@ -775,6 +794,26 @@ class CommonWorkStore:
                     "receipt_id": normalized_receipt,
                 },
             )
+        return self.get(common_id)
+
+    def require_notion(self, common_id):
+        if self.get(common_id)['scope'] != 'shared':
+            raise CommonWorkError('PRIVATE_WORK_NOTION_REFUSED: 개인 업무에는 노션을 연결하거나 읽고 쓰지 않는다.')
+
+    def set_scope(self, common_id, scope):
+        """Internal transition/backfill primitive. Owner authorization lives at the tool boundary."""
+        if scope not in {'private', 'shared'}:
+            raise CommonWorkError('invalid work scope')
+        with self._connect() as conn:
+            conn.execute('BEGIN IMMEDIATE')
+            row = conn.execute('SELECT scope FROM common_work WHERE common_id=?', (common_id,)).fetchone()
+            if row is None:
+                raise CommonWorkError('unknown common_id')
+            now = time.time()
+            if scope == 'private':
+                conn.execute("UPDATE knowledge_refs SET unlinked_at=?,unlink_reason='owner_scope_private' WHERE common_id=? AND ref_type='notion_page' AND unlinked_at IS NULL", (now,common_id))
+            conn.execute('UPDATE common_work SET scope=?,scope_set_at=? WHERE common_id=?', (scope,now,common_id))
+            self._event(conn,common_id,'scope_changed',{'from':row['scope'],'to':scope})
         return self.get(common_id)
 
     def unlink_knowledge_ref(

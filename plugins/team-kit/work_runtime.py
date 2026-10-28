@@ -16,6 +16,14 @@ import re
 import sqlite3
 import threading
 import time
+import importlib.util
+
+_candidate_spec = importlib.util.spec_from_file_location("team_work_candidates", Path(__file__).with_name("work_candidates.py"))
+CANDIDATES = importlib.util.module_from_spec(_candidate_spec)
+_candidate_spec.loader.exec_module(CANDIDATES)
+_notion_spec = importlib.util.spec_from_file_location("team_work_notion_api", Path(__file__).with_name("notion_api.py"))
+NOTION_API = importlib.util.module_from_spec(_notion_spec)
+_notion_spec.loader.exec_module(NOTION_API)
 
 LOG = logging.getLogger("team_kit.work")
 _TURNS = OrderedDict()
@@ -171,10 +179,11 @@ def public(data, *, detail=False):
         out["receipt_summary"] = {"total": len(receipts), "shown": len(shown), "omitted": len(receipts) - len(shown),
                                   "success_ids": success if detail else success[-SUCCESS_IDS:],
                                   "success_ids_omitted": 0 if detail else max(0, len(success) - SUCCESS_IDS)}
+    out.update(CANDIDATES.public(data))
     return out
 
 
-def pending(home, owner_id, *, limit=5, project_source=None):
+def pending(home, owner_id, *, limit=5, project_source=None, include_offers=False):
     items = []
     for file in folder(home).glob("*.json"):
         try:
@@ -187,7 +196,10 @@ def pending(home, owner_id, *, limit=5, project_source=None):
                 row = copy.deepcopy(cached[1])
             else:
                 row = read(home, file.stem, owner_id)
+                summary = CANDIDATES.public(row).get("candidate_summary")
                 row = {k: row.get(k) for k in ("case_id", "source", "goal", "status", "next_step", "references", "updated_at")}
+                if summary:
+                    row["candidate_summary"] = summary
                 with _LOCK:
                     _PENDING_CACHE[cache_key] = (signature, copy.deepcopy(row))
                     _PENDING_CACHE.move_to_end(cache_key)
@@ -217,8 +229,11 @@ def pending(home, owner_id, *, limit=5, project_source=None):
             continue
         if project_source and any(row["source"].get(k) != project_source.get(k) for k in ("chat_id", "thread_id")):
             continue
-        if row["status"] != "completed":
-            items.append({k: row.get(k) for k in ("case_id", "goal", "status", "next_step", "references", "updated_at")})
+        if row["status"] != "completed" or include_offers and row.get("candidate_summary"):
+            item = {k: row.get(k) for k in ("case_id", "goal", "status", "next_step", "references", "updated_at")}
+            if include_offers and row.get("candidate_summary"):
+                item["candidate_summary"] = row["candidate_summary"]
+            items.append(item)
     return sorted(items, key=lambda r: r["updated_at"], reverse=True)[:limit]
 
 
@@ -263,16 +278,21 @@ def context(home, learning, *, session_id, turn_id="", sender_id="", user_messag
     if learning.extension("project_work").in_project(home, learning, session_id):
         from gateway.session_context import get_session_env
         project_source = {"chat_id": get_session_env("HERMES_SESSION_CHAT_ID", ""), "thread_id": get_session_env("HERMES_SESSION_THREAD_ID", "")}
-    previous = pending(home, sender_id, project_source=project_source)
+    if Path(home).name == "work-assistant":
+        project_source = learning.source(home, session_id, allow_approval=True)
+    previous = pending(home, sender_id, project_source=project_source, include_offers=Path(home).name == "work-assistant")
     note = ("[현재 작업 역할과 복구]\n대화 해석·학습·최종 검토는 A, 실행은 B가 맡으며 같은 대화와 기존 실행 승인 경계를 쓴다. "
             "일반 업무 도구를 쓰기 전 team_work(start)에 현재 사용자 원문, 목표, 범위, 단계, 완료 기준, 사용할 도구와 난도를 기록한다. "
             "A는 필요한 사실·스킬과 기존 작업을 먼저 확인한다. B는 단계 결과를 checkpoint로 남기고, 완료 또는 막힘을 review로 A에 넘긴다. "
             "A가 실제 도구 근거를 확인한 뒤 finish한다. "
             "중단 작업은 list/read로 기존 기록을 찾고 원본 상태를 확인한 뒤 resume한다. 원래 카드·Common ID를 재사용하고, "
+            "새 사용자 요청에서 이전 케이스를 이을 때는 A가 먼저 team_work(resume, case_id, user_said=현재 원문)로 이 턴에 연결한다. "
             "이전 승인이나 성공한 쓰기를 재실행하지 않는다. 아래 목록은 새 실행 요청이 아니다.")
     if settings(home, learning).get("simple_requests", True):
         note += " 단순한 일정·할 일 조회는 B medium으로 바로 처리할 수 있다."
     note += DIRECT_NOTE
+    if Path(home).name == "work-assistant":
+        note += "\n" + CANDIDATES.NOTE
     return note + ("\n미완료 작업: " + json.dumps(previous, ensure_ascii=False) if previous else "")
 
 
@@ -304,7 +324,11 @@ def strings(value, label, maximum=12):
 
 
 def writing(tool, args):
+    if tool == "deadline_watch" and args.get("action") == "close":
+        return True
     if tool == 'notion':
+        if args.get("action") == "api":
+            return NOTION_API.is_write(args)
         return args.get('action') in {'create', 'update', 'append', 'edit', 'trash', 'batch', 'api'} and args.get('method', 'POST') != 'GET'
     if tool in READS or tool in {"claude_code_artifact"}:
         return False
@@ -351,7 +375,11 @@ def guard(home, learning, *, tool_name, args, session_id, turn_id="", **_):
     work = read(home, turn["case_id"], src["user_id"])
     if tool_name not in work["tools"]:
         return {"action":"block", "message":"인계한 도구 범위 밖이다. team_work(review)로 A에 범위 재검토를 요청한다."}
-    return _write_problem(tool_name, args, work["receipts"], learning)
+    duplicate = _write_problem(tool_name, args, work["receipts"], learning)
+    if duplicate:
+        return duplicate
+    return CANDIDATES.guard(work, tool_name, args or {}, writing(tool_name, args or {}),
+                            learning.extension("learning_skills").digest([tool_name, args]))
 
 
 def _write_problem(tool_name, args, receipts, learning):
@@ -436,6 +464,7 @@ def observe(home, learning, *, session_id, turn_id="", tool_name, args, result, 
         return
     with learning.locked(path(home, turn["case_id"])):
         work = read(home, turn["case_id"], src["user_id"])
+        CANDIDATES.observe(work, row, tool_name, args or {}, result, learning.safe_text)
         if not any(r["tool_call_id"] == row["tool_call_id"] for r in work["receipts"]):
             work["receipts"].append(row)
         refs = {(r["kind"], r["id"]):r for r in work["references"]}
@@ -486,17 +515,28 @@ def _start(home, args, src, turn, learning):
         raise ValueError("Use simple, normal or complex difficulty.")
     if difficulty == "simple" and (len(plan) != 1 or not set(tools) <= READS):
         difficulty = "normal"
-    case_id = turn["case_id"] or learning.extension("learning_usage").case_id(src, learning.extension("learning_skills"))
+    candidate_case = args.get("candidate_case_id")
+    if (candidate_case or args.get("selection")) and Path(home).name != "work-assistant":
+        raise ValueError("Numbered candidate execution is enabled only for work-assistant.")
+    if bool(candidate_case) != bool(args.get("selection")):
+        raise ValueError("start requires candidate_case_id and selection together.")
+    if candidate_case and turn["case_id"] and turn["case_id"] != candidate_case:
+        raise ValueError("Do not replace the current case with another numbered offer.")
+    case_id = candidate_case or turn["case_id"] or learning.extension("learning_usage").case_id(src, learning.extension("learning_skills"))
     file = path(home, case_id)
     with learning.locked(file):
         if file.exists():
             work = read(home, case_id, src["user_id"])
-            if work["status"] == "completed" and not work.get("direct"):
+            if work["status"] == "completed" and not work.get("direct") and not candidate_case:
                 raise ValueError("This owner request is already completed; do not repeat it.")
             # Same-turn replanning preserves receipts and canonical ids.
         else:
+            if candidate_case:
+                raise ValueError("Read the existing numbered offer; do not create a replacement case.")
             work = {"case_id":case_id, "source":{k:v for k,v in src.items() if k not in {"text", "followups"}},
                     "created_at":time.time(), "receipts":[], "references":[], "progress":[]}
+        if candidate_case:
+            CANDIDATES.select(work, args, src)
         work.update(goal=text(args.get("goal"), "goal", 500), scope=text(args.get("scope"), "scope", 1000),
                     plan=plan, done_when=strings(args.get("done_when"), "done_when", 8),
                     tools=list(dict.fromkeys(tools)), difficulty=difficulty, status="executing", next_step=plan[0], direct=False)
@@ -532,6 +572,64 @@ def _resolve_uncertain(work, args, turn):
     return receipt
 
 
+def role_error(turn, work, action):
+    """Explain the unchanged physical-role checks without binding a case or granting approval."""
+    role = turn.get('last_role') or 'none'
+    phase = turn.get('phase')
+    case_id = work.get('case_id')
+    state = {'role':role, 'phase':phase, 'bound_case_id':turn.get('case_id'),
+             'requested_case_id':case_id, 'requested_case_status':work.get('status')}
+    calls = []; reads = []
+    if not case_id:
+        hint = '먼저 team_work(list)로 미완료 케이스를 찾고 read로 원본 상태를 확인한다.'
+        calls = [{'action':'list'}]
+    elif work.get('status') == 'completed':
+        hint = '이미 완료된 케이스다. read로 결과를 확인한다. 새 업무는 현재 요청으로 start하며 완료된 쓰기는 반복하지 않는다.'
+        calls = [{'action':'read', 'case_id':case_id}]
+    elif role in {'interpret', 'review'} and (turn.get('case_id') != case_id or phase == 'interpret'):
+        if not work.get('candidate_selection'):
+            reads = [{'tool':'common_work_get' if ref['kind']=='common_work' else 'kanban_show',
+                      'args':{'common_id' if ref['kind']=='common_work' else 'task_id':ref['id']}}
+                     for ref in work.get('references', []) if ref['kind'] in {'common_work', 'kanban'}]
+        hint = 'A가 필요한 Common ID/카드 원본을 이 턴에서 재조회한 뒤 아래 resume으로 연결한다. 이전 승인은 이관되지 않는다.'
+        calls = [{'action':'resume', 'case_id':case_id, 'user_said':turn['request']}]
+    elif role == 'execute' and phase == 'execute' and turn.get('case_id'):
+        hint = '현재 B는 연결된 케이스의 진행·근거를 review로 넘긴다. 그 뒤 실제 다음 A 요청에서 검토한다.'
+        calls = [{'action':'review', 'case_id':turn['case_id'], 'summary':'실제 진행과 미완료 사항을 기록', 'evidence_ids':[]}]
+    elif phase == 'execute':
+        hint = 'start/resume으로 B 인계는 됐다. 같은 모델 응답에서 review를 호출하지 말고 실제 다음 B 요청에서 실행·검증한다.'
+    elif phase == 'review' and role == 'execute':
+        hint = 'B의 review는 접수됐다. 같은 모델 응답에서 finish를 반복하지 말고 실제 다음 A 검토 요청을 기다린다.'
+    elif role == 'review' and turn.get('case_id') == case_id and work.get('status') == 'awaiting_review':
+        hint = '지금은 A 검토 차례다. 완료 기준·실제 근거를 확인한 뒤 finish로 completed/waiting/blocked를 기록한다.'
+    else:
+        hint = '실제 다음 A 요청에서 현재 사용자 원문을 확인한다. 케이스를 자동 연결하거나 역할을 바꿨다고 가정하지 않는다.'
+    signature = (action, *state.values())
+    repeated = turn.get('role_error_signature') == signature
+    turn['role_error_signature'] = signature
+    description = (f"업무 역할·케이스가 맞지 않아 {action}을 실행하지 않았다. "
+                   f"현재 역할={role}, 단계={phase}, 이 턴 케이스={turn.get('case_id') or '없음'}, "
+                   f"요청 케이스 상태={work.get('status') or '없음'}. ")
+    return {'ok':False, 'code':'WORK_ROLE_MISMATCH', 'error':('같은 역할 오류다. 아래 다음 단계 안내를 따른다. ' if repeated else description) + hint,
+            'state':state, 'required_reads':reads, 'next_calls':calls, 'repeated':repeated}
+
+
+def halt_response(home, *, response_text="", session_id="", turn_id="", **_):
+    """Translate only the core's exact team_work halt template for a verified office turn."""
+    turn = binding(home, turn_id)
+    if Path(home).name != 'work-assistant' or not turn or turn['session_id'] != session_id:
+        return None
+    pattern = (r"I stopped retrying because I kept running team_work ([1-9][0-9]*) "
+               r"times without making progress\. The last result above shows what "
+               r"blocked it\. Tell me how you'd like to proceed, or send `continue` and I'll try a "
+               r"different approach\.")
+    match = re.fullmatch(pattern, response_text) if isinstance(response_text, str) else None
+    if not match: return None
+    return (f"*🔴 업무 처리를 잠시 멈췄습니다*\n같은 업무 도구 호출이 {match[1]}회 반복돼 진행을 멈췄습니다. "
+            "마지막 오류와 기존 반영 상태를 확인해야 합니다. 이어 진행을 고르면 미완료 작업을 다시 연결하며, "
+            "불명확한 쓰기는 자동 재실행하지 않습니다.\n[[버튼: 이어 진행 | 그만]]")
+
+
 def handle(home, args, *, learning, session_id="", turn_id="", **_):
     try:
         if not turn_id:
@@ -545,37 +643,57 @@ def handle(home, args, *, learning, session_id="", turn_id="", **_):
         action = args.get("action")
         project_scope = learning.extension("project_work").in_project(home, learning, session_id)
         if action == "list":
-            return json.dumps({"ok":True, "pending":pending(home, src["user_id"], limit=20, project_source=src if project_scope else None)}, ensure_ascii=False)
+            office = Path(home).name == "work-assistant"
+            return json.dumps({"ok":True, "pending":pending(home, src["user_id"], limit=20,
+                project_source=src if project_scope or office else None, include_offers=office)}, ensure_ascii=False)
         if action == "metrics":
             return json.dumps(learning.extension("work_metrics").summary(home), ensure_ascii=False)
         if action == "start":
             return json.dumps(_start(home, args, src, turn, learning), ensure_ascii=False)
         case_id = args.get("case_id") or turn["case_id"]
+        if not case_id and action in {'checkpoint', 'review', 'finish', 'resume'}:
+            return json.dumps(role_error(turn, {}, action), ensure_ascii=False)
         with learning.locked(path(home, case_id)):
             work = read(home, case_id, src["user_id"])
-            if project_scope and any(work["source"].get(k) != src.get(k) for k in ("chat_id", "thread_id")):
+            if (project_scope or work.get("candidates")) and any(work["source"].get(k) != src.get(k) for k in ("chat_id", "thread_id")):
                 raise ValueError("This work belongs to another project thread.")
             if action == "read":
-                return json.dumps({"ok":True, "checkpoint":public(work, detail=args.get("detail") is True), "hint":"Before resume, use common_work_get/kanban_show to refresh every referenced original. Past approvals do not transfer."}, ensure_ascii=False)
+                result = public(work, detail=args.get("detail") is True)
+                if args.get("item_number") is not None:
+                    result.update(CANDIDATES.public(work, args["item_number"]))
+                return json.dumps({"ok":True, "checkpoint":result, "hint":
+                    "Selected candidates: refresh only the next target once, then write/verify/checkpoint. Otherwise refresh referenced originals before resume. Past approvals do not transfer."}, ensure_ascii=False)
             resolved = None
-            if action == "resolve_uncertain":
+            if action in {"offer", "item_checkpoint"}:
+                if Path(home).name != "work-assistant" or turn["case_id"] != case_id or turn["last_role"] != "execute":
+                    raise ValueError("Only work-assistant's current executor records numbered candidates.")
+                if action == "offer":
+                    CANDIDATES.offer(work, args)
+                else:
+                    CANDIDATES.checkpoint(work, args)
+            elif action == "resolve_uncertain":
                 resolved = _resolve_uncertain(work, args, turn)
             elif action == "resume":
                 learning.validate_quote(src, args.get("user_said", ""))
                 if turn["last_role"] not in {"interpret", "review"} or work["status"] == "completed":
-                    raise ValueError("A can resume only unfinished work after interpreting the new owner request.")
+                    return json.dumps(role_error(turn, work, action), ensure_ascii=False)
                 observed = {(r["kind"], r["id"]):r for receipt in turn["observations"]
                             if receipt["tool"] in PREFLIGHT and receipt["status"] == "success" for r in receipt["references"]}
-                if any((r["kind"],r["id"]) not in observed for r in work["references"]):
+                if not work.get("candidate_selection") and any((r["kind"],r["id"]) not in observed for r in work["references"]):
                     raise ValueError("Read each original Common ID/card in this turn before resuming; do not create replacement objects.")
-                work["references"] = [observed[(r["kind"],r["id"])] for r in work["references"]]
+                if not work.get("candidate_selection"):
+                    work["references"] = [observed[(r["kind"],r["id"])] for r in work["references"]]
+                else:
+                    CANDIDATES.resume(work)
                 work["resumed_from"] = {k:v for k,v in src.items() if k not in {"text", "followups"}}
                 already_done = work["references"] and all(r["status"] in {"done", "completed"} for r in work["references"])
+                if work.get("candidate_selection"):
+                    already_done = CANDIDATES.current(work)[0] is None
                 work["status"] = "awaiting_review" if already_done else "executing"
                 turn.update(phase="review" if already_done else "execute", case_id=case_id)
             elif action in {"checkpoint", "review"}:
                 if turn["case_id"] != case_id or turn["last_role"] != "execute":
-                    raise ValueError("B records progress for its current handoff only.")
+                    return json.dumps(role_error(turn, work, action), ensure_ascii=False)
                 summary = text(args.get("summary"), "summary", 1500)
                 identifiers = args.get("evidence_ids", [])
                 valid = {r["tool_call_id"] for r in work["receipts"] if r["status"] == "success"}
@@ -588,11 +706,13 @@ def handle(home, args, *, learning, session_id="", turn_id="", **_):
                     turn["phase"] = "review"
             elif action == "finish":
                 if turn["case_id"] != case_id or turn["last_role"] != "review" or work["status"] != "awaiting_review":
-                    raise ValueError("A must receive a physical review-model turn before finishing B's work.")
+                    return json.dumps(role_error(turn, work, action), ensure_ascii=False)
                 outcome = args.get("outcome")
                 if outcome not in {"completed", "waiting", "blocked"}:
                     raise ValueError("Finish as completed, waiting or blocked.")
                 if outcome == "completed":
+                    if CANDIDATES.current(work)[0]:
+                        raise ValueError("Selected candidate targets remain unverified; finish as waiting/blocked.")
                     if any(r["kind"] == "kanban" and r["status"] not in {"done", "completed"} for r in work["references"]):
                         raise ValueError("A running/background card is not completed. Finish as waiting.")
                     if work["tools"] and not any(r["status"] == "success" for r in work["receipts"]):
@@ -604,7 +724,7 @@ def handle(home, args, *, learning, session_id="", turn_id="", **_):
                                   "model":INTERPRETER, "tool_success_is_task_success":False}
                 turn["phase"] = "interpret"
             else:
-                raise ValueError("Use start/list/read/resume/checkpoint/review/finish/resolve_uncertain/metrics.")
+                raise ValueError("Use start/list/read/resume/checkpoint/review/finish/resolve_uncertain/metrics/offer/item_checkpoint.")
             save(home, work, learning)
             if resolved is not None:
                 # A's direct-write guard reads observations, B's guard reads receipts.
@@ -713,6 +833,14 @@ def request(home, learning, payload, *, turn_id="", **_):
                        "위치를 추측하지 않고 블록의 판정별 안내를 따른다. "
                        "단축어의 정확한 이름은 '위치 보내기'다. 과거 대화의 다른 이름을 쓰지 않는다.")
         label = "업무비서" if Path(home).name == "work-assistant" else "개인비서"
+        if Path(home).name == "work-assistant":
+            message += "\n" + CANDIDATES.NOTE
+            if turn.get("case_id"):
+                state = read(home, turn["case_id"], turn["owner"])
+                item, target = CANDIDATES.current(state)
+                if item:
+                    message += "\n현재 선택 항목: " + json.dumps({"case_id": state["case_id"], "number": item["number"],
+                        "title": item["title"], "kind": target["kind"], "id": target.get("id"), "state": target["state"]}, ensure_ascii=False)
         append_role_note(f"[{label} 실행 역할 — 새 사용자 요청이 아님]\n" + message)
         if role in {"interpret", "review"}:
             try:
@@ -739,7 +867,7 @@ def ended(home, learning, *, turn_id="", **_):
 
 SCHEMA = {"name":"team_work", "description":"Handoff a verified owner request from interpretation to execution, checkpoint actual results, review, and resume existing work. A alone may resolve_uncertain with receipt_id, applied/not_applied, summary and successful read evidence_ids from after that write in the same case. Never transfers approval or executes business actions.",
           "parameters":{"type":"object", "properties":{
-              "action":{"type":"string", "enum":["start","list","read","resume","checkpoint","review","finish","resolve_uncertain","metrics"]},
+              "action":{"type":"string", "enum":["start","list","read","resume","checkpoint","review","finish","resolve_uncertain","metrics","offer","item_checkpoint"]},
               "detail":{"type":"boolean","description":"Return all progress narratives and receipt rows; use read with detail=true when omitted steps matter."},
               "receipt_id":{"type":"string"}, "case_id":{"type":"string"}, "user_said":{"type":"string"},
               "goal":{"type":"string","maxLength":500}, "scope":{"type":"string","maxLength":1000},
@@ -751,3 +879,4 @@ SCHEMA = {"name":"team_work", "description":"Handoff a verified owner request fr
               "evidence_ids":{"type":"array","items":{"type":"string"}},
               "outcome":{"type":"string","enum":["completed","waiting","blocked","applied","not_applied"]}},
               "required":["action"],"additionalProperties":False}}
+SCHEMA["parameters"]["properties"].update(CANDIDATES.FIELDS)

@@ -7,6 +7,8 @@ TERMINAL = {'missing','out_of_scope','unsupported','conflict'}
 
 
 def references(item):
+    import work_policy
+    item=work_policy.permitted(item)
     return [(r['domain'],r['source_id'],r.get('metadata',{})) for r in item['sources']] + [
         ('notion',r['external_id'],r.get('metadata',{})) for r in item.get('knowledge_refs',[])
         if r['ref_type']=='notion_page']

@@ -9,6 +9,7 @@ from datetime import datetime, timedelta
 import work_content as content
 import deadline_time as dates
 import source_lookup
+import notion_task_dates
 
 TEXT_BLOCKS = {'paragraph', 'heading_1', 'heading_2', 'heading_3', 'bulleted_list_item',
                'numbered_list_item', 'quote', 'callout', 'toggle', 'code', 'table_row'}
@@ -69,7 +70,15 @@ def due_property(props, explicit, status_name):
         page = dates.canonical(date.get('start'))
     except ValueError:
         return None
-    return {'page': page, 'wanted': content.due_target(explicit, page), 'explicit': explicit}
+    result = {'page': page, 'wanted': content.due_target(explicit, page), 'explicit': explicit}
+    opened = [row for row in explicit if not row.get('done')]
+    if any(row.get('ambiguous') for row in opened):
+        result['problem'] = 'ambiguous_task_deadline'
+    elif page and dates.past(page) and opened and not any(row.get('due') for row in opened):
+        # An expired page date is not evidence for an undated task. Surface the gap rather than
+        # silently calling the stale value correct or fabricating a reminder from it.
+        result['problem'] = 'stale_undated_notion_deadline'
+    return result
 
 
 def _note_summary_line(line):
@@ -212,9 +221,13 @@ class Sources:
         self.aliases = {}
 
     def authority(self, item, refs=None):
+        import work_policy
+        item = work_policy.permitted(item)
         import obsidian_store
         if not obsidian_store.enabled(getattr(self,'home',None)):return None
         notions = [('notion', r['external_id']) for r in item.get('knowledge_refs', []) if r['ref_type']=='notion_page']
+        if item.get('scope')=='shared' and not notions:
+            raise source_lookup.SourceReadError('transient','shared_notion_original_required')
         notes = [('notes', r['source_id']) for r in item.get('sources', []) if r['domain']=='notes']
         candidates = notions or notes
         if not candidates:return None
@@ -226,6 +239,8 @@ class Sources:
         return candidates[0]
 
     def references(self, item):
+        import work_policy
+        item = work_policy.permitted(item)
         refs = [('notion', r['external_id']) for r in item.get('knowledge_refs', []) if r['ref_type'] == 'notion_page' and r.get('metadata',{}).get('link_state',{}).get('status','ok')=='ok']
         refs += [(s['domain'], s['source_id']) for s in item.get('sources', []) if s['domain'] in {'notes', 'calendar'} and s.get('metadata',{}).get('link_state',{}).get('status','ok')=='ok']
         self.authority(item, refs)  # A failed/hidden Notion is never equivalent to no Notion.
@@ -234,19 +249,20 @@ class Sources:
     def read(self, kind, identifier):
         identifier = self.aliases.get(identifier, identifier)
         if kind == 'notion':
+            import work_policy
+            if work_policy.notion_problem({'page_id':identifier}):
+                raise ValueError(work_policy.ERROR)
             page = self.reader.page(identifier)
             if str(page.get('parent', {}).get('database_id', '')).replace('-', '').lower() != self.database:
                 raise source_lookup.SourceReadError('out_of_scope', 'company_notion_database_required')
             from notion_completion_sync import page_title
             blocks = ordered_blocks(self.reader.blocks(identifier))
-            tasks, lines = [], []
+            tasks, lines = notion_task_dates.read(blocks), []
             for block in blocks:
                 key = block.get('type')
                 if block.get('archived') or block.get('in_trash'):
                     continue
-                if key == 'to_do':
-                    tasks.append(content.task(content.rich_text(block[key]), done=block[key].get('checked'), identifier=block['id']))
-                elif key in TEXT_BLOCKS:
+                if key in TEXT_BLOCKS:
                     line = body_text(block)
                     if key != 'table_row' or line.strip():
                         lines.append(line)
@@ -258,12 +274,14 @@ class Sources:
                     row['done'] = True
             due = (props.get('다음 마감', {}).get('date') or {}).get('start')
             explicit = content.semantic({'tasks': tasks})['tasks']  # before the single-task page fallback
-            if len(tasks) == 1 and not tasks[0].get('due') and due:
+            due_info = due_property(props, explicit, status_name)
+            if (len(tasks) == 1 and not tasks[0].get('due') and not tasks[0].get('ambiguous') and due
+                    and not (due_info or {}).get('problem')):
                 tasks[0]['due'] = dates.canonical(due)
             closed = bool(page.get('in_trash') or page.get('archived') or status_name == 'Cancelled')
             result = {'content': {'title': page_title(page)[1], 'body': '\n'.join(lines).strip(), 'tasks': tasks},
                       'raw': {'page': page, 'blocks': blocks}, 'closed': closed,
-                      'due_property': due_property(props, explicit, status_name)}
+                      'due_property': due_info}
         elif kind == 'notes':
             self.guard('notes', {'action': 'update', 'note_id': identifier}, strict=True)
             raw = self.notes.current(identifier)
@@ -371,6 +389,8 @@ class Sources:
 
     def write_due(self, identifier, wanted):
         """Set only the page's '다음 마감' and read it back; the caller re-read the page just before."""
+        import work_policy
+        if work_policy.notion_problem({'page_id':identifier}):raise ValueError(work_policy.ERROR)
         self.reader.request('PATCH', f'pages/{identifier}', {'properties': {DUE: {'date': {'start': wanted} if wanted else None}}})
         after = self.read('notion', identifier)
         if after['closed'] or not after.get('due_property') or after['due_property']['page'] != wanted:

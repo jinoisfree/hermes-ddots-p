@@ -57,6 +57,7 @@ CONTENT_WARNINGS = {  # work_sync.Engine warning lines -> fixed reason codes for
     '앞선 본문·할 일 반영이 불명확해': 'work_content_pending_uncertain',
     '두 원본이 서로 다르게 바뀌었어요': 'work_content_conflict',
     '노션 다음 마감 반영 확인이 필요해': 'work_content_write_uncertain',
+    '노션 할 일의 마감 근거를 확인해야': 'work_content_deadline_unresolved',
 }
 
 
@@ -790,6 +791,8 @@ class Sync:
     # ---- Linked work: memo · Notion · Reminders · Calendar (2026-10-16 owner decision) ----
     def snapshot(self, item):
         """Current state of every source linked to one common work; unreadable parts are None."""
+        import work_policy
+        item=work_policy.permitted(item)
         snap = {'notion': None, 'todo': {}, 'calendar': {}}
         pages = [r['external_id'] for r in item.get('knowledge_refs', []) if r.get('ref_type') == 'notion_page']
         if len(pages) == 1:
@@ -890,11 +893,16 @@ class Sync:
                     AND EXISTS (SELECT 1 FROM source_links s WHERE s.common_id=common_work.common_id AND s.domain='calendar')
                     AND NOT EXISTS (SELECT 1 FROM source_links s WHERE s.common_id=common_work.common_id AND s.domain='notes')
                     AND NOT EXISTS (SELECT 1 FROM knowledge_refs k WHERE k.common_id=common_work.common_id
-                                    AND k.ref_type='notion_page' AND k.unlinked_at IS NULL))
+                                    AND k.ref_type='notion_page' AND k.unlinked_at IS NULL)) OR (
+                    status='completed' AND scope='private' AND reminder_policy='tasks'
+                    AND EXISTS (SELECT 1 FROM source_links s WHERE s.common_id=common_work.common_id
+                                AND s.domain='notes' AND s.source_id LIKE 'obsidian:%'))
             """)]
         errors = []
         for cid in ids:
             item = self.store.get(cid)
+            import work_policy
+            item = work_policy.permitted(item)
             kinds = {s['domain'] for s in item['sources']} | ({'notion'} if any(
                 r.get('ref_type') == 'notion_page' for r in item.get('knowledge_refs', [])) else set())
             if any(s.get('metadata', {}).get('deadline') for s in item['sources']):

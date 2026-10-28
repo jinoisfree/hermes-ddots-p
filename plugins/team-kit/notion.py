@@ -18,11 +18,12 @@ import time
 import threading
 import types
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 import importlib.util
 import os
 import stat
+import sqlite3
 import uuid
 import json
 import mimetypes
@@ -48,6 +49,12 @@ WRITE = SINGLE_WRITE | {"batch", "rollback"}
 MAX_ROWS = 50
 MAX_BLOCKS = 100
 MAX_PARAGRAPHS = 50
+APPEND_CHILDREN_LIMIT = 500
+APPEND_CHILDREN_PAGES = 5
+APPEND_DIAGNOSTICS_BYTES = 128 * 1024
+_BOT_USERS = {}
+_BOT_USERS_LOCK = threading.Lock()
+_APPEND_DIAGNOSTICS_LOCK = threading.Lock()
 _ID = re.compile(r"[0-9a-fA-F]{8}-?[0-9a-fA-F]{4}-?[0-9a-fA-F]{4}-?[0-9a-fA-F]{4}-?[0-9a-fA-F]{12}")
 _SIMPLE = ("title", "rich_text", "number", "select", "status", "multi_select", "date", "checkbox", "people",
            "url", "email", "phone_number")
@@ -63,6 +70,45 @@ class UnknownChange(NotionError):
 
 
 _API = None
+_WORK_POLICY = None
+
+
+def work_scope_guard(args):
+    global _WORK_POLICY
+    if _WORK_POLICY is None:
+        path=Path(__file__).parents[1]/'team-delegation/work_policy.py'
+        if not path.is_file():return
+        spec=importlib.util.spec_from_file_location('_notion_work_policy',path)
+        _WORK_POLICY=importlib.util.module_from_spec(spec);spec.loader.exec_module(_WORK_POLICY)
+    if reason:=_WORK_POLICY.notion_problem(args):raise NotionError(reason)
+
+
+def work_block_scope(home,args,opener):
+    """A raw block ID has no publication scope. Prove membership from a known shared page first."""
+    if Path(home).name!='work-assistant' or args.get('action')!='api':return
+    block_id=(args.get('params') or {}).get('block_id')
+    if not block_id:return
+    pages=_WORK_POLICY.shared_pages(args.get('common_id')) if _WORK_POLICY else []
+    if not pages:raise NotionError('WORK_SCOPE_CONTEXT_REQUIRED: 블록 API에는 공용 업무 common_id가 필요하다.')
+    wanted=object_id(block_id)
+    if any(object_id(page)==wanted for page in pages):return
+    seen=set();queue=list(pages)
+    while queue and len(seen)<10000:
+        parent=queue.pop()
+        if parent in seen:continue
+        seen.add(parent);cursor=None
+        while True:
+            path=f'blocks/{parent}/children?page_size=100'+('&start_cursor='+urllib.parse.quote(cursor,safe='') if cursor else '')
+            result=request(home,'GET',path,opener=opener)
+            for child in result.get('results') or []:
+                if child.get('archived') or child.get('in_trash'):continue
+                identifier=child.get('id')
+                if identifier and object_id(identifier)==wanted:return
+                if identifier and child.get('has_children'):queue.append(identifier)
+            if not result.get('has_more'):break
+            cursor=result.get('next_cursor')
+            if not cursor:raise NotionError('WORK_SCOPE_BLOCK_MEMBERSHIP_UNVERIFIED')
+    raise NotionError('WORK_SCOPE_BLOCK_OUTSIDE_SHARED_WORK')
 
 
 def api_module():
@@ -118,6 +164,7 @@ def _http_open(call, timeout):
 
 
 def request(home: Path, method: str, path: str, body: Any = None, *, opener: Any = None, timeout: int = 20, content_type: str | None = None, version: str | None = None) -> dict:
+    work_scope_guard({'path':path,'body':body if not isinstance(body,bytes) else None})
     secret = token(home)
     if not secret:
         raise NotionError("the Notion token is missing from this profile")
@@ -646,6 +693,10 @@ def handle(config: Any, home: Path, args: dict[str, Any], opener: Any = None, fi
 
     if not enabled(config):
         return error("Notion is not enabled for this profile")
+    try:
+        work_scope_guard(args)
+        work_block_scope(home,args,opener)
+    except (NotionError,sqlite3.Error,OSError) as exc:return error(str(exc))
     if args.get('action') in ('api', 'api_help'):
         try:
             return json.dumps(api_module().handle(api_context(), config, home, args, files_config, opener, chat, require_snapshot), ensure_ascii=False)
@@ -770,6 +821,7 @@ SCHEMA = {
         "query": {"type": "string"}, "title": {"type": "string"},
         "operations": {"type": "array", "minItems": 1, "maxItems": 10, "items": {"type": "object"}, "description": "Existing create/update/append/edit/trash arguments, in order; no nested batch."},
         "key": {"type": "string", "description": "Return the rollback preview key only after the user confirms."},
+        "common_id": {"type":"string","description":"연결 업무의 공통 ID. private 업무는 노션 조회·생성·수정·파일 첨부가 거부된다."},
         "replace_all": {"type": "boolean", "description": "update only: explicit full rewrite authorized by the user for this item; never bypass a preservation refusal."},
         "seen_last_edited": {"type": "string", "description": "page/query last_edited; required for plaintext update of nonempty text, optional for partial update/append/edit/trash."},
         "properties": {"type": "object", "description": "Property name to plain value."},
@@ -1374,6 +1426,188 @@ def verification(home, page_id, expected, block_ids, opener, *, new_page=False, 
     return result
 
 
+def append_children_snapshot(home, page_id, opener):
+    """A complete, bounded DIRECT-child list, or None. Never retries a read or a write."""
+    children = []; ids = set(); cursors = set(); cursor = None
+    try:
+        for _ in range(APPEND_CHILDREN_PAGES):
+            path = f'blocks/{page_id}/children?page_size=100'
+            if cursor: path += '&start_cursor=' + urllib.parse.quote(cursor, safe='')
+            response = request(home, 'GET', path, opener=opener)
+            rows = response.get('results')
+            if not isinstance(rows, list) or len(children) + len(rows) > APPEND_CHILDREN_LIMIT:
+                return None
+            for block in rows:
+                if (not isinstance(block, dict) or not isinstance(block.get('type'), str)
+                        or not block['type'] or block.get('archived') or block.get('in_trash')):
+                    return None
+                ident = object_id(block['id'])
+                if ident in ids: return None
+                if block.get('parent') and _parent_id(block['parent']) not in {('pages', page_id), ('blocks', page_id)}:
+                    return None
+                ids.add(ident); children.append({**block, 'id': ident})
+            if response.get('has_more') is False:
+                return children if response.get('next_cursor') is None else None
+            if response.get('has_more') is not True: return None
+            cursor = response.get('next_cursor')
+            if not isinstance(cursor, str) or not cursor or cursor in cursors: return None
+            cursors.add(cursor)
+    except (NotionError, KeyError, TypeError, ValueError):
+        return None
+    return None
+
+
+def appended_children_proof(home, page_id, before, blocks, after_id, opener, observed=None):
+    """Prove one contiguous insertion while every old sibling keeps its position/order.
+
+    Matching content as well as type avoids attributing an unrelated same-size edit
+    to this PATCH. Media identities cannot be proved from transformed upload objects.
+    """
+    if before is None: return None
+    after = append_children_snapshot(home, page_id, opener)
+    if observed is not None: observed.append(after)
+    return append_insertion_proof(before, after, blocks, after_id)
+
+
+def append_insertion_proof(before, after, blocks, after_id, *, media=False):
+    if before is None or after is None: return None
+    old_ids = [b['id'] for b in before]; old = set(old_ids)
+    new = [b for b in after if b['id'] not in old]
+    if len(new) != len(blocks) or [b['id'] for b in after if b['id'] in old] != old_ids:
+        return None
+    if after_id is not None and after_id not in old: return None
+    at = old_ids.index(after_id) + 1 if after_id is not None else len(old_ids)
+    ids = [b['id'] for b in new]
+    if [b['id'] for b in after] != old_ids[:at] + ids + old_ids[at:]: return None
+    if not all(append_content_matches(given, actual, media=media) for given, actual in zip(blocks, new)):
+        return None
+    return ids
+
+
+def append_content_matches(given, actual, *, media=False):
+    try:
+        kind = given['type']
+        if actual['type'] != kind: return False
+        if kind == 'divider': return True
+        if kind in ATTACH_BLOCKS:
+            return media and isinstance(actual.get(kind), dict) and actual[kind].get('type') in {'file', 'external', 'file_upload'}
+        if kind not in TEXT_BLOCKS or comparable_block(block_value(given)) != comparable_block(block_value(actual)):
+            return False
+        if kind == 'callout' and given[kind].get('icon') != actual[kind].get('icon'): return False
+        return not given[kind].get('children') or actual.get('has_children') is True
+    except (NotionError, KeyError, TypeError, ValueError):
+        return False
+
+
+def append_bot_user(home, opener):
+    # Token-scoped, short-lived cache: a credential rotation never reuses another bot ID.
+    key = (str(Path(home).resolve()), hashlib.sha256(token(home).encode()).hexdigest())
+    with _BOT_USERS_LOCK:
+        cached = _BOT_USERS.get(key)
+        if cached and time.monotonic() - cached[0] < 300: return cached[1]
+        user = request(home, 'GET', 'users/me', opener=opener)
+        if user.get('object') != 'user' or user.get('type') != 'bot': return None
+        ident = object_id(user['id'])
+        if len(_BOT_USERS) >= 32: _BOT_USERS.pop(next(iter(_BOT_USERS)))
+        _BOT_USERS[key] = (time.monotonic(), ident)
+        return ident
+
+
+def append_created_at(block):
+    value = datetime.fromisoformat(block['created_time'].replace('Z', '+00:00'))
+    if value.tzinfo is None: raise ValueError('creation time has no timezone')
+    return value.timestamp()
+
+
+def response_prefix_proof(home, page_id, before, observed, blocks, after_id, response, started, ended, opener):
+    """Fail closed unless the returned prefix is fresh, owned, and unambiguous.
+
+    A complete old snapshot can rule out existing IDs; otherwise every returned
+    trailing sibling and the insertion anchor must predate the entire PATCH minute.
+    Incomplete response pages or same-minute trailing edits cannot establish ownership.
+    """
+    try:
+        rows = response['results']; count = len(blocks)
+        if not count or not isinstance(rows, list) or len(rows) <= count: return None
+        if response.get('has_more') is not False or response.get('next_cursor') is not None: return None
+        ids = [object_id(b['id']) for b in rows]
+        if len(set(ids)) != len(ids) or page_id in ids: return None
+        prefix = ids[:count]; old = {b['id'] for b in before or []}
+        if old.intersection(prefix): return None
+        # Do not override a complete diff that disproved the insertion or failed to read.
+        if before is not None:
+            structural = append_insertion_proof(before, observed[-1] if observed else None, blocks, after_id, media=True)
+            if structural != prefix: return None
+        bot = append_bot_user(home, opener)
+        if bot is None: return None
+        minute = started // 60 * 60
+        def direct(block, ident):
+            return (object_id(block['id']) == ident and not block.get('archived') and not block.get('in_trash')
+                    and _parent_id(block.get('parent')) in {('pages', page_id), ('blocks', page_id)})
+        for given, ident, returned in zip(blocks, prefix, rows):
+            actual = request(home, 'GET', 'blocks/' + ident, opener=opener)
+            if (not direct(actual, ident) or not minute <= append_created_at(actual) <= ended
+                    or object_id(actual['created_by']['id']) != bot
+                    or not append_content_matches(given, actual, media=True)
+                    or not append_content_matches(given, returned, media=True)):
+                return None
+        if after_id is not None and after_id not in old:
+            anchor = request(home, 'GET', 'blocks/' + after_id, opener=opener)
+            if not direct(anchor, after_id) or append_created_at(anchor) >= minute: return None
+        # Check the first trailing sibling by GET, the rest from full response metadata.
+        # Requiring old timestamps (not merely < PATCH seconds) rejects minute-rounded ambiguity.
+        for index, (ident, returned) in enumerate(zip(ids[count:], rows[count:])):
+            if ident in old: continue
+            actual = request(home, 'GET', 'blocks/' + ident, opener=opener) if index == 0 else returned
+            if not direct(actual, ident) or append_created_at(actual) >= minute: return None
+        return prefix
+    except (NotionError, KeyError, TypeError, ValueError, AttributeError, OverflowError):
+        return None
+
+
+def append_diagnostic(home, *, count, returned, after, method, ok, gets, elapsed):
+    """Bounded private telemetry; never includes content, object IDs, titles, or errors."""
+    record = {'at': datetime.now(timezone.utc).isoformat(), 'requested_count': count,
+              'response_count': returned, 'after': after, 'method': method, 'result': 'done' if ok else 'unknown',
+              'extra_gets': gets, 'elapsed_ms': round(elapsed * 1000)}
+    line = (json.dumps(record, separators=(',', ':')) + '\n').encode()
+    try:
+        with _APPEND_DIAGNOSTICS_LOCK:
+            home_fd = os.open(home, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+            try:
+                try: os.mkdir('state', 0o700, dir_fd=home_fd)
+                except FileExistsError: pass
+                directory = os.open('state', os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=home_fd)
+            finally: os.close(home_fd)
+            try:
+                lock = os.open('notion-append-diagnostics.lock', os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600, dir_fd=directory)
+                try:
+                    fcntl.flock(lock, fcntl.LOCK_EX)
+                    try: source = os.open('notion-append-diagnostics.jsonl', os.O_RDONLY | os.O_NOFOLLOW, dir_fd=directory)
+                    except FileNotFoundError: previous = b''
+                    else:
+                        with os.fdopen(source, 'rb') as stream:
+                            size = stream.seek(0, os.SEEK_END); offset = max(0, size - APPEND_DIAGNOSTICS_BYTES)
+                            stream.seek(offset)
+                            if offset: stream.readline()
+                            previous = stream.read(APPEND_DIAGNOSTICS_BYTES)
+                    content = previous + line
+                    while len(content) > APPEND_DIAGNOSTICS_BYTES:
+                        content = content.partition(b'\n')[2]
+                    temporary = 'notion-append-diagnostics.tmp-' + uuid.uuid4().hex
+                    try:
+                        fd = os.open(temporary, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW, 0o600, dir_fd=directory)
+                        with os.fdopen(fd, 'wb') as stream: stream.write(content)
+                        os.replace(temporary, 'notion-append-diagnostics.jsonl', src_dir_fd=directory, dst_dir_fd=directory)
+                    finally:
+                        try: os.unlink(temporary, dir_fd=directory)
+                        except FileNotFoundError: pass
+                finally: os.close(lock)
+            finally: os.close(directory)
+    except OSError:
+        pass  # Telemetry failure never replays or changes the result of a mutation.
+
+
 def execute_change(config, home, op, plan, files_config, opener, persist=lambda inverse: None):
     action = op['action']; page_id = plan['page_id']; ids = []
     if action in ('create', 'append'):
@@ -1395,14 +1629,37 @@ def execute_change(config, home, op, plan, files_config, opener, persist=lambda 
         inverse = {'action': 'update', 'page_id': page_id, 'before': plan['before'], 'before_raw': plan['before_raw'],
                    'after': plan['body']['properties']}
     elif action == 'append':
-        response = request(home, 'PATCH', f'blocks/{page_id}/children', {'children': blocks, **({'after': object_id(op['after'])} if 'after' in op else {})}, opener=opener)
+        after_id = object_id(op['after']) if 'after' in op else None
+        measured = time.monotonic(); gets = 0
+        def read_opener(call, timeout):
+            nonlocal gets
+            if call.get_method() == 'GET': gets += 1
+            return (opener or _http_open)(call, timeout=timeout)
+        before = append_children_snapshot(home, page_id, read_opener)
+        started = time.time()
+        response = request(home, 'PATCH', f'blocks/{page_id}/children', {'children': blocks, **({'after': after_id} if after_id is not None else {})}, opener=opener)
+        ended = time.time()
         returned = response.get('results', [])
         ids = [object_id(b['id']) for b in returned if b.get('id')]
+        response_count = len(ids)
         result = {'ok': True, 'appended': len(returned), 'images_attached': image_count(op)}
         inverse = {'action': 'append', 'page_id': page_id, 'block_ids': ids}
         if len(ids) != len(blocks):
-            inverse['incomplete'] = True
-            result.update(ok=False, status='unknown', error='추가 블록 ID 응답이 불완전합니다. 자동 재시도하지 마세요.')
+            observed = []; method = 'children_diff'
+            proven = appended_children_proof(home, page_id, before, blocks, after_id, read_opener, observed)
+            if proven is None and len(ids) > len(blocks) and (before is None or any(b['type'] in ATTACH_BLOCKS for b in blocks)):
+                method = 'response_prefix'
+                proven = response_prefix_proof(home, page_id, before, observed, blocks, after_id, response, started, ended, read_opener)
+            if proven is not None:
+                ids = proven
+                inverse['block_ids'] = ids
+                result.update(appended=len(ids), verification={'method': method, 'block_ids': ids})
+            else:
+                inverse['incomplete'] = True
+                result.update(ok=False, status='unknown', error='추가 블록 ID 응답이 불완전합니다. 자동 재시도하지 마세요.')
+            append_diagnostic(home, count=len(blocks), returned=response_count,
+                              after=after_id is not None, method=method if proven is not None else 'none',
+                              ok=result['ok'], gets=gets, elapsed=time.monotonic() - measured)
     else:
         response = request(home, 'PATCH', 'pages/' + page_id, {'archived': True}, opener=opener)
         if not response.get('id'): raise UnknownChange('Trash response ID missing; whether a change landed is unknown')
@@ -1459,8 +1716,8 @@ def change(config, home, args, files_config, opener):
                     entry['operations'][-1] = inverse
                     if inverse['action'] == 'edit' and not inverse['blocks']: entry['operations'].pop()
                     save()
-                result['verification'] = verification(home, page_id, plan.get('body', {}).get('properties', {}), ids, opener,
-                    new_page=op['action'] == 'create', block_count=len(op.get('paragraphs') or []), images=image_count(op))
+                result['verification'] = {**result.get('verification', {}), **verification(home, page_id, plan.get('body', {}).get('properties', {}), ids, opener,
+                    new_page=op['action'] == 'create', block_count=len(op.get('paragraphs') or []), images=image_count(op))}
                 if op['action'] == 'edit':
                     verified, fingerprints = verify_edits(home, plan, result['edited'], opener)
                     result['verification']['edited_blocks'] = verified
@@ -1597,6 +1854,8 @@ def rollback(config, home, args, opener, *, chat=None, require_snapshot=False):
                             details.append({'block_id': ident, 'status': 'failed', 'reason': str(exc)})
                         save()
                 elif action == 'append':
+                    if op.get('incomplete'):
+                        raise NotionError('추가 블록 ID 응답이 불완전하여 자동 복원할 수 없습니다. 원본을 확인해야 합니다.')
                     for ident in list(reversed(op['block_ids'])):
                         try:
                             try: block = request(home, 'GET', 'blocks/' + ident, opener=opener)
@@ -1615,8 +1874,6 @@ def rollback(config, home, args, opener, *, chat=None, require_snapshot=False):
                         except NotionError as exc:
                             details.append({'block_id': ident, 'status': 'failed', 'reason': str(exc)})
                         save()
-                    if op.get('incomplete'):
-                        details.append({'status': 'failed', 'reason': '추가 블록 ID 응답이 불완전하여 나머지는 자동 복원할 수 없습니다.'})
                 else:
                     current = request(home, 'GET', 'pages/' + page_id, opener=opener)
                     desired = action == 'create'

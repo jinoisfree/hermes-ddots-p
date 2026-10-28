@@ -285,7 +285,8 @@ def _ensure(home, args, config, *, native=None, now=None):
             else:
                 sources = [{'domain': 'todo', 'source_id': rid, 'metadata': metadata}]
                 if kind == 'notes': sources.append({'domain': 'notes', 'source_id': source['id']})
-                item = native.store.create(title=task, sources=sources, link_reason='approved_mutation')
+                item = native.store.create(title=task, sources=sources, link_reason='approved_mutation',
+                                           scope='shared' if source['kind']=='notion' else 'private')
             if kind in {'notion', 'gmail'}:
                 ref = 'notion_page' if kind == 'notion' else 'gmail_message'
                 if not any(r['ref_type'] == ref and

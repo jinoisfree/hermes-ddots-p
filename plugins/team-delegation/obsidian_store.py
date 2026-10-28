@@ -175,19 +175,21 @@ class Store:
     def snapshot(self,sid,f,text):
         meta,body=split(text);body=MARK.sub('',body).strip()
         html=rendered(f.stem,body)
-        assets=[]
+        assets=[];missing=[]
         links=re.findall(r'(?:src|href)=[\"\']([^\"\']+)[\"\']',body)
-        links+=re.findall(r'!?\[[^\]\n]*\]\(([^)]+)\)',body)
+        links+=re.findall(r'!?\[(?:\\.|[^\]\\\n])*\]\(([^)]+)\)',body)
         for target in links:
             if urlparse(target).scheme:continue
             asset=(f.parent/unquote(target)).resolve()
             if not asset.is_relative_to(self.root):continue
             self.path(asset.relative_to(self.root),system=True)
             if asset.is_file():assets.append(str(asset))
+            else:missing.append(str(asset))
         assets=list(dict.fromkeys(assets))
         return {'note_id':sid,'title':f.stem,'path':str(f.relative_to(self.root)),'folder':str(f.parent.relative_to(self.root)),
                 'markdown':body,'full_text':text,'properties':meta,'revision':digest(text),'body_html':html,
                 'plaintext':plain(html),'attachment_names':[Path(x).name for x in assets],'attachment_paths':assets,
+                'missing_attachment_paths':list(dict.fromkeys(missing)),
                 'url':self.url(f.relative_to(self.root)),'backend':'obsidian'}
 
     def all(self):
@@ -240,7 +242,7 @@ class Store:
                     asset=(previous.parent/unquote(link)).resolve()
                     if not asset.is_relative_to(self.root):raise ValueError('OBSIDIAN_ATTACHMENT_OUTSIDE_VAULT')
                     return m[1]+quote(os.path.relpath(asset,target.parent),safe='/')+')'
-                body=re.sub(r'(!?\[[^\]\n]*\]\()([^)]+)\)',relocate,body)
+                body=re.sub(r'(!?\[(?:\\.|[^\]\\\n])*\]\()([^)]+)\)',relocate,body)
             text=pack(meta,body,sid)
             record={'id':sid,'before_path':str(previous.relative_to(self.root)) if previous else None,
                     'before':old[1] if old else None,'after_path':str(rel),'after_hash':digest(text),'at':stamp(),'status':'pending'}

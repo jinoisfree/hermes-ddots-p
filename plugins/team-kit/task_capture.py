@@ -5,18 +5,23 @@ import sqlite3
 
 DESTINATIONS = ('노션', '일정', '메모')
 DIRECT = {'task_reminders_sync', 'notion', 'knowledge_ref_link', 'knowledge_ref_get', 'apple_notes_direct_lookup', 'reminders_direct_lookup'}
-NOTE = """[업무비서 할 일 등록 — 소유자 결정 2026-10-24]
-메모 [ ]·노션 to_do는 메일·소유자 원문에 우리측(파이헬스케어/소유자)에게 명시적으로 요청된 행동이나 소유자 지정 항목만 만들며, 안내·상대측 할 일·추론한 준비/후속 조치는 체크 없는 정보로 두고 애매하면 답변 끝에 '할 일 후보(미생성)'로만 보고한 뒤 소유자 지시 때 추가하며 기존 할 일·미리알림은 자동 삭제하지 않는다.
-소유자가 할 일/업무 등록·추가·만들기·저장을 시키고 만들 곳을 말하지 않았으면, 제목·정확한 마감·세부 내용을 정리해 보여주고 마지막 줄에 [[체크: 전체 | 노션 | 일정 | 메모]]를 붙인다. 그 전에는 원본을 만들지 않는다. 이는 업무비서 등록 흐름 전용이고 다른 조직원에게 이 체크리스트를 붙이지 않는다. 이미 노션/일정/메모 중 만들 곳을 말했으면 다시 묻지 않고 지정한 곳만 진행한다.
-Slack과 desktop-pet 모두 가로 선택 토글 버튼(☐/✅)과 작성·건너뛰기 버튼이다. 체크리스트 글에 소유자가 '건너뛰기'라고 답하면 선택 상태와 무관하게 아무것도 만들지 않으며 등록 승인으로 보지 않는다. 메일 알림이면 해당 알림의 메일 ID만 gmail_direct(action=ack)로 처리하고 report_status(done)로 초록 종결한다. 일반 할 일 등록이면 생성하지 않았다고 짧게 답하고 종결한다. 실패한 ack·종결은 완료로 보고하지 않는다. '선택: 노션, 일정', '노션 일정', '전체' 같은 글 답장도 같은 선택이다. 전체는 노션·일정·메모 전부다. 최근 같은 스레드의 등록 초안을 기준으로 선택한 곳만 한 번씩 만들며 제목·마감·세부가 없으면 먼저 확인한다. 확인하지 못한 시각을 만들지 않는다.
-선택 후 A가 team_work(start) 없이 조회 → 묶음 작성 → 노션 작성 → 연결까지 같은 턴에 처리하고 보고한다. 선택한 일정·메모만 personal_work_bundle(task_capture=true)로 만들고 반환된 common_id를 재사용한다. 노션 작성·연결까지 마친 다음 task_reminders_sync(common_id=..., due=등록 초안의 마감)를 즉시 호출해 할 일마다 그 할 일 마감 당일 미리알림을 하나씩 만든다. 일정만 선택해 노션·메모가 없어도 같은 도구가 초안 마감(없으면 일정 날짜)으로 업무 미리알림 하나를 만든다. 마감이 없으면 due를 생략한다. 같은 등록 묶음에 todo create를 넣지 않아 중복 생성하지 않는다. 종일 일정 생성은 alarms=[]로 캘린더 기본 알림을 비운다. 메모 속 할 일이 세 개이고 마감이 각각이면 미리알림도 세 개다. 미리알림 due와 알림 시각은 실제 마감과 같고 날짜만 있으면 날짜만 쓴다. D-7/3/1 등 분할 준비 알림은 만들지 않는다. 기존 미리알림을 먼저 조회하고 완료된 항목도 중복 생성하지 않는다. 같은 공통 업무의 정확한 기존 미리알림은 common_id와 existing_sources로 재사용하고 선택한 다른 원본만 추가한다. 완료됐거나 미연결·다른 업무이면 중단해 보고한다. 전부 이미 있으면 다시 만들지 않고 보고한다.
-노션을 골랐으면 기존 notion 도구로 전략기획실 업무 DB에 각 할 일을 to_do 블록으로, 각 마감은 그 할 일의 본문에 명시해 한 번 만들고 knowledge_ref_link(ref_type=notion_page, relation_type=documented_by, link_reason=verified_workflow_evidence, receipt_id=실제 생성 결과의 ID)로 같은 common_id에 연결한다. 노션만 골랐고 마감도 없어 묶음이 비었으면 knowledge_ref_link에 common_id를 생략하고 new_work_title=등록 제목으로 노션만 가진 공통 업무를 만든다. 선택하지 않은 메모·일정을 대신 만들지 않는다.
-부분 성공이면 성공한 ID·링크를 보존하고 실패한 단계만 보고한다. 불명확한 쓰기는 조회로 확인하기 전 재실행하지 않는다. 승인·원본 범위 검사는 도구의 기존 경계를 그대로 따른다. 이 지침은 예약·배경 쓰기를 허용하지 않는다."""
+NOTE = """[업무비서 업무 등급제 — 소유자 결정 2026-10-28]
+회사 업무의 공개 등급 scope=private/shared는 개인비서의 개인 계정 범위(personal_scopes)와 별개다.
+메모 [ ]·노션 to_do·미리알림은 원문에 우리측에 명시적으로 요청된 행동 또는 소유자가 지정한 항목만 만든다. 안내·상대측 할 일·추론한 준비는 체크 없는 정보로 두고 애매하면 할 일 후보(미생성)로 보고한다.
+새 업무 제안은 한 메시지에 제목·할 일·마감·출처와 'lv1 = 개인(Obsidian→미리알림), lv2 = 공용(노션+Obsidian→미리알림), 일정은 체크하면 함께 생성'을 쓰고 마지막 줄 [[체크: 일정 | 제출: lv1 | lv2 | 확인]]을 단다. 이미 lv1/개인/비공개 또는 lv2/공용/공유를 말했으면 다시 묻지 않는다. 일정은 함께 지시한 경우만 만든다. 체크 없는 확인=건너뛰기, 일정 체크+확인=일정만이며 노션·메모·미리알림은 없다. 건너뛰기는 아무것도 만들지 않고 해당 메일 ID만 ack한 뒤 report_status(done)로 종결한다.
+선택 후 personal_work_bundle(capture={title,body,tasks:[{text,due?,done?,due_evidence?:날짜 원문 발췌,evidence:원문 발췌}],source:{text,account,message_id,thread_id?,rfc_id?,subject,url?,attachment_names?},attachments?:다운로드 경로,calendar?:{start,end,evidence,start_evidence?,end_evidence?,location?}}) 한 번으로 생성·공통 ID 연결·미리알림을 마친다. 이 capture에는 operations나 별도 노션/미리알림 생성을 섞지 않는다. 원문·기존 업무를 먼저 읽고 task evidence에는 실제 발췌를 넣는다. partial/uncertain이면 성공한 ID와 journal_key를 보존하고 불명확 쓰기를 재실행하지 않는다.
+lv1은 Obsidian pie1과 Hermes 미리알림, lv2는 전략기획실 업무 DB 노션과 Obsidian 및 노션 기준 미리알림이다. private 업무의 노션 생성·연결·조회·수정·첨부는 도구 계층에서 거부된다. 개인 업무는 미리알림의 제목·마감·완료를 Obsidian 할 일에 역반영하며 같은 구간 충돌은 Obsidian 우선, 삭제는 전파하지 않는다. 공용 미리알림 제목·마감 수정은 관리 제외하고 완료만 역반영한다.
+선택: lv1, 일정 / 선택: lv2 / 선택: 일정 / 건너뛰기를 그대로 해석한다. 회사 캘린더는 소유자 본인만 보므로 개인+일정에도 기존 제목·할 일·마감·완료 동기화 규칙을 적용한다. 메일에서 명확히 확인한 시작·끝만 calendar에 넣고 불명확하면 일정은 만들지 않고 이유를 보고한다. 연도 없는 날짜는 KST 올해, 날짜만 있으면 시각을 만들지 않으며 D-7/3/1 준비 알림은 없다. 이번 일정만 업무는 미리알림 제외 표식을 가지며 기존 일정 전용 업무의 동작은 유지한다.
+등급 전환은 personal_work_bundle(scope_change={common_id,scope})로 미리보기와 버튼을 받은 뒤 같은 소유자·스레드에서 그 버튼을 누르면 token을 함께 넘긴다. 개인→공용은 제목·할 일·마감만 공개(본문·첨부 제외), 공용→개인은 공개 철회 불가 경고 뒤 연결만 끊고 페이지는 삭제하지 않는다. 예약·배경 쓰기 거부·기존 수정/삭제/발송 승인 경계는 유지한다.
+"""
 
 
 def selection(text):
     value = str(text or '').strip().removeprefix('선택:').strip()
+    value=re.sub(r'비공개|개인으로|개인|private','lv1',value,flags=re.I)
+    value=re.sub(r'공용으로|공용|공유|shared','lv2',value,flags=re.I)
     pieces = [v for v in re.split(r'[,\s]+', value) if v]
+    if pieces and all(v in {'lv1','lv2','일정'} for v in pieces):return pieces
     if not pieces or any(v not in {'전체', *DESTINATIONS} for v in pieces):
         return None
     return list(DESTINATIONS) if '전체' in pieces else [v for v in DESTINATIONS if v in pieces]
@@ -34,7 +39,7 @@ def active(home, text, session_id=''):
     try:
         with sqlite3.connect(db.as_uri() + '?mode=ro', uri=True) as conn:
             row = conn.execute("SELECT content FROM messages WHERE session_id=? AND role='assistant' AND content IS NOT NULL ORDER BY id DESC LIMIT 1", (session_id,)).fetchone()
-        return bool(row and '[[체크: 전체 | 노션 | 일정 | 메모]]' in row[0])
+        return bool(row and any(marker in row[0] for marker in ('[[체크: 전체 | 노션 | 일정 | 메모]]','[[체크: 일정 | 제출:')))
     except sqlite3.Error:
         return False
 
@@ -45,5 +50,3 @@ def allowed(tool, args):
     if tool == 'knowledge_ref_link':
         return args.get('ref_type') == 'notion_page'
     return True
-
-NOTE += "\n연도 없는 M/D·M.D·M월 D일은 KST 올해다. 지난 날짜면 past_due로 보고하고 다음 해로 미루지 않는다. 7일 제한은 없다. 작성을 누르거나 같은 선택을 글로 답하면 이번 등록 계획의 승인이다. 생성 뒤 다시 승인받지 않는다. 기존 항목 변경·삭제·메일 발송이 같은 요청에 있으면 첫 승인에 request_plan 전체를 보여주고 계획 안 쓰기는 다시 묻지 않는다."

@@ -324,6 +324,7 @@ def install(td):
         if config(td) is None or current(td) not in OWNERS:return original_bundle(args, **context)
         try:
             if problem := role_problem(td, 'personal_work_bundle', args):raise ValueError(problem)
+            if 'capture' in args or 'scope_change' in args:return original_bundle(args,**context)
             normalized = td._normalize_personal_bundle_args(args)
             operations, _, error = td._validate_bundle(normalized)
             if error:raise ValueError(error)

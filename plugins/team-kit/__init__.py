@@ -668,6 +668,13 @@ def _work_ended(**context):
             _LEARNING.extension("location_context").discard(Path(get_hermes_home()), context.get("turn_id", ""))
 
 
+def _work_output(response_text="", **context):
+    if _LEARNING is not None:
+        from hermes_constants import get_hermes_home
+        return _LEARNING.extension("work_runtime").halt_response(
+            Path(get_hermes_home()), response_text=response_text, **context)
+
+
 def _work_api(**context):
     if _LEARNING is not None:
         from hermes_constants import get_hermes_home
@@ -1203,6 +1210,7 @@ def register(ctx) -> None:
         if location_enabled:
             location.register_privacy()
         if work.settings(home, learning):
+            ctx.register_hook("transform_llm_output", _work_output)
             ctx.register_tool(name="team_work", toolset="team-kit", schema=work.SCHEMA,
                               handler=partial(work.handle, home, learning=learning),
                               description="Handoff, checkpoint and resume the owner's work.", emoji="🧭")

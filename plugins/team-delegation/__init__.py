@@ -39,9 +39,9 @@ except ImportError:
 
 
 try:
-    from . import deadline_time, task_reminders_sync, request_approvals, mail_work, google_reauth, gmail_extra, full_mail_tools
+    from . import deadline_time, task_reminders_sync, request_approvals, mail_work, google_reauth, gmail_extra, full_mail_tools, work_capture
 except ImportError:
-    import deadline_time, task_reminders_sync, request_approvals, mail_work, google_reauth, gmail_extra, full_mail_tools
+    import deadline_time, task_reminders_sync, request_approvals, mail_work, google_reauth, gmail_extra, full_mail_tools, work_capture
 
 
 # The profile that owns personal work: calendar, reminders, notes, mail and message lookups.
@@ -1657,6 +1657,12 @@ def _personal_mutation_approval_single(
             and personal_scopes.config(sys.modules[__name__]) is not None):
         return None
     if tool_name == "personal_work_bundle":
+        if 'capture' in args or 'scope_change' in args:
+            try:
+                if not _task_capture_owner_chat():raise ValueError('WORK_CAPTURE_OWNER_CHAT_REQUIRED')
+                if 'capture' in args:work_capture.authorized(sys.modules[__name__])
+                return None
+            except ValueError as exc:return {'action':'block','message':str(exc)}
         approved_args = _normalize_personal_bundle_args(args)
         if _bundle_completes(approved_args):
             return None  # finishes the Common ID like common_work_complete, which needs no approval
@@ -4545,6 +4551,10 @@ class NoteAttachmentsNotPreserved(ValueError):
 def _preserve_note_context(
     note_id: str, attachments: list[str], original_text: str, runner: Any, *, reuse_source: bool = False,
 ) -> tuple[list[str], str]:
+    if obsidian_notes.handles(note_id):
+        # Obsidian preserves its own source and attachments during mutate; Apple caches are unrelated.
+        row = obsidian_notes.disk.Store().read(note_id)
+        return list(dict.fromkeys([*obsidian_notes.preserved_attachments(row), *attachments])), original_text
     records = _read_note_context()
     saved = records.get(note_id) or {}
     plaintext = ""
@@ -4578,8 +4588,9 @@ def _preserve_note_context(
                 attachments = _export_note_attachments(note_id, runner, str(snapshot.get("body_html") or "")) or []
         if not attachments and "원문 첨부파일" in plaintext:
             raise NoteAttachmentsNotPreserved(
-                "APPLE_NOTES_ATTACHMENTS_NOT_PRESERVED: 첨부 원본을 찾지 못해 메모 수정을 중단했다. "
-                "사용자에게 알리고 attachments로 원본 파일을 다시 넘겨야 한다."
+                "APPLE_NOTES_ATTACHMENTS_NOT_PRESERVED: Apple 메모 첨부 원본을 찾지 못해 수정을 중단했다. "
+                "Apple 메모 경로에서만 원본 파일 확보가 필요하다. "
+                "Obsidian 메모는 기존 vault 첨부를 attachments로 다시 넘기지 않는다."
             )
     previous = str(saved.get("original_text") or "")
     if not previous:
@@ -7158,6 +7169,8 @@ PERSONAL_WORK_BUNDLE_SCHEMA = {
     "parameters": {
         "type": "object",
         "properties": {
+            "capture": {"type":"object","description":"업무 등급제 결정적 생성. 현재 소유자 원문의 lv1/개인/비공개 또는 lv2/공용/공유와 일정 선택을 코드가 확인한다. title, body, tasks:[{text,due?,done?,due_evidence?:날짜 원문 발췌,evidence:원문 발췌}], source:{text,account,message_id,thread_id?,rfc_id?,subject,url?,attachment_names?}, attachments?:다운로드 경로, calendar?:{start,end,evidence,start_evidence?,end_evidence?,location?}. 선택이 없으면 일정 체크+lv1/lv2/확인 UI를 먼저 보인다. 생성 후 따로 노션·미리알림을 만들지 않는다."},
+            "scope_change": {"type":"object","description":"업무 등급 전환: common_id, scope(private|shared), token?(미리보기 응답). 먼저 제목·할 일·마감 또는 공개 철회 불가 경고와 버튼을 반환한다. 같은 소유자·스레드의 해당 버튼 답변만 실행한다."},
             "task_capture": {"type": "boolean", "default": False, "description": "업무비서 소유자 대화의 선택 등록. 선택한 새 일정·메모만 작성하고 종일 일정은 alarms=[]로 기본 알림 제거. 이후 task_reminders_sync(common_id, due=초안 마감)로 할 일별 당일 미리알림 관리. D-7/3/1 금지와 완료 포함 중복 검사."},
             "title": {"type": "string", "minLength": 1},
             "common_id": {
@@ -7976,6 +7989,12 @@ def _bundle_completion(args: dict[str, Any]) -> str | None:
 def _personal_work_bundle(args: dict[str, Any], **context: Any) -> str:
     if error := _personal_owner_error("personal_work_bundle"):
         return error
+    if 'capture' in args or 'scope_change' in args:
+        try:
+            result=(work_capture.create(sys.modules[__name__],args['capture'],native=context.get('capture_native'))
+                    if 'capture' in args else work_capture.transition(sys.modules[__name__],args['scope_change'],native=context.get('capture_native')))
+            return json.dumps(result,ensure_ascii=False)
+        except (ValueError,OSError,sqlite3.Error) as exc:return _error(str(exc),mutation_calls=0)
     normalized_args = _normalize_personal_bundle_args(args)
     if completion := _bundle_completion(normalized_args):
         return completion

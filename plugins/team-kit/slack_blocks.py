@@ -313,6 +313,12 @@ def _actions(labels):
 def apply(body, *, plain=None, update=False):
     """Text body -> Block Kit, plus reply buttons from a trailing ``[[버튼: …]]`` line."""
     if isinstance(body, dict) and isinstance(body.get('text'), str):
+        from plugins.platforms.slack import reply_buttons
+        text,checks=reply_buttons.extract_checklist(body['text'])
+        if checks:
+            out=_apply({**body,'text':text},plain=plain,update=update)
+            blocks,bars=reply_buttons.question_layout(out.get('blocks'),out.get('attachments'),text,checks,checklist=True)
+            return {**out,'blocks':blocks,'attachments':bars}
         text, labels = _split_buttons(body['text'])
         if labels:
             # Owner decision 2026-10-23: a message with buttons is a question to the owner. It is posted

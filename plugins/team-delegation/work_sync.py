@@ -7,6 +7,7 @@ import work_tool_writes
 CONTENT_VERSION = 'work-content-v1'
 SYNCED = ('title', 'tasks')  # 2026-10-27 사용자 결정: bodies differ by format per original and are not synced
 DUE_UNCERTAIN = '• ⚠️ 노션 다음 마감 반영 확인이 필요해 멈췄어요. 자동 재실행하지 않아요.'
+DUE_UNRESOLVED = '• ⚠️ 노션 할 일의 마감 근거를 확인해야 해요. 기간·서로 다른 날짜이거나 지난 다음 마감에 대응하는 미완료 날짜가 없어 자동 변경하지 않았어요.'
 
 
 def due_basis(prop):
@@ -77,6 +78,8 @@ class Engine:
                 content.save(path, state)
                 self.event(cid, {'status': 'due_'+status, 'page': identifier, **pending})
             return [], row
+        if prop and prop.get('problem'):
+            return [DUE_UNRESOLVED], row
         if not prop or prop['wanted'] == prop['page']:
             return [], row
         change = f"노션 다음 마감을 {due_label(prop['page'])} → {due_label(prop['wanted'])}로"
@@ -114,16 +117,21 @@ class Engine:
             return self.due(cid, identifier, row, state, path)[0]
 
     def run(self, item):
+        import work_policy
+        item = work_policy.permitted(item)
         cid, messages = item['common_id'], []
         refs = self.sources.references(item)
+        if item.get('scope') == 'private':refs = [ref for ref in refs if ref[0]!='notion']
         work_deadline = len(refs) == 1 and refs[0][0] == 'calendar'
-        if (item.get('status') != 'active' and not work_deadline) or not refs:
+        import obsidian_store
+        private_tasks=item.get('scope')=='private' and any(kind=='notes' and obsidian_store.is_id(sid) for kind,sid in refs)
+        if (item.get('status') != 'active' and not work_deadline and not private_tasks) or not refs:
             return {'handled': False, 'messages': []}
         authority = getattr(self.sources, 'authority', lambda *_: None)(item, refs)
         refs = content_refs(refs)
         duplicate_domains = len(refs) != len({kind for kind, _ in refs})
         if len(refs) == 1 or duplicate_domains:
-            if self.reminders:
+            if self.reminders and item.get('reminder_policy') != 'none':
                 result = self.reminders(item, self.dry)
                 messages = [f'• 할 일 미리알림 {key}: {len(result[key])}개' for key in
                             ('created', 'moved', 'completed', 'deleted', 'past_due', 'skipped') if result.get(key)]
@@ -270,7 +278,7 @@ class Engine:
                     if kind == 'notion':
                         lines, current['notion|'+identifier] = self.due(cid, identifier, current['notion|'+identifier], state, path)
                         messages += lines
-            if self.reminders:
+            if self.reminders and item.get('reminder_policy') != 'none':
                 result = self.reminders(item, self.dry)
                 for bucket in ('created', 'moved', 'completed', 'deleted', 'past_due', 'skipped'):
                     if result.get(bucket):
