@@ -26,7 +26,7 @@ PERSONAL_WRITES = frozenset({
 })
 CONTACTS_TOOLS = frozenset({'contacts_direct_lookup', 'contacts_direct_mutation'})
 OFFICE_TOOLS = CONTACTS_TOOLS | frozenset({
-    'task_reminders_sync', 'mail_work', 'google_reauth',
+    'task_reminders_sync', 'mail_work', 'google_reauth', 'linked_work_read',
     'skill_view', 'skills_list', 'memory', 'session_search', 'team_learn', 'team_learn_review', 'team_skill_review', 'report_status',
     'team_recall', 'team_project', 'morning_report', 'team_diagnosis_request',
     'read_file', 'search_files', 'file_list', 'folder_scan', 'doc_read', 'pdf_render',

@@ -87,6 +87,7 @@ struct ChatMessage: Identifiable, Equatable {
     var body: String
     var date: Date
     var pending = false
+    var streaming = false
     var sessionID = ""
     var replyInterrupted = false
     var profile: String

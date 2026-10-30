@@ -19,6 +19,7 @@ final class HermesRelayServer {
         var projects: [ThreadProject]?
         var avatars: [String: ProfileAvatar] = [:]
         var usage: RelayUsage?
+        var streams: [StreamPreview]?
         var slack: SlackActivity?
         /// The Slack account whose shared choices this Mac follows, and what of them it already has.
         var syncUser: String?
@@ -36,6 +37,7 @@ final class HermesRelayServer {
     private let syncFolder: URL
     private var syncStores: [String: SettingsStore] = [:]
     private var clients: [Int32: Client] = [:]
+    private var streamTimer: DispatchSourceTimer?
     private var timer: DispatchSourceTimer?
     private let interval: TimeInterval
     private(set) var polls = 0
@@ -94,7 +96,7 @@ final class HermesRelayServer {
         queue.sync {
             listener?.cancel(); listener = nil
             for client in Array(clients.values) { drop(client) }
-            timer?.cancel(); timer = nil
+            timer?.cancel(); timer = nil; streamTimer?.cancel(); streamTimer = nil
         }
     }
 
@@ -134,7 +136,7 @@ final class HermesRelayServer {
         guard clients[client.fd] === client else { return }
         clients[client.fd] = nil
         client.source?.cancel(); client.source = nil
-        if !clients.values.contains(where: \.authorized) { timer?.cancel(); timer = nil }
+        if !clients.values.contains(where: \.authorized) { timer?.cancel(); timer = nil; streamTimer?.cancel(); streamTimer = nil }
     }
     private func send(_ frame: RelayFrame, to client: Client) {
         guard clients[client.fd] === client else { return }
@@ -166,6 +168,10 @@ final class HermesRelayServer {
                 timer.schedule(deadline: .now() + interval, repeating: interval, leeway: .milliseconds(50))
                 timer.setEventHandler { [weak self] in self?.tick() }
                 timer.resume(); self.timer = timer
+                let streamTimer = DispatchSource.makeTimerSource(queue: queue)
+                streamTimer.schedule(deadline: .now(), repeating: .milliseconds(200), leeway: .milliseconds(30))
+                streamTimer.setEventHandler { [weak self] in self?.sendStreams() }
+                streamTimer.resume(); self.streamTimer = streamTimer
             }
             tick()
             return
@@ -271,6 +277,15 @@ final class HermesRelayServer {
             }
             // A quiet line still says it is alive, so the other Mac can tell silence from a dead link.
             if changed || Date().timeIntervalSince(client.lastSent) >= 10 { send(frame, to: client) }
+        }
+    }
+
+    private func sendStreams() {
+        let previews = StreamPreview.read(home: bridge.home)
+        for client in clients.values where client.authorized && client.streams != previews {
+            client.streams = previews
+            var frame = RelayFrame(op: "streams"); frame.streams = previews
+            send(frame, to: client)
         }
     }
 

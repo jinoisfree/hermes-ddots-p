@@ -80,6 +80,7 @@ struct RelayFrame: Codable {
     var receipts: [Receipt]?
     var projects: [ThreadProject]?
     var usage: RelayUsage?
+    var streams: [StreamPreview]?
     var slack: SlackActivity?
     /// Shared screen choices of one Slack account (`sync`), and whether they make the sender's screen the standard.
     var user: String?

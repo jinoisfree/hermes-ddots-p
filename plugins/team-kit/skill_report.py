@@ -320,7 +320,7 @@ def render(day, snap, *, home=None, summarizer=None):
         details += layout.item_messages(f"*스킬 {n}번 · {layout.excerpt(label, 100)}*\n"
                        f"> *무슨 스킬:* {layout.excerpt(what, 180)}\n"
                        f"> *새로 배운 것:* {layout.excerpt(learned, 180)}", "스킬", n)
-    return [layout.summary(title, status, rows, f"모두 배우기=1~{len(snap['learned'])}번 전부 유지 · 롤백=전부 변경 전 복구 · 일부만 배우기=아래 항목 글의 N번만 버튼으로 하나씩") + base.review_buttons(True)] + details
+    return [layout.summary(title, status, rows, base.REVIEW_GUIDE, review=True) + base.review_buttons(True)] + details
 
 
 def merged(home):
@@ -343,6 +343,11 @@ def section(home, now, *, taught=(), summarizer=None):
         taught = set(taught)
         shown = [i for i in snap["learned"] if i["name"] not in taught]
         state = prune(load(home), now)
+        previous = state['reports'].get(now.date().isoformat(), {})
+        if previous.get('parts') and previous.get('merged_into') != 'learning':
+            # A standalone report already owns this day's skill review, including a pending send.
+            # Preserve its receipts and resume it through daily(); never create a second review.
+            return {'head': '*스킬* 기존 스킬 보고 스레드에서 확인', 'details': []}
         state["reports"][now.date().isoformat()] = {
             "day": target.isoformat(), "snapshot": compact_snapshot(snap), "complete": True,
             "merged_into": "learning", "omitted": sorted(taught & {i["name"] for i in snap["learned"]}), "parts": []}
@@ -356,18 +361,18 @@ def section(home, now, *, taught=(), summarizer=None):
         summaries = validate((summarizer or summarize)(home, shown), shown)
     except Exception:
         summaries = {i["name"]: fallback(i) for i in shown}
-    lines, details = [f"{head}\n*어제 바뀐 스킬 {len(shown)}건*{note}"], ["*스킬 변경 자세히*"]
+    lines, details = [f"{head}\n*어제 바뀐 스킬 {len(shown)}건*{note}"], []
     for n, item in enumerate(shown, 1):
         label, row = f"{item['name']} · {item['change']}", summaries[item["name"]]
         what, learned = row["what_ko"].replace("~", "∼"), row["learned_ko"].replace("~", "∼")
-        if n <= 5:
+        if n <= 3:
             lines.append(f"• {layout.excerpt(label, 48)} — {layout.excerpt(learned, 90)}")
         details.extend(layout.item_messages(f"*스킬 {n}번 · {layout.excerpt(label, 100)}*\n"
                        f"> *무슨 스킬:* {layout.excerpt(what, 180)}\n"
                        f"> *새로 배운 것:* {layout.excerpt(learned, 180)}", "스킬", n))
-    if len(shown) > 5:
-        lines.append(f"외 {len(shown) - 5}건은 스레드에서 확인")
-    return {"head": "\n".join(lines), "details": details, "items": shown}
+    if len(shown) > 3:
+        lines.append(f"외 {len(shown) - 3}건은 스레드에서 확인")
+    return {"head": lines[0], "preview": lines[1:4], "details": details, "items": shown}
 
 
 def deliver(home, state, key):
@@ -418,17 +423,22 @@ def daily(home, now=None, *, dry_run=False, summarizer=None):
         return 0
     with learning.locked(path(home)):
         record_midnight(home, now)
-        if (now.hour, now.minute) < _rest_day().start(now, (8, 29)) or merged(home):
-            return 0  # Merged homes: the 08:30 learning report builds the skill section.
+        if (now.hour, now.minute) < _rest_day().start(now, (8, 29)):
+            return 0
         state = prune(load(home), now)
         key = now.date().isoformat()  # Today only: a missed day is not sent late.
+        if merged(home) or Path(home).name == "sns-manager":
+            previous = state['reports'].get(key, {})
+            if previous.get('parts') and not previous.get('complete'):
+                deliver(home, state, key)  # Finish an old standalone report without repacking it.
+            return 0
         if key not in state["reports"]:
             found = skills(home)
             snap = snapshot(home, target, found=found)
             # A standalone report is sent only when skills changed; a quiet day sends nothing.
             parts = render(target, snap, home=home, summarizer=summarizer) if snap["learned"] else []
             state["reports"][key] = {"day": target.isoformat(), "snapshot": compact_snapshot(snap),
-                                     "complete": not parts, "parts": [layout.review_part(text) for text in parts],
+                                     "complete": not parts, "parts": base.with_final(layout.bundle_parts([layout.review_part(text) for text in parts])),
                                      **({"review_version": 2, "items": [], "skills": {"items": snap["learned"]}} if parts else {})}
             learning.save(path(home), state)
         if not state["reports"][key]["complete"]:

@@ -33,4 +33,11 @@ def context(home, learning, *, platform, kind, sender_id='', **_):
         settings = {}
     if settings.get('personal_roles', {}).get('scope_config'):
         guidance = ('AI 새 아이디어 탐색·사생활은 개인비서가 맡고 결과는 요청받은 대화(starter_user-world면 그 스레드)에 답한다. 개인비서 DM 전달은 소유자가 시킬 때만 한다. 개인메모·개인 목록·user(at)example.com만 쓰며 회사 범위는 읽기만 한다. 메일은 user(at)example.com만 읽고 회사 메일(user(at)example.com·example-company.com)은 업무비서 담당이다. 회사 업무·종합 보고·예약은 업무비서 담당이다. 연결 전 개인 Google 계정을 조회·수정했다고 말하지 않는다. 발송·삭제 승인과 배경 쓰기 거부는 유지한다.' if profile == 'personal-secretary' else '회사 업무 전체를 맡되 개인메모·개인 목록·user(at)example.com 쓰기는 개인비서 담당(ㅈ으로 요청)이다. 메일은 회사 계정(user(at)example.com·user(at)example.com)만 읽고 개인 메일 user(at)example.com은 열지 않는다. 실제 원본 범위를 확인하지 못하면 쓰지 않는다. 기존 발송·삭제 승인과 배경 거부를 유지한다.')
+    if profile == 'work-assistant':
+        guidance += (' 확정된 연결 업무의 상태 비교는 B에서 linked_work_read(common_id, kinds, fields) 한 번으로 필요한 원본을 읽는다. '
+                     'team_work(start)의 tools에 linked_work_read를 포함한다. 연결 ID만 필요하면 common_work_get을 쓴다. '
+                     '마감·할 일·일정 비교는 fields=[tasks,schedule]로 본문을 생략한다. 본문 자체가 필요할 때만 body를 포함한다. '
+                     'omitted_fields는 요청하지 않은 정보이며 재조회 사유가 아니다. '
+                     '묶음의 성공 결과를 개별 도구로 다시 읽지 않는다. partial·truncated·closed는 완료나 원본 없음이 아니며 '
+                     '누락된 근거만 추가 조회한다. 본문 교체·첨부 보존·쓰기 전후 검증은 기존 원본 조회를 유지한다.')
     return NOTE + '\n' + guidance

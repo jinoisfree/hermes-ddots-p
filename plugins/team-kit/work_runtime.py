@@ -39,7 +39,7 @@ BACKGROUND_MODEL = "claude-sonnet-5-5"
 READS = {"contacts_direct_lookup", "folder_scan", "doc_read", "pdf_render", "file_location", "vision_analyze", "notion", "slack_history", "calendar_direct_lookup", "reminders_direct_lookup", "apple_notes_direct_lookup", "messages_direct_lookup",
          "common_work_get", "knowledge_ref_get", "file_list", "read_file", "search_files", "web_search", "web_extract",
          "browser_snapshot", "browser_navigate", "browser_scroll", "browser_back", "kanban_show", "kanban_list"}
-READS |= {"deadline_watch", "google_calendar_color_get", "work_crosscheck", "mail_waiting", "doc_compare", "table_analyze",
+READS |= {"linked_work_read", "deadline_watch", "google_calendar_color_get", "work_crosscheck", "mail_waiting", "doc_compare", "table_analyze",
           "mail_read", "calendar_read", "notes_read", "reminders_read", "file_link"}
 SIMPLE_TOOLS = {"calendar_direct_lookup", "reminders_direct_lookup"}
 BUSINESS = READS | {"contacts_direct_mutation", "file_move", "file_copy", "folder_create", "doc_edit", "pdf_pages", "gmail_direct", "personal_work_bundle", "personal_work_rollback", "google_calendar_color_set",
@@ -61,7 +61,7 @@ DIRECT_NOTE = (" 일정·미리알림 단건 생성·수정·색 지정·삭제�
                "바로 실행하고 결과로 답한다. 업무 기록은 실제 도구 결과로 자동 작성되므로 team_work를 부르지 않는다. "
                "업무비서 할 일 등록 체크리스트와 선택 뒤 묶음·노션·연결은 A가 같은 턴에 처리한다. "
                "소유자가 업무·일정·메모를 완료처리하라고 하면 A가 찾은 원본의 common_id를 common_work_get으로 확인하고 common_work_complete 한 번으로 끝낸다(메모 본문을 고쳐 완료를 흉내 내지 않는다). "
-               "연결 업무가 없는 단독 메모만 apple_notes_direct_mutation(action=move, folder=complete)로 옮긴다. 그 밖에 여러 담당자·선행 조건·메일·파일·Notion이 얽힌 일은 team_work(start)로 B에게 넘긴다.")
+               "연결 업무가 없는 단독 메모만 apple_notes_direct_mutation(action=move, folder=complete)로 옮긴다. 회사 메일 읽기(lookup·read·thread 등)는 A가 team_work 없이 바로 조회하고 답한다(계정 범위 검사는 유지). 최근 메일 확인·요약은 lookup(include_body=true, limit 3 이하) 한 번으로 하고 더 필요할 때만 read/thread를 쓴다. 메일 쓰기·첨부 다운로드·메일 기반 업무 갱신과 그 밖에 여러 담당자·선행 조건·파일·Notion이 얽힌 일은 team_work(start)로 B에게 넘긴다.")
 LEARNING = {"memory", "team_learn", "team_learn_review", "team_skill_review", "skill_manage"}
 GMAIL_WRITES = frozenset({"send", "label_create", "label_apply", "filter_create", "filter_delete", "mail_organize", "inbox_restore"})
 GMAIL_INPUT_ERRORS = frozenset({
@@ -76,6 +76,24 @@ SIMPLE = re.compile(r"(?:(?:안녕|안녕하세요|고마워|감사합니다)[.!
                     r"(?:(?:을|를)?\s*(?:좀\s*)?(?:알려\s*줘|보여\s*줘|확인해\s*줘|조회해\s*줘|알려주세요|보여주세요|확인해주세요|조회해주세요))?[?.!~ ]*)")
 
 
+def log_reason(exc, secret=None):
+    """Short log reason: type, raising file:line, first message line (≤160, secrets masked)."""
+    tb = exc.__traceback__
+    while tb and tb.tb_next:
+        tb = tb.tb_next
+    where = f"{Path(tb.tb_frame.f_code.co_filename).name}:{tb.tb_lineno}" if tb else "?"
+    text = (str(exc).splitlines() or [""])[0][:160]
+    if secret is not None:
+        text = secret.sub(b"[secret]", text.encode("utf-8")).decode("utf-8", "replace")
+    return f"{type(exc).__name__} at {where}: {text}"
+
+
+def mail_read_direct(tool, args):
+    """Only mailbox reads bypass the A/B handoff; scope/approval wrappers still apply."""
+    return (tool == "gmail_direct" and str((args or {}).get("action") or "").strip().lower()
+            in {"accounts", "lookup", "read", "thread", "labels", "filter_list", "mailboxes", "rules_list"})
+
+
 def completion_move(tool, args):
     """Moving a memo the owner called finished into 'complete' (2026-10-26) is A's direct write."""
     args = args or {}
@@ -86,6 +104,13 @@ def completion_move(tool, args):
 def direct_tools(home, learning, turn):
     extra = learning.extension('task_capture').DIRECT if turn and turn.get('task_capture') else set()
     return DIRECT | extra
+
+
+def fixed_effort(home, learning):
+    """Optional profile policy, also used by diagnosis without enabling A/B work."""
+    cfg = learning.extension("memory_recall").config(home).get("work", {})
+    value = cfg.get("fixed_effort") if isinstance(cfg, dict) else None
+    return value if value in {"low", "medium", "high", "xhigh", "max"} else None
 
 
 def settings(home, learning):
@@ -275,11 +300,12 @@ def context(home, learning, *, session_id, turn_id="", sender_id="", user_messag
                 "관련 스킬을 확인하고 요청한 원본만 조회한 뒤 바로 답한다. 작업 인계 기록은 필요 없다. "
                 "조회 실패·불명확한 결과는 다음 모델 요청에서 A가 확인한다.")
     project_source = None
-    if learning.extension("project_work").in_project(home, learning, session_id):
+    # pre_llm_call runs before the host persists this turn's user row, so state.db still
+    # holds the previous turn here. Scope by the authenticated transport; authorized()
+    # verifies the persisted owner request before any work tool runs.
+    if Path(home).name == "work-assistant" or learning.extension("project_work").in_project(home, learning, session_id):
         from gateway.session_context import get_session_env
         project_source = {"chat_id": get_session_env("HERMES_SESSION_CHAT_ID", ""), "thread_id": get_session_env("HERMES_SESSION_THREAD_ID", "")}
-    if Path(home).name == "work-assistant":
-        project_source = learning.source(home, session_id, allow_approval=True)
     previous = pending(home, sender_id, project_source=project_source, include_offers=Path(home).name == "work-assistant")
     note = ("[현재 작업 역할과 복구]\n대화 해석·학습·최종 검토는 A, 실행은 B가 맡으며 같은 대화와 기존 실행 승인 경계를 쓴다. "
             "일반 업무 도구를 쓰기 전 team_work(start)에 현재 사용자 원문, 목표, 범위, 단계, 완료 기준, 사용할 도구와 난도를 기록한다. "
@@ -366,7 +392,7 @@ def guard(home, learning, *, tool_name, args, session_id, turn_id="", **_):
     if turn["last_role"] in {"interpret", "review"} and tool_name in PREFLIGHT:
         return None
     capture_allowed = (tool_name in DIRECT or learning.extension('task_capture').allowed(tool_name, args or {}))
-    if ((capture_allowed and tool_name in direct_tools(home, learning, turn) or completion_move(tool_name, args)) and turn["last_role"] == "interpret" and turn["phase"] == "interpret"
+    if ((capture_allowed and tool_name in direct_tools(home, learning, turn) or completion_move(tool_name, args) or mail_read_direct(tool_name, args)) and turn["last_role"] == "interpret" and turn["phase"] == "interpret"
             and (not turn["case_id"] or turn.get("direct"))):
         turn["direct"] = True
         return _write_problem(tool_name, args, turn["observations"], learning)
@@ -772,6 +798,7 @@ def request(home, learning, payload, *, turn_id="", **_):
     # Per-profile opt-in; existing assistant/background effort selection is unchanged.
     if role == "execute" and cfg.get("executor_effort") in {"low", "medium", "high", "xhigh", "max"}:
         effort = cfg["executor_effort"]
+    effort = fixed_effort(home, learning) or effort
     result = copy.deepcopy(payload)
     if fallback:
         # A provider fallback is another physical request in the same owner turn. Advance
@@ -785,11 +812,31 @@ def request(home, learning, payload, *, turn_id="", **_):
     responses = _.get("api_mode") == "codex_responses" or "input" in result or "instructions" in result
     def tool_schema(tool):
         return tool.get("function", tool)
-    def append_role_note(note):
+    def append_role_note(note, *, opening=False):
         if responses:
             result["instructions"] = (str(result.get("instructions") or "") + "\n\n" + note).strip()
         else:
-            result.setdefault("messages", []).append({"role": "user", "content": note})
+            messages = result.setdefault("messages", [])
+            if opening and turn and not fallback:
+                # The transport coalesces adjacent user messages. Retain the opening
+                # role note in the same position on every replay, or call #2 drops
+                # it from the first user frame and invalidates that cached prefix.
+                digest = learning.extension("learning_skills").digest
+                anchor = turn.get("opening_role_anchor")
+                if anchor is None:
+                    index = next((i for i in range(len(messages) - 1, -1, -1)
+                                  if messages[i].get("role") == "user"), None)
+                    if index is not None:
+                        anchor = {"index": index, "digest": digest(messages[index]), "note": note}
+                        turn["opening_role_anchor"] = anchor
+                if anchor is not None:
+                    index = anchor["index"]
+                    if index < len(messages) and digest(messages[index]) == anchor["digest"]:
+                        messages.insert(index + 1, {"role": "user", "content": anchor["note"]})
+                        if note == anchor["note"]:
+                            return
+                    # Compaction/rewrite: do not restore old user content or stale context.
+            messages.append({"role": "user", "content": note})
     if turn:
         turn["last_route"] = {"role": role, "model": model, "effort": effort}
         offered = {tool_schema(t).get("name") for t in result.get("tools", [])}
@@ -837,18 +884,28 @@ def request(home, learning, payload, *, turn_id="", **_):
             message += "\n" + CANDIDATES.NOTE
             if turn.get("case_id"):
                 state = read(home, turn["case_id"], turn["owner"])
+                # Physical tool-call IDs are authoritative evidence, not names invented by the model.
+                # Keep this dynamic suffix bounded and never copy full original results into it.
+                if role in {'execute', 'review'}:
+                    receipts = state.get('receipts', [])
+                    successful = [r for r in receipts if r.get('status') == 'success' and r.get('tool_call_id')]
+                    evidence = [{'tool': r['tool'], 'evidence_id': r['tool_call_id']} for r in successful[-8:]]
+                    message += "\n현재 케이스의 성공 근거(실제 호출 ID): " + json.dumps(evidence, ensure_ascii=False)
+                    message += " · review의 evidence_ids에는 필요한 실제 ID만 쓴다. 도구 이름이나 원본 ID를 대신 쓰지 않는다."
+                    if len(successful) > 8:
+                        message += " 이전 근거는 team_work(read)에서 확인한다."
                 item, target = CANDIDATES.current(state)
                 if item:
                     message += "\n현재 선택 항목: " + json.dumps({"case_id": state["case_id"], "number": item["number"],
                         "title": item["title"], "kind": target["kind"], "id": target.get("id"), "state": target["state"]}, ensure_ascii=False)
-        append_role_note(f"[{label} 실행 역할 — 새 사용자 요청이 아님]\n" + message)
+        append_role_note(f"[{label} 실행 역할 — 새 사용자 요청이 아님]\n" + message, opening=True)
         if role in {"interpret", "review"}:
             try:
                 note = learning.extension("learning_usage").prompt(home, learning, turn)
                 if note:
                     append_role_note(note)
             except (OSError, ValueError, TypeError, KeyError, sqlite3.Error) as exc:
-                LOG.warning("learning confirmation prompt skipped: %s", type(exc).__name__)
+                LOG.warning("learning confirmation prompt skipped: %s", log_reason(exc, getattr(learning, "SECRET", None)))
 
     LOG.info("model route role=%s model=%s effort=%s turn=%s", role, model, effort, turn_id)
     return {"request":result}
@@ -865,7 +922,7 @@ def ended(home, learning, *, turn_id="", **_):
             save(home, work, learning)
 
 
-SCHEMA = {"name":"team_work", "description":"Handoff a verified owner request from interpretation to execution, checkpoint actual results, review, and resume existing work. A alone may resolve_uncertain with receipt_id, applied/not_applied, summary and successful read evidence_ids from after that write in the same case. Never transfers approval or executes business actions.",
+SCHEMA = {"name":"team_work", "description":"Handoff verified owner requests, checkpoint actual results, review and resume work. A alone may resolve_uncertain with receipt_id, applied/not_applied, summary and successful read evidence_ids after that write in the same case. Never transfers approval or executes business actions.",
           "parameters":{"type":"object", "properties":{
               "action":{"type":"string", "enum":["start","list","read","resume","checkpoint","review","finish","resolve_uncertain","metrics","offer","item_checkpoint"]},
               "detail":{"type":"boolean","description":"Return all progress narratives and receipt rows; use read with detail=true when omitted steps matter."},

@@ -149,9 +149,20 @@ def public(work, number=None):
                                          "targets": [copy.deepcopy(t) for _, t in matches]}
         if item:
             shown_target = copy.deepcopy(target)
-            shown_target.pop("cached_reads", None)
+            cache = shown_target.pop("cached_reads", {})
+            shown_target["cached_read_refs"] = [
+                {k: row[k] for k in ("tool", "receipt_id", "at") if k in row} for row in cache.values()]
+            state = target["state"]
+            hint = ("쓰기는 이미 성공했다. 원래 도구로 새로 조회해 검증하고 item_checkpoint(stage=verified)로 넘긴다."
+                    if state == "written" else
+                    "원문 조회는 완료됐다. 현재 컨텍스트의 원문을 재사용한다. 전문을 잃었을 때만 아래 cache_request로 복구한다. 승인·쓰기 전 최신성 검사는 유지한다."
+                    if cache else "현재 대상의 필요한 원문만 조회한다. 다른 후보 본문은 미리 모으지 않는다.")
             out["next_candidate"] = {"number": item["number"], "title": item["title"],
-                                     "sources": copy.deepcopy(item["sources"]), "target": shown_target}
+                                     "sources": copy.deepcopy(item["sources"]), "target": shown_target,
+                                     "next_action": hint}
+            if cache:
+                out["next_candidate"]["cache_request"] = {"action": "read", "case_id": work["case_id"],
+                                                          "item_number": item["number"]}
     return out
 
 

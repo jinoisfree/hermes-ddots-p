@@ -45,6 +45,7 @@ class Engine:
         self.home, self.sources, self.store = home, sources, store
         self.reminders, self.dry = reminders, dry_run
         self.reads = {}  # last originals read per work, reused by completion detection
+        self.due_messages = {}  # retain verified date outcomes if another original fails later
 
     def event(self, cid, payload):
         if not self.dry:
@@ -94,6 +95,8 @@ class Engine:
         self.event(cid, {'status': 'due_pending', 'page': identifier, **entries[identifier]['pending']})
         try:
             after = self.sources.write_due(identifier, prop['wanted'])
+            if not after.get('due_property') or due_basis(after['due_property']) != due_basis(prop):
+                raise RuntimeError('notion_due_tasks_changed_during_write')
         except Exception as exc:
             from notion_completion_sync import log_work_error
             log_work_error(self.home, cid, 'work_due_write_uncertain', exc)
@@ -116,7 +119,51 @@ class Engine:
                 return []
             return self.due(cid, identifier, row, state, path)[0]
 
+    def early_due(self, cid, authority, refs, work, state, path):
+        """Only known authoritative Notion, unchanged links, and known non-Notion pending targets."""
+        early, messages = {}, []
+        if authority and authority[0] == 'notion' and work:
+            winner = '|'.join(authority)
+            pending = work.get('pending')
+            targets = pending.get('targets') if pending else []
+            safe_pending = not pending or (isinstance(targets, list) and bool(targets) and all(
+                isinstance(t, (list, tuple)) and len(t) == 2 and t[0] in {'notes', 'calendar'}
+                for t in targets))
+            same_sources = set(work['sources']) == {kind+'|'+sid for kind, sid in refs}
+            if safe_pending and same_sources and work.get('content_version') == CONTENT_VERSION:
+                row = self.sources.read(*authority)
+                if not row.get('closed'):
+                    lines, row = self.due(cid, authority[1], row, state, path)
+                    messages += lines
+                early[winner] = row
+        return early, messages
+
+    def due_only(self, item):
+        """The lifecycle caller has verified the Notion link; another source is unavailable/conflicted.
+        Compare configured IDs, including the unavailable source, without reading or writing it."""
+        if item.get('scope') != 'shared' or item.get('status') != 'active':
+            return []
+        refs = [('notion', r['external_id']) for r in item.get('knowledge_refs', [])
+                if r.get('ref_type') == 'notion_page']
+        refs += [(r['domain'], r['source_id']) for r in item.get('sources', [])
+                 if r['domain'] in {'notes', 'calendar'}]
+        authority = getattr(self.sources, 'authority', lambda *_: None)(item, refs)
+        if not authority or authority[0] != 'notion':
+            return []
+        with content.ledger(self.home, 'work-sync') as (path, state):
+            return self.early_due(item['common_id'], authority, content_refs(refs),
+                                  state['works'].get(item['common_id']), state, path)[1]
+
     def run(self, item):
+        cid = item['common_id']
+        self.due_messages[cid] = []
+        try:
+            return self._run(item)
+        except Exception as exc:
+            exc.work_due_messages = self.due_messages[cid]
+            raise
+
+    def _run(self, item):
         import work_policy
         item = work_policy.permitted(item)
         cid, messages = item['common_id'], []
@@ -131,22 +178,27 @@ class Engine:
         refs = content_refs(refs)
         duplicate_domains = len(refs) != len({kind for kind, _ in refs})
         if len(refs) == 1 or duplicate_domains:
-            if self.reminders and item.get('reminder_policy') != 'none':
-                result = self.reminders(item, self.dry)
-                messages = [f'• 할 일 미리알림 {key}: {len(result[key])}개' for key in
-                            ('created', 'moved', 'completed', 'deleted', 'past_due', 'skipped') if result.get(key)]
             if not duplicate_domains and refs[0][0] == 'notion' and item.get('status') == 'active':
                 messages += self.single_due(cid, refs[0][1])
+                self.due_messages[cid] = list(messages)
+            if self.reminders and item.get('reminder_policy') != 'none':
+                result = self.reminders(item, self.dry)
+                messages += [f'• 할 일 미리알림 {key}: {len(result[key])}개' for key in
+                             ('created', 'moved', 'completed', 'deleted', 'past_due', 'skipped') if result.get(key)]
             return {'handled': True, 'messages': messages,
                     **({'connection_status': 'unsupported', 'connection_reason': 'single_original_per_domain_required'}
                        if duplicate_domains else {})}
         started = time.time()
         with content.ledger(self.home, 'work-sync') as (path, state):
             work = state['works'].get(cid)
-            current = {kind+'|'+identifier: self.sources.read(kind, identifier) for kind, identifier in refs}
+            early, lines = self.early_due(cid, authority, refs, work, state, path)
+            messages += lines
+            self.due_messages[cid] = list(messages)
+            current = {kind+'|'+identifier: (early[kind+'|'+identifier] if kind+'|'+identifier in early
+                       else self.sources.read(kind, identifier)) for kind, identifier in refs}
             self.reads[cid] = current
             if any(row.get('closed') for row in current.values()):
-                return {'handled': True, 'messages': ['• ⚠️ 업무 원본이 삭제·보관됨 — 업무 자체 삭제는 전파하지 않았어요.']}
+                return {'handled': True, 'messages': messages + ['• ⚠️ 업무 원본이 삭제·보관됨 — 업무 자체 삭제는 전파하지 않았어요.']}
             if work is None or ((set(work['sources']) != set(current) or work.get('content_version') != CONTENT_VERSION)
                                 and not work.get('pending')):
                 if not self.dry:
@@ -172,10 +224,10 @@ class Engine:
                         state['works'][cid] = {'sources': current, 'content_version': CONTENT_VERSION}
                         content.save(path, state)
                         work_tool_writes.clear(self.home, current, started)
-                    return {'handled': True, 'messages': ['• 앞선 불명확한 반영 뒤 연결 원본이 바뀌어 현재 원본을 새 기준으로 삼았어요. 자동 재실행은 하지 않았어요.']}
+                    return {'handled': True, 'messages': messages + ['• 앞선 불명확한 반영 뒤 연결 원본이 바뀌어 현재 원본을 새 기준으로 삼았어요. 자동 재실행은 하지 않았어요.']}
                 else:
-                    return {'handled': True, 'messages': ['• ⚠️ 앞선 본문·할 일 반영이 불명확해 자동 재실행하지 않았어요. 원본 확인이 필요해요.']}
-            if authority and authority[0] == 'notion':
+                    return {'handled': True, 'messages': messages + ['• ⚠️ 앞선 본문·할 일 반영이 불명확해 자동 재실행하지 않았어요. 원본 확인이 필요해요.']}
+            if authority and authority[0] == 'notion' and '|'.join(authority) not in early:
                 # Notion is never a write target here, so its own date property is checked first and alone.
                 winner = '|'.join(authority)
                 lines, current[winner] = self.due(cid, authority[1], current[winner], state, path)

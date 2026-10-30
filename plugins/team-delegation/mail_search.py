@@ -17,6 +17,11 @@ INDEX_SECONDS = 10
 DETAIL_TIMEOUT = 3
 MAX_DETAILS = 24
 RETRY_SECONDS = 300
+TIMEOUT_RETRY_SECONDS = 7 * 24 * 3600
+
+
+def is_timeout(error):
+    return bool(error and ('TimeoutExpired' in error or 'AppleEventTimeout' in error))
 
 
 class SearchResults(list):
@@ -130,6 +135,13 @@ def cache_db(root, account):
                    'body TEXT, attachments TEXT, retry_after REAL NOT NULL DEFAULT 0, error TEXT)')
         if 'error' not in {r[1] for r in db.execute('PRAGMA table_info(messages)')}:
             db.execute('ALTER TABLE messages ADD COLUMN error TEXT')
+        # Persist the applied interval so old timeout rows migrate exactly once.
+        if 'retry_seconds' not in {r[1] for r in db.execute('PRAGMA table_info(messages)')}:
+            db.execute('ALTER TABLE messages ADD COLUMN retry_seconds REAL NOT NULL DEFAULT 300')
+        db.execute("UPDATE messages SET retry_after=retry_after+?-retry_seconds, retry_seconds=? "
+                   "WHERE body IS NULL AND retry_seconds=? AND "
+                   "(instr(error, 'TimeoutExpired')>0 OR instr(error, 'AppleEventTimeout')>0)",
+                   (TIMEOUT_RETRY_SECONDS, TIMEOUT_RETRY_SECONDS, RETRY_SECONDS))
         db.commit()
         yield db, path
     finally:
@@ -191,10 +203,11 @@ def _index(account, rows, account_id, detail, root, deadline, max_details, group
                         fetched += 1
                     except (ValueError, OSError) as exc:
                         error = str(exc) if isinstance(exc, ValueError) else 'MAIL_APP_SEARCH_CACHE_UNAVAILABLE'
-                        db.execute('INSERT OR REPLACE INTO messages (id,signature,body,attachments,retry_after,error) VALUES (?,?,NULL,NULL,?,?)',
-                                   (row['id'], sig, time.time() + RETRY_SECONDS, error))
+                        retry = TIMEOUT_RETRY_SECONDS if is_timeout(error) else RETRY_SECONDS
+                        db.execute('INSERT OR REPLACE INTO messages (id,signature,body,attachments,retry_after,error,retry_seconds) VALUES (?,?,NULL,NULL,?,?,?)',
+                                   (row['id'], sig, time.time() + retry, error, retry))
                     db.commit()
-                    if error and ('TimeoutExpired' in error or 'AppleEventTimeout' in error):
+                    if is_timeout(error):
                         # Killing osascript does not cancel the event already executing in Mail.
                         # Do not queue a whole batch behind a stalled content read.
                         return {'attempted': attempted, 'indexed_this_call': fetched, 'index_error': error, 'index_busy': False}

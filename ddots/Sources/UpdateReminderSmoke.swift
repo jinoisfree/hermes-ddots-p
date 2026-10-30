@@ -14,7 +14,17 @@ extension AppDelegate {
         appUpdate = updates
         showOptions()
         guard let checkbox = updateNoticeCheckbox else { smokeFailed("Update notices checkbox exists") }
-        let matches = optionsWindow?.contentView?.subviews.compactMap { $0 as? NSButton }.filter { $0.title == "업데이트 알림 받기" } ?? []
+        guard let window = optionsWindow, let scroll = settingsScroll,
+              let document = scroll.documentView else { smokeFailed("Options have a scrollable document") }
+        window.setContentSize(NSSize(width: 620, height: 650))
+        scrollOptionsToTop()
+        smokeCheck(scroll.documentVisibleRect.contains(checkbox.frame), "Update checkbox fits in initial 650pt viewport")
+        smokeCheck(abs(scroll.documentVisibleRect.minY) < 1, "Options initially show document top")
+        if let bitmap = scroll.bitmapImageRepForCachingDisplay(in: scroll.bounds) {
+            scroll.cacheDisplay(in: scroll.bounds, to: bitmap)
+            try? bitmap.representation(using: .png, properties: [:])?.write(to: destination.appendingPathComponent("options-650.png"))
+        }
+        let matches = scroll.documentView?.subviews.compactMap { $0 as? NSButton }.filter { $0.title == "업데이트 알림 받기" } ?? []
         smokeCheck(matches.count == 1 && checkbox.state == .on, "Exactly one update checkbox, enabled by default in either channel")
         defaults.set(2, forKey: "silentUpdateFailures")
         let silent = SilentUpdateSettings(defaults: defaults)
@@ -31,7 +41,9 @@ extension AppDelegate {
                    "Cancellation clears pending installation without recording a failure")
         updates.noticesChanged()
         smokeCheck(replies == [.skip] && restorations == 1, "Repeated notification cannot reply to a cancelled installer twice")
+        document.scroll(NSPoint(x: 0, y: document.bounds.height))
         showOptions()
+        smokeCheck(abs(scroll.documentVisibleRect.minY) < 1, "Reopening options returns to document top")
         smokeCheck(checkbox.state == .off, "Reopening options reads the saved preference")
         checkbox.performClick(nil)
         smokeCheck(updateNoticeSettings.enabled && replies == [.skip], "Turning notices on preserves the cancelled installer")
@@ -39,7 +51,7 @@ extension AppDelegate {
         updateNoticeSettings = originalSettings
         showOptions()
         capture(destination: destination)
-        try? "PASS: one checkbox, default on, persisted off/on, actual pending idle installer cancelled once, failure count unchanged; no network or real relay\n".write(to: destination.appendingPathComponent("update-notices.txt"), atomically: true, encoding: .utf8)
+        try? "PASS: checkbox visible in initial 650pt viewport, one checkbox, default on, persisted off/on, actual pending idle installer cancelled once, failure count unchanged; no network or real relay\n".write(to: destination.appendingPathComponent("update-notices.txt"), atomically: true, encoding: .utf8)
         if CommandLine.arguments.contains("--ui-smoke-update-reminder") { verifyUpdateReminder(destination: destination) }
         else { NSApp.terminate(nil) }
     }

@@ -225,6 +225,16 @@ def check_inventory(document, agents):
     return item("inventory", not (missing or stale), f"작업 목록 누락 {len(missing)}개 · 없는 작업 기재 {len(stale)}개")
 
 
+def check_reports(root, agents, now):
+    spec = importlib.util.spec_from_file_location('doctor_report_inventory', Path(__file__).with_name('report_inventory.py'))
+    inventory = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(inventory)
+    result = inventory.inspect(root, agents, now=now)
+    issues = result['issues']
+    return item('reports', not issues, ('보고 설정·전달 근거 이상 없음' if not issues else
+                '보고 점검 확인 필요: ' + '; '.join(issues[:5]) + (f' 외 {len(issues)-5}건' if len(issues)>5 else '')))
+
+
 def collect(root, agents, document, now, runner=run_command):
     # Diagnosis health readers return raw log kinds and broader source lists. These narrow
     # checks use the same timestamp/launchctl formats but keep only counts and fixed text.
@@ -232,6 +242,7 @@ def collect(root, agents, document, now, runner=run_command):
         "launchd": lambda: check_launchd(agents, runner), "copies": lambda: check_copies(root, runner),
         "clones": lambda: check_clones(root, runner), "gateway": lambda: check_gateway(root, now),
         "credentials": lambda: check_credentials(root), "cron": lambda: check_cron(root, now),
+        "reports": lambda: check_reports(root, agents, now),
         "pending": lambda: check_pending(root), "inventory": lambda: check_inventory(document, agents),
     }
     result = []

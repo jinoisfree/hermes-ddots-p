@@ -803,18 +803,7 @@ def note(config: Any) -> str:
 SCHEMA = {
     "name": "notion",
     "description": (
-        "Use batch(title, operations) for multiple changes and one tool approval; no separate prose approval. "
-        "rollback(key?) restores this conversation's latest change: immediate within 30 minutes, confirmed key within "
-        "24 hours. Preserve text and attachments, including original text below the last line with 5+ ━. "
-        "replace_all=true requires an explicit full rewrite request. Pass page.last_edited as seen_last_edited for "
-        "plaintext edits of nonempty text. update text accepts {append: text} or {replace: {find: text, with: text}}. "
-        "Check verification and content_loss. Read and, after the user approves, change reachable Notion "
-        "pages/databases. Reads: databases, search(query), schema(database_id), query(database_id, filter?, sorts?, "
-        "page_size<=50, cursor?), page(page_id), users. Writes: create(database_id+properties or parent_page_id+title; "
-        "paragraphs?), update(page_id+properties), append(page_id+paragraphs, after? top-level block id), "
-        "edit(page_id+blocks, max20 text/checked/color changes), trash(page_id). IDs may be Notion links. Rich "
-        "paragraphs, images/files (max10), nesting and spans: see paragraphs parameter. Use heading_2/heading_3 for "
-        "text size. Properties: text, number, option name(s), YYYY-MM-DD or {start,end}, boolean, people names."),
+        "Read/write Notion. batch(title, operations): multiple changes, one tool approval; no separate prose approval. rollback(key?) restores this conversation's latest change: immediate within 30 minutes, confirmed key within 24 hours. Preserve text and attachments, including original text below the last line with 5+ ━. replace_all=true requires an explicit full rewrite request. Pass page.last_edited as seen_last_edited for plaintext edits of nonempty text. update text accepts {append: text} or {replace: {find: text, with: text}}. Check verification and content_loss. Read reachable pages/databases; writes require user approval. Reads: databases, search(query), schema(database_id), query(database_id, filter?, sorts?, page_size<=50, cursor?), page(page_id), users. Writes: create(database_id+properties or parent_page_id+title; paragraphs?), update(page_id+properties), append(page_id+paragraphs, after? top-level block id), edit(page_id+blocks, max20 text/checked/color changes), trash(page_id). IDs accept Notion links. paragraphs documents rich text, images/files(max10), nesting and spans. Use heading_2/heading_3 for text size. Properties: text, number, option name(s), YYYY-MM-DD or {start,end}, boolean, people names."),
     "parameters": {"type": "object", "properties": {
         "action": {"type": "string", "enum": sorted(READ | WRITE)},
         "database_id": {"type": "string"}, "page_id": {"type": "string"}, "parent_page_id": {"type": "string"},

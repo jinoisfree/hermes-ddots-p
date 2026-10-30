@@ -199,6 +199,20 @@ import SQLite3
         client.start(); client.start(); client.reportTapFailure(tapFailure)
         check(wait(3) { client.poll(unreadSince: nil).messages.count == 3 } != nil, "conversation arrives after connecting")
         check(wait(3) { client.usage != nil } != nil, "sharing Mac's Paseo usage arrives with the state")
+        let streamFolder = home.appendingPathComponent("cache/ddots-streams")
+        try FileManager.default.createDirectory(at: streamFolder, withIntermediateDirectories: true)
+        let streamFile = streamFolder.appendingPathComponent("preview.json")
+        let streamNow = Date().timeIntervalSince1970
+        var preview = StreamPreview(id: "synthetic", room: "CFAKE", thread: "123.45", since: streamNow - 1,
+                                    updated: streamNow, expires: streamNow + 120, body: "첫 줄", done: false)
+        try JSONEncoder().encode(preview).write(to: streamFile, options: .atomic)
+        check(wait(3) { client.streamPreviews.first?.body == "첫 줄" } != nil, "partial answer crosses authenticated relay")
+        preview.body += "\n둘째 줄"
+        try JSONEncoder().encode(preview).write(to: streamFile, options: .atomic)
+        check(wait(3) { client.streamPreviews.first?.body == preview.body } != nil, "stream text grows without fetching Slack")
+        try FileManager.default.removeItem(at: streamFile)
+        check(wait(3) { client.streamPreviews.isEmpty } != nil, "removed preview is cleared on the other Mac")
+
         if let relayed = client.usage?.services {
             check(relayed.codex?.label(now: usageNow) == "주 85%" && relayed.claude?.label(now: usageNow) == "주 59%", "relayed usage keeps windows and labels")
             check(UsageRetention.label(local: nil, relayed: relayed.claude, now: usageNow) == "주 59%", "relayed value fills in when this Mac has no Paseo")

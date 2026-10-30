@@ -74,7 +74,8 @@ extension AppDelegate {
                 model.threads = [SlackThread(id: "selection-thread", room: model.selected ?? "CCOW", ts: "9000.1", root: root,
                                             replies: answers, replyCount: replies, loaded: true, latest: root.date.timeIntervalSince1970, latestFromUser: own)]
                 if expanded { model.open = ["selection-thread"] }
-                model.requestScroll("slack-bottom")
+                // Selection trials start at the root, including when a taller header pushes it above the viewport.
+                model.requestScroll("message:selection-root")
                 await settle()
                 panel.makeKeyAndOrderFront(nil)
                 panel.makeFirstResponder(nil)

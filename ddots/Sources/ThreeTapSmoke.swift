@@ -44,21 +44,12 @@ extension AppDelegate {
             guard let data = picture.tiffRepresentation, let bitmap = NSBitmapImageRep(data: data), let png = bitmap.representation(using: .png, properties: [:]) else { smokeFailed("Three-tap alert drawing") }
             try? png.write(to: destination.appendingPathComponent(name + ".png"))
         }
-        // AppKit menu tracking owns a nested loop. Render the actual item titles/states without opening that loop.
+        showOptions()
+        settingsTabs?.selectTabViewItem(withIdentifier: "화면과 펫")
         func menuPicture(_ name: String) {
-            // The tap setting lives under 보기 설정; picture that submenu, where its state shows.
-            let items = (menuItem(titled: ThreeTapController.title)?.menu ?? menu).items.filter { !$0.isHidden }
-            let box = NSView(frame: NSRect(x: 0, y: 0, width: 360, height: CGFloat(items.count)*27+16))
-            box.wantsLayer = true; box.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
-            for (index, item) in items.enumerated() {
-                let text = NSTextField(labelWithString: item.isSeparatorItem ? "────────────────────────" : (item.state == .on ? "✓  " : "    ") + item.title)
-                text.font = .systemFont(ofSize: 13); text.textColor = item.isEnabled ? .labelColor : .disabledControlTextColor
-                text.frame = NSRect(x: 12, y: box.bounds.height-CGFloat(index+1)*27, width: 340, height: 23)
-                box.addSubview(text)
-            }
-            save(box, name)
+            if let view = optionsWindow?.contentView { save(view, name) }
         }
-        guard let item = menuItem(titled: ThreeTapController.title) else { smokeFailed("Three-tap menu exists") }
+        guard let item = tapCheckbox else { smokeFailed("Three-tap setting exists") }
         smokeCheck(item.state == .on && threeTap.enabled, "Three-tap defaults on without opening the private reader in smoke")
         menuPicture("three-tap-on")
         threeTap.toggle(); smokeCheck(item.state == .off && !threeTap.enabled, "Three-tap turns off")
@@ -140,10 +131,36 @@ extension AppDelegate {
         }
         try? lines.map(\.0).joined(separator: "\n").write(to: destination.appendingPathComponent("menu.txt"), atomically: true, encoding: .utf8)
         let top = menu.items.filter { !$0.isHidden && !$0.isSeparatorItem }.count
-        smokeCheck(top == 11, "The top level keeps the daily items and four groups: \(top)")
-        for title in ["대화 열기", "Slack 연결…", "Hermes 대화 연결…", "보관함 폴더 지정…", "동작 미리보기", "옵션…", "업데이트 연결…", "업데이트 확인…", "ddots 종료"] {
+        smokeCheck(top == 8, "The top level keeps eight daily and app actions: \(top)")
+        for title in ["대화 열기", "작업 목록", "내 캘린더", "설정…", "업데이트 확인…", "ddots 종료"] {
             smokeCheck(menuItem(titled: title)?.action != nil, "Menu keeps " + title)
         }
+        smokeCheck(menuItem(titled: "설정…")?.keyEquivalent == ",", "Settings shortcut")
+        showOptions()
+        guard let tabs = settingsTabs else { smokeFailed("Settings categories exist") }
+        let expected = ["일반", "화면과 펫", "연결과 동기화"] + (ShrimpVault.defaultBot.isEmpty ? [] : ["새우튀김 보관함"]) + ["고급"]
+        smokeCheck(tabs.tabViewItems.map(\.label) == expected, "Settings categories match the organization")
+        var actions: Set<String> = []
+        for item in tabs.tabViewItems {
+            tabs.selectTabViewItem(item)
+            scrollOptionsToTop()
+            guard let scroll = settingsScroll, let document = scroll.documentView else { smokeFailed("Scrollable settings category") }
+            for control in document.subviews.compactMap({ $0 as? NSControl }) {
+                if let action = control.action { actions.insert(NSStringFromSelector(action)) }
+                smokeCheck(control.frame.minX >= 0 && control.frame.maxX <= document.bounds.width, "Control fits category width")
+            }
+            if let view = optionsWindow?.contentView, let bitmap = view.bitmapImageRepForCachingDisplay(in: view.bounds) {
+                view.cacheDisplay(in: view.bounds, to: bitmap)
+                try? bitmap.representation(using: .png, properties: [:])?.write(to: destination.appendingPathComponent("settings-" + item.label + ".png"))
+            }
+        }
+        for selector in [#selector(configureSlack), #selector(configureHermes), #selector(configureRelay),
+                         #selector(makeSyncStandard), #selector(showHooksHelp), #selector(connectAppUpdate),
+                         #selector(preview), #selector(previewPointer), #selector(changeChatTheme(_:)),
+                         #selector(toggleBubbleAlwaysShown(_:)), #selector(toggleThreeTap)] {
+            smokeCheck(actions.contains(NSStringFromSelector(selector)), "Settings preserve " + NSStringFromSelector(selector))
+        }
+        smokeCheck(chatThemePicker?.itemTitles == ChatTheme.allCases.map(\.title), "All three theme choices remain")
         NSApp.terminate(nil)
     }
 }

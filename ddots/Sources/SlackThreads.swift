@@ -544,6 +544,13 @@ enum SlackNotice {
     /// What a thread waits on, as a coloured note: a question still open, or a request the user approved.
     static func state(_ thread: SlackThread, confirmed: Set<String> = []) -> ChatMark? { assessment(thread, confirmed: confirmed).state }
 
+    /// Visual state is independent of selection and of the older notification-chip palette.
+    static func railColor(_ thread: SlackThread, pending: ChatMessage?, state: ChatMark?) -> String? {
+        if pending != nil { return rules.color("askingColor") }
+        if state != nil, hermesState(thread) == .working { return rules.color("workingColor") }
+        return state?.color
+    }
+
     static let alertID = "alert"
     /// The lines of the notice that a thread's bell can mark as read.
     static func hasBell(_ item: SlackNoticeItem) -> Bool { item.id == alertID || item.id.hasPrefix(questionID + ":") }

@@ -9,6 +9,8 @@ from contextlib import ExitStack
 from datetime import datetime
 import importlib.util
 import json
+import hashlib
+import time
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -100,7 +102,13 @@ def render(doctor, errors, notices, nights=()):
         return ''
     bad = any(row['level'] in ('warning', 'error', 'critical', 'fail') for row in notices) or night_bad
     color = '🔴' if broken or bad else '🟡' if errors else '🟢'
-    lines = [f'*{color} 진단담당 아침 시스템 보고*']
+    owner_rows = [row for night in nights for row in night.get('diagnoses', []) if row.get('status') == 'owner_needed']
+    lines = [f'*{color} 진단담당 아침 시스템 보고*',
+             f'*핵심 변화*\n새 문제 {len(broken)}건 · 회복 {len(recovered)}건 · 새 오류 {len(errors)}종 · 정비 {len(notices)}건']
+    if owner_rows:
+        lines.append('*소유자가 할 일*\n' + '\n'.join('  • ' + R.layout.excerpt(row.get('short', ''), 400) for row in owner_rows))
+    elif any(n.get('job') for n in nights):
+        lines.append('*처리 상태*\n자동 수정 결과는 이 스레드에 이어진다. 완료 보고의 확인·롤백 버튼에서 결정해 줘.')
     lines.extend(night_lines)
     if broken or recovered:
         lines.append('*매일 점검*')
@@ -140,36 +148,73 @@ def run(root, home, agents, document, *, dry_run=False, now=None):
     root, home = Path(root), Path(home)
     now = now or datetime.now(ZoneInfo('Asia/Seoul'))
     queue = home / 'watcher-state/morning-queue.jsonl'
+    outbox = home / 'watcher-state/morning-system-delivery.json'
     with ExitStack() as stack:
         if not dry_run:
-            # Also serialize against a manual legacy Doctor execution.
             stack.enter_context(Q.locked(home / 'watcher-state/morning-system.json'))
             stack.enter_context(Q.locked(home / 'watcher-state/doctor.json'))
-        doctor = D.prepare(root, home, agents, document, now=now)
-        errors = E.prepare(root, home, now=now.timestamp())
-        sent, notices = Q.snapshot(queue)
-        nights = unreported(home)
-        text = render(doctor, errors['new'], notices, nights)
+        if outbox.is_symlink():
+            raise ValueError('symlink state')
+        pending = json.loads(outbox.read_text()) if outbox.exists() else {}
+        if pending and not pending.get('complete'):
+            doctor, errors = pending['doctor'], dict(pending['errors'])
+            errors['path'] = home / 'state/error-digest.json'
+            sent, nights = pending['queue'], pending['nights']
+            text = pending['text']
+        else:
+            doctor = D.prepare(root, home, agents, document, now=now)
+            errors = E.prepare(root, home, now=now.timestamp())
+            sent, notices = Q.snapshot(queue)
+            nights = unreported(home)
+            text = render(doctor, errors['new'], notices, nights)
+            pending = {'day': now.date().isoformat(), 'text': text, 'doctor': doctor,
+                       'errors': {k: v for k, v in errors.items() if k != 'path'},
+                       'queue': sent, 'nights': nights, 'channel': CHANNEL, 'complete': False,
+                       'parts': [{'text': t} for t in R.layout.chunks(text.split('\n\n'))]}
         if dry_run:
             return text
+        def save():
+            D.atomic_state(outbox, pending)
+        attempts = pending.setdefault('attempts', {})
+        attempts[now.date().isoformat()] = attempts.get(now.date().isoformat(), 0) + 1
+        pending['last_attempt_at'] = now.isoformat()
+        save()  # Persist the exact snapshot; new arrivals must not be acknowledged with this report.
         if text:
-            # Preserve the old error digest's durable unacknowledged send intent.
-            # Confirmed signatures and Doctor baseline stay untouched on failure.
             if errors['new']:
                 E.stage_pending(errors)
-            receipt = R.slack(home, 'chat.postMessage', {'channel': CHANNEL, 'text': text,
-                              'unfurl_links': False, 'unfurl_media': False})
-            if not (isinstance(receipt, dict) and receipt.get('ok') is True
-                    and receipt.get('ts') and receipt.get('channel') == CHANNEL):
-                raise ValueError('morning delivery unconfirmed')
+            for index, part in enumerate(pending['parts']):
+                if part.get('ts'):
+                    continue
+                marker = 'morning_system_' + hashlib.sha256(
+                    (str(home.resolve()) + pending['day'] + text + str(index)).encode()).hexdigest()[:40]
+                ts = None
+                if part.get('attempted_at'):
+                    pending['bot'] = R.slack(home, 'auth.test', {})['user_id']
+                    ts = R.recover(home, pending, part, marker)
+                if not ts:
+                    part['attempted_at'] = time.time()
+                    save()
+                    body = {'channel': CHANNEL, 'text': part['text'], 'metadata': R.layout.metadata(marker),
+                            'unfurl_links': False, 'unfurl_media': False}
+                    if index:
+                        body['thread_ts'] = pending['thread_ts']
+                    receipt = R.slack(home, 'chat.postMessage', body)
+                    if not (isinstance(receipt, dict) and receipt.get('ok') is True
+                            and receipt.get('ts') and receipt.get('channel') == CHANNEL):
+                        raise ValueError('morning delivery unconfirmed')
+                    ts = str(receipt['ts'])
+                part['ts'] = ts
+                if index == 0:
+                    pending['thread_ts'] = ts
+                save()
             if any(night.get('job') for night in nights):
-                module('paseo_autofix').attach_thread(home, CHANNEL, str(receipt['ts']))
+                module('paseo_autofix').attach_thread(home, CHANNEL, pending['thread_ts'])
         mark_reported(home, [night['day'] for night in nights])
-        # Like the legacy readers, an empty report silently refreshes health/initial
-        # error history; no undelivered changes are acknowledged on this branch.
         D.atomic_state(home / 'watcher-state/doctor.json', doctor['state'])
         E.acknowledge(errors)
         Q.acknowledge(queue, sent)
+        pending.update(complete=True, outcome='sent' if text else 'skipped_empty', finished_at=now.isoformat())
+        save()
     after_report(home)
     return ''
 

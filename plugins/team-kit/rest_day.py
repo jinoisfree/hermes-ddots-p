@@ -175,10 +175,23 @@ def gate(key, now, *, workday, rest, always=(), **kw):
     return True
 
 
-def wrap(key, script, *, workday, rest, always=(), inner=None, now=None):
+def wrap(key, script, *, workday, rest, always=(), inner=None, now=None, retry_state=None):
     """Body of a profile ``scripts/*_restday.py``: quiet ``{"wakeAgent": false}`` unless this fire is
     today's run, else the job's original pre-script (same argv, stdout and exit code)."""
-    if not gate(key, now or datetime.now(KST), workday=workday, rest=rest, always=always):
+    now = now or datetime.now(KST)
+    retry = False
+    if retry_state:
+        # Only the receipt-aware morning outbox opts in; ordinary agent jobs are never replayed.
+        path = Path(retry_state)
+        if path.exists():
+            pending = json.loads(path.read_text())
+            threshold = start(now, tuple(map(int, workday[0].split(':'))))
+            last = pending.get('last_attempt_at')
+            retry = (not pending.get('complete') and bool(pending.get('parts'))
+                     and (now.hour, now.minute) >= threshold
+                     and pending.get('attempts', {}).get(now.date().isoformat(), 0) < 3
+                     and (not last or (now - datetime.fromisoformat(last)).total_seconds() >= 300))
+    if not gate(key, now, workday=workday, rest=rest, always=always) and not retry:
         print(json.dumps({"wakeAgent": False, "reason": "rest_day_schedule"}))
         return 0
     if inner:

@@ -5,7 +5,9 @@
   2. 매일 점검 변화와 지난 24시간 새 오류를 읽는다(상태 저장 없음, 기준은 08:30 보고가 확정).
   3. 확정된 진단 결함과 점검·오류 확인을 한 Paseo 작업(``night-<날짜>``)으로 묻지 않고 넘긴다.
      Paseo는 표식 커밋까지만 하고 푸시는 아침 보고 스레드의 확인 버튼 뒤다.
-  4. 월요일에는 지난 대화 보존 현황을 센다(본문을 읽거나 지우지 않는다).
+  4. 어제 조직개편안을 보내지 않고 만들어 Paseo에 바로 넘긴다(2026-10-29 사용자 결정, ``org_review.night``).
+     08:30 조직개편안 보고가 그 스레드에 결과와 확인·롤백 버튼을 받는다.
+  5. 월요일에는 지난 대화 보존 현황을 센다(본문을 읽거나 지우지 않는다).
 
 결과는 ``watcher-state/night-batch.json``에 남고 08:30 ``morning_system``이 private-service-27으로 보고한다.
 수동 확인: ``--dry-run`` (판정·Paseo·상태 저장 없음).
@@ -132,6 +134,12 @@ def run(root, home, agents, document, *, dry_run=False, now=None):
         night = {'day': day, 'at': now.isoformat(), 'diagnoses': results, 'carried': len(carried),
                  'job': key if queued in ('queued', 'duplicate') else None,
                  'items': [i['title'] for i in items], 'check_error': check_error, 'reported': False}
+        if not dry_run:
+            # 2026-10-29 사용자 결정: 조직개편안도 새벽에 만들어 Paseo가 진행하고, 아침 보고에 확인·롤백만 묻는다.
+            try:
+                night['org_review'] = module('org_review').night(home=home, root=root, now=now)
+            except Exception as exc:  # 08:30 daily tries the draft once more
+                night['org_review'] = 'failed:' + type(exc).__name__
         if now.weekday() == 0:
             try:
                 night['retention'] = retention(root)

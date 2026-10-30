@@ -210,11 +210,8 @@ def deliver(text):
     spec = importlib.util.spec_from_file_location("memory_tidy_queue", Path(__file__).with_name("morning_queue.py"))
     Q = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(Q)
-    if Q.quiet():
-        # 2026-10-28 사용자 결정: 03:40 정리는 그대로, 학습 채널 보고 글만 08:30 아침 보고 때 올린다.
-        Q.hold(home, channel, text)
-        return
-    R.slack(home, "chat.postMessage", {"channel": channel, "text": text, "unfurl_links": False})
+    # The next daily learning thread carries this result; no extra top-level notification.
+    Q.hold(home, channel, text, topic='memory_tidy')
 
 
 def main(argv=None):

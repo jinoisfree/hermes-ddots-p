@@ -93,10 +93,11 @@ def held_path(home):
     return Path(home) / 'watcher-state/held-posts.jsonl'
 
 
-def hold(home, channel, text, at=None):
+def hold(home, channel, text, at=None, *, topic=None):
     """Keep a quiet-hours post (channel, text) for the 08:30 morning flush."""
     path = held_path(home)
     row = {'at': at or datetime.now(KST).isoformat(), 'channel': channel, 'text': text}
+    if topic: row['topic'] = topic
     with locked(path):
         current = read(path)
         if current and not current.endswith('\n'):
@@ -110,11 +111,34 @@ def flush_held(home, post):
     sent = 0
     with locked(path):
         rows = [json.loads(line) for line in read(path).splitlines() if line.strip()]
+        remaining = list(rows)
         try:
             for row in rows:
+                if memory_row(row):
+                    continue  # The learning producer owns these receipts, not the system DM.
                 post(row['channel'], row['text'])
+                remaining.remove(row)
                 sent += 1
         finally:
-            rest = rows[sent:]
-            atomic_write(path, ''.join(json.dumps(r, ensure_ascii=False) + '\n' for r in rest))
+            atomic_write(path, ''.join(json.dumps(r, ensure_ascii=False) + '\n' for r in remaining))
     return sent
+
+
+def memory_row(row):
+    return row.get('topic') == 'memory_tidy' or row.get('text', '').startswith(('*🟢 새벽 기억 정리', '*🟡 새벽 기억 정리'))
+
+
+def learning_appendices(home, channel):
+    path = held_path(home)
+    with locked(path):
+        return [r for r in (json.loads(line) for line in read(path).splitlines() if line.strip())
+                if memory_row(r) and r.get('channel') == channel]
+
+
+def acknowledge_appendices(home, delivered):
+    path = held_path(home)
+    with locked(path):
+        rows = [json.loads(line) for line in read(path).splitlines() if line.strip()]
+        for row in delivered:
+            if row in rows: rows.remove(row)
+        atomic_write(path, ''.join(json.dumps(r, ensure_ascii=False) + '\n' for r in rows))

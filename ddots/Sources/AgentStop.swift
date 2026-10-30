@@ -10,7 +10,7 @@ enum AgentStop {
 
     /// A character is writing in the thread: its typing mark, or its "생각 중" line still standing.
     static func working(_ thread: SlackThread, typing: [TypingIndicator]) -> Bool {
-        !typing.isEmpty || thread.messages.contains { !$0.fromUser && SlackText.isThinking($0.body) }
+        !typing.isEmpty || thread.messages.contains { !$0.fromUser && (SlackText.isThinking($0.body) || $0.streaming) }
     }
 
     enum Control: Equatable { case stop, undo }

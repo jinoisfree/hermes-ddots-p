@@ -23,7 +23,9 @@ KST = ZoneInfo("Asia/Seoul")
 _spec = importlib.util.spec_from_file_location("team_report_layout", Path(__file__).with_name("report_layout.py"))
 layout = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(layout)
-REVIEW_GUIDE = "모두 배우기=이 보고의 학습·스킬 전부 유지 · 롤백=전부 변경 전 복구 · 일부만 배우기=아래 항목 글의 N번만 버튼으로 하나씩"
+# 2026-10-29 사용자 결정: 전체 버튼은 모두 승인 | 모두 거절 | 의견 | 확인. 스레드 끝에도 같은 버튼을 둔다.
+REVIEW_GUIDE = layout.REVIEW_GUIDE
+FINAL_KIND = "전체"
 
 
 def compact_report(home):
@@ -183,7 +185,7 @@ def render(day, items, workspace_url="", *, after_apply=False, compact=False, it
             f"🔴 아침 학습 보고 · {day.isoformat()}",
             f"*배운 내용 {len(items)}건* · 현재 적용 중 · 검토 대기",
             [(f"{item['topic']} · {item['change']}", item['rule']) for item in items],
-            REVIEW_GUIDE)
+            REVIEW_GUIDE, review=True)
         paragraphs = ["*검토 안내*\n" + paragraphs[0]]
     introduction = list(paragraphs)
     item_pages = []
@@ -225,7 +227,7 @@ def render(day, items, workspace_url="", *, after_apply=False, compact=False, it
         if itemized:
             item_pages += layout.item_messages("\n\n".join(paragraphs[item_start:]), "학습", index)
     if compact:
-        return [overview] + (layout.chunks(introduction) + item_pages if itemized else layout.chunks(paragraphs))
+        return [overview] + (item_pages if itemized else layout.chunks(paragraphs))
     return layout.chunks(paragraphs)
 
 
@@ -255,7 +257,16 @@ def routing_section(home, now):
 
 def review_buttons(after_apply):
     """Reply buttons (gateway reply_buttons): a click is the owner typing that word in this thread."""
-    return "\n[[버튼: 모두 배우기 | 롤백 | 일부만 배우기]]"
+    return "\n[[버튼: 모두 승인 | 모두 거절 | 의견 | 확인]]"
+
+
+def final_part():
+    """The thread's last message repeats the whole-report buttons, so the end is never only the last item's."""
+    return {"text": "*전체 검토*" + review_buttons(True), "review_kind": FINAL_KIND}
+
+
+def with_final(parts):
+    return parts + [final_part()] if len(parts) > 1 else parts
 
 
 
@@ -337,9 +348,21 @@ def update_status(home, thread_ts, *, store=None, loader=None):
                 part.setdefault("original_text", part["text"])
                 part["text"] = review_text(report)
                 updates = [{"channel": report["channel"], "ts": part["ts"], "text": part["text"]}]
+                finished = review_presentation(report)[2]
                 for detail in report["parts"][1:]:
+                    if detail.get('entries') and detail.get('ts'):
+                        detail['text'] = layout.reviewed_bundle(detail, report)
+                        updates.append({'channel': report['channel'], 'ts': detail['ts'], 'text': detail['text'], 'attachments': []})
+                        continue
                     kind = detail.get("review_kind")
                     if not kind or not detail.get("ts"):
+                        continue
+                    if kind == FINAL_KIND:
+                        if finished and not detail.get("closed"):
+                            detail.setdefault("original_text", detail["text"])
+                            detail["text"] = re.sub(r"\n?\[\[버튼:[^\]\n]*\]\]\s*\Z", "", detail["original_text"]).rstrip() + "\n\n✅ 검토 끝"
+                            detail["closed"] = True
+                            updates.append({"channel": report["channel"], "ts": detail["ts"], "text": detail["text"], "attachments": []})
                         continue
                     states = report.get("skill_review_state" if kind == "스킬" else "review_state", {})
                     status = states.get(str(detail["item"]), {}).get("status")
@@ -379,7 +402,9 @@ def with_skills(texts, skills):
         return texts
     # Item markers must remain at each message's end, never combined by chunks().
     details = skills["details"] if skills.get("items") else layout.chunks(skills["details"])
-    head = texts[0] + "\n\n" + skills["head"]
+    remaining = max(0, 3 - len(re.findall(r"(?m)^\*\d+\. ", texts[0])))
+    preview = skills.get('preview', [])[:remaining]
+    head = texts[0] + "\n\n" + skills["head"] + ('\n' + '\n'.join(preview) if preview else '')
     if skills.get("items") and REVIEW_GUIDE not in head:
         head += "\n\n" + REVIEW_GUIDE
     return [head] + texts[1:] + details
@@ -420,8 +445,12 @@ def deliver(home, state, key):
             texts[0] += review_buttons(learning.extension("learning_skills").enabled(home))
         if report.get("routing"):
             texts.append(report["routing"])
+        for appendix in report.get('appendices', []):
+            texts.extend(layout.chunks(['*기억 정리 결과 · 학습 검토와 별개*', appendix['text']]))
         report["review_version"] = 2
-        report["parts"] = [layout.review_part(text) for text in texts]
+        report["parts"] = layout.bundle_parts([layout.review_part(text) for text in texts])
+        if report["items"] or report.get("skills", {}).get("items"):
+            report["parts"] = with_final(report["parts"])
         learning.save(path(home), state)
     for index, part in enumerate(report["parts"]):
         if part.get("ts"):
@@ -445,6 +474,8 @@ def deliver(home, state, key):
         learning.save(path(home), state)
     report["complete"] = True
     learning.save(path(home), state)
+    if report.get('appendices'):
+        learning.extension('morning_queue').acknowledge_appendices(home, report['appendices'])
 
 
 
@@ -493,6 +524,9 @@ def daily(home, now=None, *, dry_run=False, day=None):
                                          "parts": []}
                 if target == now.date() - timedelta(days=1):
                     state["reports"][key]["skills"] = skill_section(home, now, items)
+                    if Path(home).name == 'system-doctor':
+                        channel = learning.report_channel(home)
+                        state['reports'][key]['appendices'] = learning.extension('morning_queue').learning_appendices(home, channel)
                     try:
                         state["reports"][key]["routing"] = routing_section(home, now)
                     except Exception:
@@ -501,6 +535,8 @@ def daily(home, now=None, *, dry_run=False, day=None):
                 learning.save(path(home), state)
             if not state["reports"][key]["complete"]:
                 deliver(home, state, key)
+            if state['reports'][key].get('appendices'):
+                learning.extension('morning_queue').acknowledge_appendices(home, state['reports'][key]['appendices'])
             target += timedelta(days=1)
     return 0
 

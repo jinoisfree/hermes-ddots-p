@@ -54,7 +54,7 @@ def render(title, url, subtitle, lines, when):
     blocks = [{'type': 'header', 'text': {'type': 'plain_text', 'text': f'{mark} {title}'[:150], 'emoji': True}},
               {'type': 'context', 'elements': [{'type': 'mrkdwn', 'text': f'{subtitle} · {when}' + (f' · <{url}|노션에서 열기>' if url else '')}]}]
     body = []
-    for kind, heading in (('done', '반영한 것'), ('warn', '확인이 필요한 것')):
+    for kind, heading in (('warn', '확인이 필요한 것'), ('done', '반영한 것')):
         group = [(d, t) for k, d, t in items if k == kind]
         if not group:
             continue
@@ -96,7 +96,14 @@ def post_dm(home, reports):
     R = _sender()
     channel = report_room(home) or R.slack(home, 'conversations.open', {'users': R.owner(home)})['channel']['id']
     missed = []
+    seen = set()
     for report in reports:
+        # Same immutable change reported twice in one pass is one notice; a later pass remains independent.
+        identity = json.dumps({k: report.get(k) for k in ('title', 'url', 'subtitle', 'lines', 'when', 'fallback')},
+                              ensure_ascii=False, sort_keys=True)
+        if identity in seen:
+            continue
+        seen.add(identity)
         blocks, attachments = render(report['title'], report.get('url'), report['subtitle'], report['lines'], report['when'])
         try:
             R.slack(home, 'chat.postMessage', {'channel': channel, 'text': report['fallback'], 'blocks': blocks,

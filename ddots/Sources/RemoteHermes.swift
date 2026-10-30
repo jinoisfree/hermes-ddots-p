@@ -21,6 +21,8 @@ final class RemoteHermes: HermesSource {
     private var relayedUsage: RelayUsage?
     /// Paseo usage of the sharing Mac. Kept across a lost link; each value expires by its own observation time.
     var usage: RelayUsage? { lock.lock(); defer { lock.unlock() }; return relayedUsage }
+    private var relayedStreams: [StreamPreview] = []
+    var streamPreviews: [StreamPreview] { lock.lock(); defer { lock.unlock() }; return relayedStreams }
     private var relayedSlack = SlackActivity()
     /// Slack threads the sharing Mac's characters are writing in. Cleared when the link is lost so no dots linger.
     var slackActivity: SlackActivity { lock.lock(); defer { lock.unlock() }; return relayedSlack }
@@ -63,7 +65,7 @@ final class RemoteHermes: HermesSource {
         }
     }
     func stop() {
-        lock.lock(); isLinked = false; lock.unlock()
+        lock.lock(); isLinked = false; relayedStreams = []; lock.unlock()
         queue.sync { startupTapFailure = nil; stopped = true; watchdog?.cancel(); watchdog = nil; connection?.cancel(); connection = nil; welcomed = false }
         lock.lock(); let waiting = Array(pending.values); pending = [:]; lock.unlock()
         waiting.forEach { $0.done.signal() }
@@ -94,7 +96,7 @@ final class RemoteHermes: HermesSource {
         guard let old = connection else { return }
         startupTapFailure = nil; connection = nil; welcomed = false; old.cancel()
         lock.lock()
-        latest.status = .unavailable(wasDenied ? Self.denied : Self.lost); latest.typing = []; relayedSlack.writers = []; isLinked = false
+        latest.status = .unavailable(wasDenied ? Self.denied : Self.lost); latest.typing = []; relayedSlack.writers = []; relayedStreams = []; isLinked = false
         let waiting = Array(pending.values); pending = [:]
         lock.unlock()
         waiting.forEach { $0.done.signal() }
@@ -134,6 +136,8 @@ final class RemoteHermes: HermesSource {
             let waiter = frame.id.flatMap { pending.removeValue(forKey: $0) }
             waiter?.messages = (frame.messages ?? []).map(\.message)
             lock.unlock(); waiter?.done.signal()
+        case "streams":
+            lock.lock(); relayedStreams = frame.streams ?? []; lock.unlock()
         case "state":
             portraits?.receive(frame, fromRelay: true)
             lock.lock()

@@ -1,6 +1,8 @@
 """Bounded morning summaries and readable Slack detail pages (no network I/O)."""
 import re
 
+REVIEW_GUIDE = "모두 승인=이 보고의 학습·스킬 전부 유지 · 모두 거절=전부 변경 전 복구 · 의견=일부만 고칠 때 번호와 내용을 글로 · 확인=읽음, 적용은 그대로 두고 나중에 결정"
+
 
 def escape(text):
     return str(text).replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
@@ -19,14 +21,53 @@ def excerpt(text, limit=80):
     return result
 
 
-def summary(title, status, rows, action):
+def summary(title, status, rows, action='', *, review=False, limit=3):
     paragraphs = [f'*{title}*\n{status}']
-    for index, (label, text) in enumerate(rows[:5], 1):
+    if review and action:
+        paragraphs.append('*검토할 일*\n' + action)
+    for index, (label, text) in enumerate(rows[:limit], 1):
         paragraphs.append(f'*{index}. {excerpt(label, 48)}*\n> {excerpt(text, 90)}')
-    if len(rows) > 5:
-        paragraphs.append(f'외 *{len(rows) - 5}건* · 전체 {len(rows)}건은 스레드에서 확인')
-    paragraphs.append('📎 전체 내용·근거는 이 스레드에 이어서\n' + action)
+    if len(rows) > limit:
+        paragraphs.append(f'외 *{len(rows) - limit}건* · 전체 {len(rows)}건은 스레드에서 확인')
+    paragraphs.append('📎 전체 내용·근거는 이 스레드에 이어서')
     return '\n\n'.join(paragraphs)
+
+
+def bundle_parts(parts, limit=2200):
+    """Pack short detail items, retaining each item's identity for review repainting.
+
+    Only newly built, unsent reports may call this. Existing parts/markers stay immutable.
+    """
+    if any(p.get('ts') or p.get('attempted_at') for p in parts):
+        raise ValueError('cannot repack an attempted report')
+    result, pending = [], []
+    def flush():
+        if pending:
+            result.append({'text': '\n\n'.join(p['text'] for p in pending),
+                           'review_kind': '묶음', 'entries': [dict(p) for p in pending]})
+            pending.clear()
+    for index, part in enumerate(parts):
+        if index == 0 or part.get('review_kind') not in {'학습', '스킬'}:
+            flush(); result.append(part); continue
+        size = sum(len(p['text']) + 2 for p in pending) + len(part['text'])
+        if size > limit or len(pending) >= 5: flush()
+        if len(part['text']) > limit:
+            result.append(part)
+        else:
+            pending.append(part)
+    flush()
+    return result
+
+
+def reviewed_bundle(part, report):
+    texts = []
+    for entry in part['entries']:
+        states = report.get('skill_review_state' if entry['review_kind'] == '스킬' else 'review_state', {})
+        status = states.get(str(entry['item']), {}).get('status')
+        label = {'confirmed': '✅ 승인', 'rejected': '↩️ 거절', 'corrected': '✏️ 수정됨',
+                 'deferred': '⏸ 보류 · 적용 유지'}.get(status)
+        texts.append(entry['text'] + ('\n' + label if label else ''))
+    return '\n\n'.join(texts)
 
 
 def empty_learning(day):
@@ -77,13 +118,16 @@ def matches(message, marker):
 
 
 def item_messages(text, kind, number):
-    """One item per message; only its last bounded continuation carries actions."""
-    marker = "\n[[버튼: " + " | ".join(f"{kind} {number}번{suffix}" for suffix in ("만 승인", "만 거절", " 수정")) + "]]"
-    pages = chunks([text], limit=2800 - len(marker))
-    pages[-1] += marker
-    return pages
+    """One item per message. 2026-10-29 소유자 결정: 항목별 버튼은 없고 보고 첫 글·스레드 끝의 전체 버튼만 둔다."""
+    return chunks([text], limit=2800)
 
 
 def review_part(text):
     match = re.search(r"\n\[\[버튼: (학습|스킬) (\d+)번(?:만)? 승인 \| \1 \2번(?:만)? 거절 \| \1 \2번 수정\]\]\s*\Z", text)
-    return dict(text=text, **({"review_kind": match[1], "item": int(match[2])} if match else {}))
+    if match:  # reports sent before 2026-10-29 carried per-item buttons
+        return dict(text=text, review_kind=match[1], item=int(match[2]))
+    # 2026-10-29: item messages have no buttons; the heading names the item.
+    head = re.match(r"\*(?:(\d+)\. |스킬 (\d+)번 · )", text)
+    if head:
+        return dict(text=text, review_kind="학습" if head[1] else "스킬", item=int(head[1] or head[2]))
+    return dict(text=text)

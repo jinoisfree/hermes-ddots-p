@@ -425,8 +425,16 @@ def limit_prompt(r):
 
 def prompt(r):
     if r.get('source') == 'limit_report':
-        return night_prompt(r) + limit_prompt(r)
-    return night_prompt(r) + (program_prompt(r) if r.get('source') == 'program' else worded(_prompt(r), r.get('requester_profile', 'sns-manager')))
+        body = limit_prompt(r)
+    else:
+        body = program_prompt(r) if r.get('source') == 'program' else worded(_prompt(r), r.get('requester_profile', 'sns-manager'))
+    if r.get('deferred') == 'night':
+        # 2026-10-29: 새벽 판정은 보고 채널이 아니라 아침 private-service-27 보고에 실린다. 짧은 판정의 안내 문장도 그에 맞춘다.
+        body = body.replace('보고 채널 안내', '아침 진단담당 보고 안내').replace('보고 채널에 올렸다', '아침 진단담당 보고에 붙였다')
+    spec = importlib.util.spec_from_file_location('diagnosis_review_quality', Path(__file__).with_name('review_quality.py'))
+    quality = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(quality)
+    return night_prompt(r) + quality.POLICY + body
 
 
 def night_prompt(r):
@@ -445,7 +453,7 @@ def _prompt(r):
             '지난 진단(prior)이 있으면 반복 여부를 밝히되 결론은 이번 기록으로 확인한다. 조사 스레드는 diagnosis_case_read로 먼저 읽고 모자란 원문·세션·상태만 개별 조회한다. '
             '코드를 근거로 쓸 때는 사건 뒤 변경 여부를 먼저 확인하고 이미 고쳐진 문제는 커밋과 시각을 들어 그렇게 보고하며, SNS담당 설명이 기록과 달랐던 문제의 이미 고쳐졌다는 결론은 없음이 아니라 답한다. '
             '답장 가능 시간 판정이 필요하면 원래 수신 알림 스레드를 직접 읽고 알림 본문에 적힌 실제 수신 시각과 판정 시각을 함께 제시한다. Slack 메시지의 ts_kst는 게시 시각이므로 실제 수신 시각으로 대신 쓰지 않는다. 알림 본문이 분까지만 있으면 그 정밀도로 쓰고, 옛 진단에만 있는 초는 원본에서 확인되기 전에는 재사용하지 않는다. '
-            '전체 결과의 시각은 도구가 준 KST 시:분:초(ts_kst 등)로 쓰고 ts는 필요할 때 괄호로 덧붙인다. 무렵·쯤은 쓰지 않으며 경과 시간은 두 시각과 ts 차를 근거로 분·초로 쓰고 소수점 초는 쓰지 않는다. 확인되지 않은 추정이나 미재현 문제에는 수정안을 내지 않고 확인할 것만 적는다. 최소 수정안은 기록으로 확인된 남은 결함에만 내며, 그런 결함이 없으면 이미 고쳐졌다로 끝낸다. '
+            '전체 결과의 시각은 도구가 준 KST 시:분:초(ts_kst 등)로 쓰고 ts는 필요할 때 괄호로 덧붙인다. 무렵·쯤은 쓰지 않으며 경과 시간은 두 시각과 ts 차를 근거로 분·초로 쓰고 소수점 초는 쓰지 않는다. 확인되지 않은 추정이나 미재현 문제에는 수정안을 내지 않고 확인할 것만 적는다. 최소 수정안은 기록으로 확인된 남은 결함에만 내며, 해결 기록이 확인된 경우에만 이미 고쳐졌다고 한다. 근거가 부족하면 미확인과 다음 검사를 적는다. '
             '정상이 아니면 출력 형식은 짧은 판정 / 구분선 / 전체 결과다. 첫 부분은 요청 스레드(SNS담당방이나 #starter_user-world)에 올릴 진단담당 말투의 두 문장 이내·300자 이하 판정이다. 근거 나열·고객 DM 원문·링크는 넣지 말고, 자세한 근거는 보고 채널에 올렸다는 뜻을 자기 말로 포함한다. 승인하면으로 시작하지 않는다. 짧은 판정은 반드시 정확히 두 문장: 첫 문장은 판정 하나만, 둘째 문장은 보고 채널 안내만 쓴다. 세 번째 문장이나 시각·사례 설명을 덧붙이지 않는다. '
             f'다음 줄에 정확히 {SEPARATOR} 한 줄을 쓰고 그 아래 전체 결과(원인·근거·최소 수정안 하나)를 쓴다. '
             '전체 결과는 보고 채널(설정이 없으면 소유자 개인 DM)으로 전달되며 스레드 링크는 프로그램이 붙인다. 구분선은 한 번만 쓴다. '
@@ -466,6 +474,9 @@ def _prompt(r):
             + '\n출력 직전 확인: 없음이 아니라면 구분선 위는 반드시 두 줄, 각 줄 한 문장만 쓴다. 첫 줄은 판정 한 문장, 둘째 줄은 보고 채널 안내 한 문장이다. 별도의 도입 문장은 지우고 근거는 모두 구분선 아래로 옮긴다.')
 
 
+STATUS_LINE = re.compile(r'^\s*⟳ ')
+
+
 def execute(r, capability):
     env = {k: v for k, v in os.environ.items() if not k.startswith('HERMES_SESSION_') and k not in {'HERMES_PROFILE', 'HERMES_KANBAN_TASK', 'HERMES_CRON_SESSION', TOKEN_ENV, REQUEST_ENV}}
     # HERMES_DISABLE_LAZY_INSTALLS: never run a pending source-update tail in a background run.
@@ -483,7 +494,9 @@ def execute(r, capability):
             raise TimeoutError('Diagnosis timeout') from None
     if proc.returncode:
         raise RuntimeError('Hermes execution failed')
-    return re.split(r'\n─{5,}\n', stdout, maxsplit=1)[0].strip()
+    answer = re.split(r'\n─{5,}\n', stdout, maxsplit=1)[0]
+    # Agent status lines (e.g. "  ⟳ compacting context…") are not part of the answer (2026-10-29).
+    return '\n'.join(line for line in answer.splitlines() if not STATUS_LINE.match(line)).strip()
 
 
 def split_coaching(answer, program=False):

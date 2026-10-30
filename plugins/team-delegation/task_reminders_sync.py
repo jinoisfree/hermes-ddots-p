@@ -144,7 +144,15 @@ class Native(old.Native):
         private_tasks=item.get('scope')=='private' and kind=='notes' and obsidian_store.is_id(identifier)
         if (item.get('status') != 'active' and kind != 'work' and not private_tasks) or source['closed']:
             raise ValueError('source_closed')
+        isolated = getattr(self, '_watcher_authority', None)
+        if isolated is not None and (not cid or item.get('scope') != 'shared' or
+                                     authority != isolated or authority[0] != 'notion'):
+            raise ValueError('independent_reminder_authority_invalid')
         for ref_kind, ref_id in self.sources.references(item):
+            # Internal watcher capability only, never accepted from public tool arguments.
+            # A healthy Notion and its reminders do not depend on reading a broken mirror.
+            if isolated is not None and (ref_kind, ref_id) != isolated:
+                continue
             if read(ref_kind, ref_id).get('closed'):
                 raise ValueError('linked_work_closed')
         for linked in item.get('sources', []):

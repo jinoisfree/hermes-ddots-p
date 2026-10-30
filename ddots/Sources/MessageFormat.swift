@@ -104,7 +104,7 @@ enum MessageFormat {
             if markdown {
                 let range = NSRange(line.startIndex..., in: line)
                 if let match = heading.firstMatch(in: line, range: range) {
-                    lineStyle.size = [24.0, 20.0, 16.0][match.range(at: 1).length - 1]; lineStyle.bold = true
+                    lineStyle.size = [24.0, 20.0, 18.0][match.range(at: 1).length - 1]; lineStyle.bold = true
                     line = (line as NSString).substring(with: match.range(at: 2))
                 } else if let match = check.firstMatch(in: line, range: range) {
                     let checked = (line as NSString).substring(with: match.range(at: 2)).lowercased() == "x"

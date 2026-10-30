@@ -60,7 +60,7 @@ struct ChatView: View {
     @ChatDraftFocus private var focused = false
     @ChatDraftFocus var slackFocused = false
     @FocusState private var searchFocused: Bool
-    @FocusState private var slackFindFocused: Bool
+    @FocusState var slackFindFocused: Bool
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.colorScheme) private var colorScheme
     var shouldReduceMotion: Bool { reduceMotion || CommandLine.arguments.contains("--ui-smoke-reduce-motion") }
@@ -108,13 +108,13 @@ struct ChatView: View {
     }
     private var conversationSide: some View {
         VStack(spacing: 0) {
-            header
+            if !slackActive { header }
             if web.shrimpList && web.shrimpCollapsed {
                 ShrimpListPane(candidates: slack.driveListMessage != nil ? slack.driveList() : slack.shrimpAll(slack.shrimpListThread), choose: { _ in },
                                close: { slack.shrimpListThread = nil; slack.driveListMessage = nil; web.close() }, collapsed: true,
                                toggle: { web.toggleShrimpList() }, page: $slack.shrimpListPage, query: $web.shrimpQuery, searchFocus: { web.shrimpSearchFocused = $0 })
             }
-            Divider()
+            if !slackActive { Divider() }
             GeometryReader { geometry in
                 // The tab strip is exactly the width the window has gained so far, so the conversation column
                 // keeps its width and the strip slides in step with the window.
@@ -234,6 +234,11 @@ struct ChatView: View {
             } else {
                 HStack(spacing: 0) {
                     Text(Ddots.title).font(.system(size: ChatMetrics.nameFont, weight: .semibold)).lineLimit(1)
+                    if slackActive, let room = slack.room {
+                        Text(" · ").foregroundColor(quiet)
+                        Text(room.name).font(.system(size: ChatMetrics.nameFont, weight: .medium))
+                            .lineLimit(1).help(room.name).accessibilityIdentifier("current-room-title")
+                    }
                     Spacer(minLength: 0)
                 }.frame(minHeight: 22).overlay(ChatDragRegion(model: model).padding(.vertical, -9))
                 // With ddots on and Slack connected, the rooms are the whole of the window and there is nothing to switch between.

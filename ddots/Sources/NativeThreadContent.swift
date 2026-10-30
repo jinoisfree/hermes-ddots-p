@@ -5,7 +5,7 @@ import SwiftUI
 private enum NativeBodyCache {
     struct Key: Equatable {
         var body: String, term: String?, linkColor: String, quoteColors: [String], bar: String
-        var folded: Bool, dark: Bool, mine: Bool
+        var folded: Bool, dark: Bool, mine: Bool, streaming: Bool
         var checklist: UInt64
     }
     struct Entry { var key: Key; var text: NSAttributedString; var checks: [Int: Bool] }
@@ -20,19 +20,19 @@ extension ChatView {
         let expanded = slack.open.contains(thread.id)
         let shown = SlackStack.visible(displayed, expanded: expanded)
         // A character whose "생각 중" line is already in the thread is not shown writing twice.
-        let thinkers = Set(thread.messages.filter { !$0.fromUser && SlackText.isThinking($0.body) }.map(\.profile))
+        let thinkers = Set(thread.messages.filter { !$0.fromUser && (SlackText.isThinking($0.body) || $0.streaming) }.map(\.profile))
         let writing = (slack.typing[thread.id] ?? []).filter { !thinkers.contains($0.profile) }
         let answered = thread.replyCount > 0 || !writing.isEmpty
         let notice = slack.noticeMemo.assessment(thread, confirmed: slack.confirmed)
-        let state = notice.state
-        let tone = state.flatMap { MessageFormat.color($0.color) } ?? displayed.root.marks.lazy.compactMap { MessageFormat.color($0.color) }.first
+        let state = notice.state.map { mark in
+            ChatMark(color: SlackNotice.railColor(thread, pending: notice.pending, state: mark) ?? mark.color, text: mark.text)
+        }
+        let tone = SlackNotice.railColor(thread, pending: notice.pending, state: state).flatMap { MessageFormat.color($0) } ?? displayed.root.marks.lazy.compactMap { MessageFormat.color($0.color) }.first
         let edge = SlackOwner.color(SlackOwner.profile(thread, members: slack.ddotsMembers)).map(NSColor.init)
-        let carded = answered || tone != nil
         let foldable = thread.replyCount > SlackStack.inlineLimit || !thread.loaded
         let pending = notice.pending?.id
         let vaultLayout = slack.vault.presentation(thread, active: slack.vaultSelections(thread), visible: Set([displayed.root.id] + shown.replies.map(\.id)), pending: pending)
         let mine = thread.root.fromUser
-        let picked = slack.picked == thread.id
         let flash = slack.flash == thread.id
         let quiet = Self.nativeQuiet(dark: inputs.dark)
         let pick: () -> Void = { slack.clickCard(thread, foldable: foldable) }
@@ -49,7 +49,10 @@ extension ChatView {
         func pieces(for message: ChatMessage) -> [NativeThreadCard.Piece] {
             var result: [NativeThreadCard.Piece] = []
             if !vaultLayout.hidden.contains(message.id) {
-                if let post = nativePost(message, inputs: inputs, edge: edge) { result.append(.post(post)); nativeShown.insert(message.id) }
+                if var post = nativePost(message, inputs: inputs, edge: edge) {
+                    post.conversational = !message.streaming && message.id != displayed.root.id && !message.fromUser && message.marks.isEmpty && ThreadAppearance.isConversational(message.body)
+                    result.append(.post(post)); nativeShown.insert(message.id)
+                }
                 else { result.append(host("line:" + message.id) { slackLine(message, selectable: true, textClick: textClick) }) }
             }
             return result
@@ -68,6 +71,7 @@ extension ChatView {
         }
 
         var top: [NativeThreadCard.Piece] = []
+        top.append(host("digest:" + thread.id) { ThreadDigestView(thread: original) { slack.onLoadSummary?(original) } })
         if slack.isDdots, let project = slack.project(thread) {
             top.append(host("project:" + thread.id) { nativeProject(thread, project: project) })
         }
@@ -75,10 +79,6 @@ extension ChatView {
             top.append(.owner(name: who.name, avatar: Ddots.avatar(model.avatars[who.profile], name: who.name) ?? ProfileAvatar()))
         }
         top += pieces(for: displayed.root)
-        if let state, displayed.root.marks.isEmpty {
-            let text = nativeMarkText(SlackNotice.displayStatus(state.text), font: NativeThreadCard.noteFont, dark: inputs.dark)
-            top.append(.note(.init(color: MessageFormat.color(state.color) ?? NSColor.labelColor.withAlphaComponent(0.35), text: text), mine: mine))
-        }
         top += extras(for: displayed.root)
 
         var replies: [NativeThreadCard.Piece]?
@@ -115,8 +115,8 @@ extension ChatView {
             actions.append(.init(title: "분기", symbol: asked ? "checkmark" : "arrow.triangle.branch", label: "새 스레드로 이어가기",
                                  identifier: "branch-" + thread.id, enabled: !asked, color: asked ? accent : long ? .systemOrange : quiet, invoke: { slack.branch(thread) }))
         }
-        actions.append(.init(title: target ? "답글 쓰는 중" : "답글", symbol: "arrowshape.turn.up.left", label: target ? "답글 쓰는 중" : "답글",
-                             identifier: "reply-" + thread.id, enabled: !(target || thread.ts.isEmpty), color: target ? accent : quiet, alwaysLabel: true,
+        actions.append(.init(title: "답글 \(thread.replyCount)개", symbol: "bubble.left", label: "답글 \(thread.replyCount)개, 이 스레드에 답글 쓰기",
+                             identifier: "reply-" + thread.id, enabled: !thread.ts.isEmpty, color: quiet, alwaysLabel: true,
                              invoke: { slack.reply(thread) }))
         var deleting: String?
         if let going = slack.removing[thread.id] {
@@ -126,22 +126,24 @@ extension ChatView {
             actions.append(.init(title: sure ? "정말 삭제" : "삭제", symbol: "trash", label: sure ? "스레드 삭제 확인" : "스레드 삭제",
                                  identifier: "delete-" + thread.id, color: sure ? .systemRed : quiet, alwaysLabel: sure, invoke: { slack.delete(thread) }))
         }
-        if expanded && thread.loaded && thread.replies.count > SlackStack.inlineLimit {
-            actions.append(.init(title: "접기", symbol: "chevron.up", label: "접기", identifier: "fold-" + thread.id, color: quiet, alwaysLabel: true,
+        if foldable {
+            actions.append(.init(title: expanded ? "접기" : "펼치기", symbol: expanded ? "chevron.up" : "chevron.down", label: expanded ? "접기" : "펼치기", identifier: "fold-" + thread.id, color: quiet, alwaysLabel: true,
                                  invoke: { slack.toggle(thread) }))
         }
 
-        let strokeBase = edge ?? tone ?? NSColor.labelColor
-        let strokeAlpha: CGFloat = !carded ? 0 : edge != nil ? (expanded ? 0.95 : 0.6) : tone != nil ? (expanded ? 1 : 0.6) : (expanded ? 0.6 : 0.24)
-        let stroke: NSColor? = flash ? accent : picked ? (edge ?? tone ?? accent) : (strokeAlpha > 0 ? strokeBase.withAlphaComponent(strokeBase.alphaComponent * strokeAlpha) : nil)
-        let style = NativeThreadCard.Style(inset: carded || picked ? 8 : 0,
-                                           fill: picked ? 0.1 : !carded ? 0 : expanded ? 0.08 : 0.045,
-                                           stroke: stroke,
-                                           lineWidth: flash ? 2.5 : picked ? 2.2 : expanded || edge != nil ? 1.5 : 1)
-        let rail: NSColor? = mine ? nil : target ? accent : tone.map { $0.withAlphaComponent($0.alphaComponent * 0.75) } ?? NSColor.labelColor.withAlphaComponent(0.2)
+        // Status belongs to the entire thread, even when folded or written by the owner.
+        // The reply target is an independent blue outline; never recolour a state rail blue.
+        let style = NativeThreadCard.Style(inset: ThreadAppearance.inset,
+                                           fill: 0,
+                                           stroke: flash || target ? accent : NSColor.labelColor.withAlphaComponent(inputs.dark ? 0.16 : 0.12),
+                                           lineWidth: flash ? 2 : target ? 1.5 : 1,
+                                           background: ThreadAppearance.surface(dark: inputs.dark), status: tone,
+                                           replyBackground: ThreadAppearance.replySurface(dark: inputs.dark))
+        let rail: NSColor? = nil
         return NativeThreadCard.Content(id: thread.id, top: top, replies: replies, rail: rail, actions: actions, deleting: deleting,
                                         style: style, bell: slack.bells[thread.id], onBell: { slack.onBell?(thread) },
-                                        clickCard: pick, textClick: textClick, bubbleWidth: model.bubbleWidth, quiet: quiet, expanded: expanded)
+                                        clickCard: pick, textClick: textClick, bubbleWidth: model.bubbleWidth, quiet: quiet, expanded: expanded, summary: threadSummary(thread, target: target),
+                                        statusTitle: state.map { SlackNotice.displayStatus($0.text) } ?? "", replyTarget: target)
     }
 
     /// The project record above a thread in ddots, as the SwiftUI card shows it.
@@ -215,7 +217,7 @@ extension ChatView {
         if message.fromUser && !message.marks.isEmpty { return nil }
         let palette = model.palette(message.profile, dark: inputs.dark)
         let term = slack.findTerm(message)
-        let foldable = !message.fromUser && LongReply.needsFolding(message.body)
+        let foldable = !message.streaming && !message.fromUser && LongReply.needsFolding(message.body)
         let folded = term == nil && foldable && !model.expandedReplies.contains(message.id)
         let shown = folded ? LongReply.preview(message.body) : message.body
         let body = message.fromUser ? shown : shown.trimmingCharacters(in: .newlines)
@@ -223,7 +225,7 @@ extension ChatView {
         let key = MessageChecklist.key(identity, text: message.body)
         let bar = edge ?? SlackOwner.color(message.profile).map(NSColor.init)
         let bodyKey = NativeBodyCache.Key(body: message.body, term: term, linkColor: palette.link.nsColor.description, quoteColors: message.quoteColors, bar: bar?.description ?? "",
-            folded: folded, dark: inputs.dark, mine: message.fromUser, checklist: MessageChecklist.shared.revision)
+            folded: folded, dark: inputs.dark, mine: message.fromUser, streaming: message.streaming, checklist: MessageChecklist.shared.revision)
         let entry: NativeBodyCache.Entry
         if let cached = NativeBodyCache.entries[identity], cached.key == bodyKey { entry = cached }
         else {
@@ -258,8 +260,8 @@ extension ChatView {
     private func nativeBody(_ body: String, message: ChatMessage, palette: CharacterPalette, term: String?, key: String,
                             cacheKey: NativeBodyCache.Key, dark: Bool, bar: NSColor?) -> NativeBodyCache.Entry {
         // A character's post is laid out as Slack lays out its blocks; my own bubble stays plain.
-        let layout = message.fromUser ? nil : SlackLayout.strip(body)
-        let native = NSMutableAttributedString(attributedString: ChatText.linkifiedNative(MessageFormat.renderNative(layout?.source ?? body)))
+        let layout = message.fromUser || message.streaming ? nil : SlackLayout.strip(body)
+        let native = message.streaming ? NSMutableAttributedString(string: body, attributes: [.font: NSFont.systemFont(ofSize: ChatMetrics.bodyFont), .foregroundColor: NSColor.labelColor]) : NSMutableAttributedString(attributedString: ChatText.linkifiedNative(MessageFormat.renderNative(layout?.source ?? body)))
         // Synology links read as the file's name, as the SwiftUI line titles them.
         if !message.fromUser {
             native.enumerateAttribute(.link, in: NSRange(location: 0, length: native.length), options: .reverse) { value, range, _ in
@@ -303,7 +305,7 @@ extension ChatView {
         var utf16 = 0
         for (index, character) in native.string.enumerated() {
             let length = String(character).utf16.count
-            if character == "☐" || character == "☑" {
+            if !message.streaming && (character == "☐" || character == "☑") {
                 let original = character == "☑"; checks[index] = original
                 native.replaceCharacters(in: NSRange(location: utf16, length: length), with: MessageChecklist.shared.checked(key, offset: index, original: original) ? "☑" : "☐")
                 native.addAttribute(.link, value: URL(string: "ddots-check://toggle/\(index)")!, range: NSRange(location: utf16, length: 1))

@@ -1,15 +1,30 @@
 import AppKit
 
+/// A local preference; nil appearance follows macOS automatically.
+enum ChatTheme: String, CaseIterable {
+    case system, light, dark
+    static let settingsKey = "chatTheme"
+    static func load(_ defaults: UserDefaults = .standard) -> ChatTheme {
+        ChatTheme(rawValue: defaults.string(forKey: settingsKey) ?? "") ?? .system
+    }
+    var title: String {
+        switch self { case .system: return "시스템 설정"; case .light: return "라이트 모드"; case .dark: return "다크 모드" }
+    }
+    var appearance: NSAppearance? {
+        switch self { case .system: return nil; case .light: return NSAppearance(named: .aqua); case .dark: return NSAppearance(named: .darkAqua) }
+    }
+}
+
 enum ChatMetrics {
-    static let avatar: CGFloat = 30
+    static let avatar: CGFloat = 34
     /// Corner radius of a character picture as a share of its side.
     static let avatarCorner: CGFloat = 0.24
     static let callerAvatar: CGFloat = 24
     static let notificationAvatar: CGFloat = 20
     static let thumbnailPixels = 64
-    static let nameFont: CGFloat = 13
+    static let nameFont: CGFloat = 14
     static let auxiliaryFont: CGFloat = 11
-    static let bodyFont: CGFloat = 13
+    static let bodyFont: CGFloat = 14
     static let avatarNameGap: CGFloat = 8
     static let nameBodyGap: CGFloat = 4
     static let speakerInset: CGFloat = 10
@@ -148,5 +163,29 @@ struct CharacterPalette: Equatable {
             link = PaletteRGB.hsl(200, 0.9, min(1, max(0, linkLightness)))
         }
         return CharacterPalette(background:background,foreground:foreground,name:name,link:link,hue:hue)
+    }
+}
+
+
+/// Shared by native and SwiftUI thread renderers. Background tint lives below these
+/// surfaces, so the opacity slider never fades text, controls or status colours.
+enum ThreadAppearance {
+    static let inset: CGFloat = 18
+    static let radius: CGFloat = 16
+    static let statusWidth: CGFloat = 4
+    static func surface(dark: Bool) -> NSColor {
+        dark ? NSColor(white: 0.15, alpha: 0.55) : NSColor.white.withAlphaComponent(0.38)
+    }
+    static func replySurface(dark: Bool) -> NSColor {
+        (dark ? NSColor.white : NSColor.black).withAlphaComponent(dark ? 0.09 : 0.055)
+    }
+    /// Reports, lists, quotes, code and long prose keep the full reading width.
+    static func isConversational(_ body: String) -> Bool {
+        let lines = body.components(separatedBy: "\n")
+        return !body.isEmpty && body.count <= 240 && lines.count <= 4 &&
+            !lines.contains { line in
+                let text = line.trimmingCharacters(in: .whitespaces)
+                return ["```", "|", ">", "#", "- ", "* ", "•", "1."].contains { text.hasPrefix($0) }
+            }
     }
 }

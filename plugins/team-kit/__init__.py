@@ -52,6 +52,13 @@ _MEMORY_STEER_SEEN = {}
 _MEMORY_STEER_LOCK = threading.Lock()
 
 
+def _log_reason(exc):
+    """Reason for a skipped step; never let the logging itself break the turn."""
+    try:
+        return _LEARNING.extension("work_runtime").log_reason(exc, _LEARNING.SECRET)
+    except Exception:
+        return type(exc).__name__
+
 def _settings() -> dict[str, Any]:
     configured = _PLUGIN_CONTEXT.get_config("context_bridge", {}) if _PLUGIN_CONTEXT else {}
     return {**DEFAULTS, **(configured if isinstance(configured, dict) else {})}
@@ -232,7 +239,7 @@ def _pre_llm_call(session_id: str = "", platform: str = "", **_: Any) -> dict[st
                     Path(get_hermes_home()), _LEARNING, session_id=session_id, **_)
                 context = "\n\n".join(part for part in (context, work) if part)
             except Exception as exc:
-                logger.warning("team-kit work context skipped: %s", type(exc).__name__)
+                logger.warning("team-kit work context skipped: %s", _log_reason(exc))
         presentation = (_missing_prompt_note(Path(get_hermes_home()), session_id, _OWNER_PRESENTATION,
                                                    _.get('conversation_history'))
                         if _PROMPT_GUIDANCE else _OWNER_PRESENTATION)
@@ -1058,6 +1065,15 @@ def register(ctx) -> None:
     global _PLUGIN_CONTEXT, _LEARNING, _MORNING_REPORT, _OWNER_PRESENTATION, _PROJECTS, _PROJECT_LEARNING, _PROJECT_ERROR, _PROMPT_GUIDANCE, _TOOL_GUIDANCE
     _PLUGIN_CONTEXT = ctx
     _OWNER_PRESENTATION = None
+    try:
+        import importlib.util
+        from hermes_constants import get_hermes_home
+        spec = importlib.util.spec_from_file_location('team_kit_chat_streaming', Path(__file__).with_name('chat_streaming.py'))
+        streaming = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(streaming)
+        streaming.register(ctx, get_hermes_home())
+    except Exception:
+        logger.exception('team-kit chat streaming registration failed')
     try:
         import importlib.util
         from hermes_constants import get_hermes_home

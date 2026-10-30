@@ -61,6 +61,7 @@ CONTENT_WARNINGS = {  # work_sync.Engine warning lines -> fixed reason codes for
     '앞선 본문·할 일 반영이 불명확해': 'work_content_pending_uncertain',
     '두 원본이 서로 다르게 바뀌었어요': 'work_content_conflict',
     '노션 다음 마감 반영 확인이 필요해': 'work_content_write_uncertain',
+    '할 일 미리알림 반영 확인이 필요해': 'work_reminder_write_uncertain',
     '노션 할 일의 마감 근거를 확인해야': 'work_content_deadline_unresolved',
 }
 
@@ -480,6 +481,7 @@ class Sync:
         self.execution_reads = False
         self.link_lifecycle = None
         self.content_engine = None
+        self.steps = None
         self.title_sync = title_sync
         self.notes = notes if notes is not None else Notes()
         self.calendar = calendar
@@ -856,7 +858,7 @@ class Sync:
         except Exception:
             return None  # An unavailable read never proves an unchanged source.
 
-    def work_health(self, item, status, reason, errors):
+    def work_health(self, item, status, reason, errors, *, report=True):
         health = self.state.setdefault('work_health', {})
         cid = item['common_id']
         signature = sorted((r['domain'],r['source_id']) for r in item['sources']) + sorted(
@@ -876,13 +878,84 @@ class Sync:
             health[cid] = current
             # 'unsupported' (e.g. several calendar originals in one work) is a design limit the owner
             # cannot act on: keep it in the state, do not report it (2026-10-26).
-            if warn and status not in ('ok', 'unsupported'):
+            if report and warn and status not in ('ok', 'unsupported'):
                 label = WORK_ERROR_REASONS.get(reason, '원본 조회·연결 상태를 확인해 주세요')
                 errors.append(f'• ⚠️ 「{item.get("title") or "제목 확인 불가"}」 — {label}')
                 self.warning_meta[errors[-1]] = (cid, reason)
             self.persist()
             return transitioned
         return False
+
+    def blocked_content_due(self, item, decisions, errors):
+        """Lifecycle failure of a different original must not gate a verified authoritative page."""
+        check = getattr(self.content_engine, 'due_only', None)
+        notion = [d for d in decisions if d['domain'] == 'notion']
+        if not check or len(notion) != 1 or notion[0]['status'] != 'ok':
+            return
+        if not any(r.get('ref_type') == 'notion_page' and r['external_id'] == notion[0]['source_id']
+                   for r in item.get('knowledge_refs', [])):
+            return  # lifecycle relinked the page; wait for the new baseline
+        cid = item['common_id']
+        try:
+            lines = check(item)
+        except Exception as exc:
+            reason = work_error_reason(exc)
+            self.work_health(item, 'transient', reason, errors)
+            log_work_error(self.path.parent.parent, cid, reason, exc)
+            return
+        report = []
+        for line in lines:
+            code = content_warning_code(line)
+            if code and self.warning_diagnosis is not None:
+                key = f'work-error:{cid}:{code}'
+                if key not in self.state['notices']:
+                    self.state['notices'].append(key)
+                    errors.append(f'• ⚠️ 「{item.get("title") or "제목 확인 불가"}」 — {line.removeprefix("• ⚠️ ")}')
+                    self.warning_meta[errors[-1]] = (cid, code, item.get('title') or '제목 확인 불가')
+            else:
+                report.append(line)
+        report = self.drop_repeated_standing(cid, report)
+        if report:
+            self.work_report(item, report)
+        self.persist()
+
+    def finish_steps(self, item, outcome=None, *, error=None, decisions=None):
+        if self.steps is None:
+            return outcome or {'handled': True, 'messages': []}
+        outcome = self.steps.finish(item, outcome, error=error, decisions=decisions, dry=self.dry)
+        if not self.dry:
+            records = self.state.setdefault('work_execution', {})
+            reminder = outcome['execution']['reminders']
+            if reminder.get('error_type'):
+                previous = records.get(item['common_id'], {}).get('reminders', {})
+                reminder['failures'] = previous.get('failures', 0) + 1 if previous.get('error_type') == reminder['error_type'] else 1
+                if reminder['failures'] == 3:
+                    from work_sync_steps import REMINDER_WARNING
+                    outcome['messages'].append(REMINDER_WARNING)
+            records[item['common_id']] = outcome['execution']
+            self.persist()
+        return outcome
+
+    def blocked_steps(self, item, decisions, errors):
+        # Compatible with the independently developed authoritative date recovery.
+        due = getattr(self, 'blocked_content_due', None)
+        if due is not None:
+            due(item, decisions, errors)
+        outcome = self.finish_steps(item, decisions=decisions)
+        if outcome.get('execution') and self.link_lifecycle is not None:
+            status = outcome['execution']['status']
+            self.work_health(item, status, 'work_execution_incomplete', errors, report=False)
+        for line in self.drop_repeated_standing(item['common_id'], outcome['messages']):
+            code = content_warning_code(line)
+            if code:
+                key = f"work-error:{item['common_id']}:{code}"
+                if key not in self.state['notices']:
+                    self.state['notices'].append(key)
+                    errors.append(f"• ⚠️ 「{item['title']}」 — {line.removeprefix('• ⚠️ ')}")
+                    self.warning_meta[errors[-1]] = (item['common_id'], code)
+            else:
+                self.work_report(item, [line])
+        self.persist()
 
     def sync_links(self):
         with self.store._connect() as conn:
@@ -904,6 +977,8 @@ class Sync:
             """)]
         errors = []
         for cid in ids:
+            if self.steps is not None:
+                self.steps.begin(cid)
             item = self.store.get(cid)
             import work_policy
             item = work_policy.permitted(item)
@@ -927,6 +1002,7 @@ class Sync:
                                        ValueError(decision['status']), frames=decision.get('traceback',[]),
                                        exception_type=decision.get('exception_type'))
                 if any(d['status']=='transient' for d in decisions):
+                    self.blocked_steps(item, decisions, errors)
                     continue
                 if not self.dry and any(d.get('old_id') for d in decisions):
                     item = self.store.get(cid)
@@ -950,6 +1026,7 @@ class Sync:
                 if health.get('status')=='conflict' and health.get('links')==signature:
                     revisions = self.work_revisions(item)
                     if revisions is not None and revisions==health.get('revisions'):
+                        self.blocked_steps(item, decisions, errors)
                         if self.completion is not None and not self.dry:
                             # 진행도 is a status mark, independent of the content conflict.
                             self.lines = []
@@ -965,11 +1042,15 @@ class Sync:
                     # 진행도 first: a content conflict or read error below must not hold back the status mark.
                     self.completion.fill_progress(item)
                 if self.content_engine is not None:
-                    outcome = self.content_engine.run(item)
+                    outcome = self.finish_steps(item, self.content_engine.run(item))
                     if outcome.get('resolved'):
                         self.resolved.append((cid, outcome['resolved']))
                     if self.link_lifecycle is not None:
-                        self.work_health(item, outcome.get('connection_status','ok'), outcome.get('connection_reason','read_ok'), errors)
+                        execution = outcome.get('execution', {})
+                        partial = execution.get('status') in {'partial', 'blocked'}
+                        self.work_health(item, execution['status'] if partial else outcome.get('connection_status','ok'),
+                                         'work_execution_incomplete' if partial else outcome.get('connection_reason','read_ok'),
+                                         errors, report=not partial)
                     warned = False
                     for line in outcome['messages']:
                         code = content_warning_code(line)
@@ -985,7 +1066,7 @@ class Sync:
                         self.say(line)
                     if not warned and self.warning_diagnosis is not None:
                         self.state['notices'] = [k for k in self.state['notices']
-                                                 if not k.startswith(f'work-error:{cid}:work_content_')]
+                                                 if not k.startswith((f'work-error:{cid}:work_content_', f'work-error:{cid}:work_reminder_'))]
                     if self.completion is not None:
                         self.completion.check({**item, 'status': self.store.get(cid)['status']})
                     if outcome['handled']:
@@ -999,6 +1080,17 @@ class Sync:
                 self.state['work_failures'].pop(cid, None)
                 self.persist()
             except Exception as exc:
+                recovered = self.finish_steps(item, {'handled': True, 'messages': getattr(exc, 'work_due_messages', [])}, error=exc)
+                for line in recovered['messages']:
+                    code = content_warning_code(line)
+                    if code and self.warning_diagnosis is not None:
+                        key = f'work-error:{cid}:{code}'
+                        if key not in self.state['notices']:
+                            self.state['notices'].append(key)
+                            errors.append(f"• ⚠️ 「{item.get('title') or '제목 확인 불가'}」 — {line.removeprefix('• ⚠️ ')}")
+                            self.warning_meta[errors[-1]] = (cid, code, item.get('title') or '제목 확인 불가')
+                    else:
+                        self.say(line)
                 if self.link_lifecycle is not None:
                     reason = work_error_reason(exc)
                     status = 'conflict' if reason in {'linked_task_sources_conflict','ambiguous_task_deadline'} else 'transient'
@@ -1351,13 +1443,17 @@ def main(*, dry_run=False):
         import work_sync
         import work_sources
         import task_reminders_sync
-        def sync_task_reminders(item, dry):
+        def sync_task_reminders(item, dry, *, authority=None):
             native = task_reminders_sync.Native(home)
             native.watcher_item = item
+            native._watcher_authority = authority
             return task_reminders_sync.sync(home, {'common_id':item['common_id'], 'dry_run':dry},
                                             native=native, serialized=True)
+        from work_sync_steps import Steps
+        sync.steps = Steps(home, sync_task_reminders)
         sync.content_engine = work_sync.configured(home, work_sources.Sources(home, reader=sync.reader, notes=sync.notes, calendar=sync.calendar),
-            store, settings, dry_run=dry_run, reminders=sync_task_reminders)
+            store, settings, dry_run=dry_run, reminders=sync.steps.reminders)
+        sync.steps.engine = sync.content_engine
         sync.link_decisions_enabled = settings.get('link_decisions') is True
         sync.warning_diagnosis = request_warning_diagnosis
         import work_completion

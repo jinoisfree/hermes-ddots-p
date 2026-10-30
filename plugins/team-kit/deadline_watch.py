@@ -377,7 +377,7 @@ def note(home, info=None):
     return "\n".join(lines)
 
 
-SCHEMA = {"name": "deadline_watch", "description": "마감 기록 list/upsert/close/reply/reopen. ensure_reminder는 승인된 업무비서 마감 예약만 원본 재조회 후 실제 마감과 같은 시각의 미리알림을 생성·연결한다. 충돌·불확실 결과는 재시도하지 않고 보고한다. 허용된 마감 예약만 notify하며 고정 보고 채널(REPLACE_SLACK_ID)에 코드가 계산한 단계별 한 번 발송한다(마감 수집 원문은 starter_user-world). 원문 자료는 저장하지 않는다.",
+SCHEMA = {"name": "deadline_watch", "description": "마감 기록 list/upsert/close/reply/reopen. ensure_reminder는 승인된 업무비서 마감 예약만 원본 재조회 후 실제 마감 시각의 미리알림을 생성·연결한다. 충돌·불확실 결과는 재시도하지 않고 보고한다. 허용된 마감 예약만 notify하며 고정 보고 채널(REPLACE_SLACK_ID)에 계산된 단계별 한 번 발송한다(마감 수집 원문은 starter_user-world). 원문 자료는 저장하지 않는다.",
     "parameters": {"type": "object", "additionalProperties": False, "required": ["action"], "properties": {
         "source_unavailable":{"type":"boolean","description":"공식 원문 접근 실패. 출처 미확인으로 남긴다."},
         "action": {"type": "string", "enum": ["list", "upsert", "notify", "close", "reply", "reopen", "source_check", "ensure_reminder"]},

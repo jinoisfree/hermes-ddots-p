@@ -405,7 +405,7 @@ def run(home, now=None, *, reader=fetch, summarizer=summarize):
         collect(state, sources, now.timestamp(), reader)
         learning.save(path(home), state)
         key = now.date().isoformat()
-        if (now.hour, now.minute) >= REPORT_AT:
+        if (now.hour, now.minute) >= base._rest_day().start(now, REPORT_AT):
             if key not in state["reports"]:
                 build(home, state, sources, now.date(), summarizer)
                 learning.save(path(home), state)

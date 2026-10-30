@@ -40,13 +40,20 @@ struct DdotsMain {
     }
 }
 
-final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTabViewDelegate {
     let smokeForeground = NSWorkspace.shared.frontmostApplication
     let model = DashboardModel()
     var panel: PetPanel!
     var pet: PetView!
     var dashboard: NSWindow?
+    var chatThemePicker: NSPopUpButton?
     var optionsWindow: NSWindow?
+    var settingsTabs: NSTabView?
+    var settingsScroll: NSScrollView? { settingsTabs?.selectedTabViewItem?.view as? NSScrollView }
+    var tapCheckbox: NSButton?
+    var tapCopyButton: NSButton?
+    var bubbleCheckbox: NSButton?
+    var vaultDeleteCheckbox: NSButton?
     var paseoStatusLabel: NSTextField?
     var loginCheckbox: NSButton?
     var updateNoticeCheckbox: NSButton?
@@ -64,6 +71,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     var petNameField: NSTextField?
     var petNameHint: NSTextField?
     var statusItem: NSStatusItem!
+    var streamTimer: Timer?
+    var streamPolling = false
+    let streamQueue = DispatchQueue(label: "ddots.stream-preview", qos: .userInitiated)
     var timer: Timer?
     var previewTimer: Timer?
     var menu: NSMenu!
@@ -79,7 +89,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     var motionTrace: MotionTrace?
     private weak var petMenuItem: NSMenuItem?
     private weak var pauseMenuItem: NSMenuItem?
-    private weak var vaultMenuItem: NSMenuItem?
     var paneSnapshotMS: Double = 0
     var paneSnapshotUsed = false
     private var paneLayoutDeferred = false
@@ -121,8 +130,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     var hermesRevision = 0
     var remoteHermes: RemoteHermes?
     var threeTap: ThreeTapController!
-    private var tapMenuItem: NSMenuItem?
-    private var tapCopyItem: NSMenuItem?
     private var tapSmokeDefaults: String?
     private let tapSender = ThreeTapSender()
     var refreshAgain = false
@@ -279,6 +286,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         panel.isOpaque = false; panel.backgroundColor = .clear; panel.hasShadow = false
         panel.level = .floating; panel.hidesOnDeactivate = false; panel.isReleasedWhenClosed = false
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary, .ignoresCycle]
+        panel.appearance = (isSmoke ? ChatTheme.system : ChatTheme.load()).appearance
         panel.contentView = pet
         pet.autoresizingMask = [.width, .height]
         pet.onClick = { [weak self] count in self?.petClicked(count: count) }
@@ -449,6 +457,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         usage.onChange = { [weak self] in self?.updatePet(); self?.paseoStatusLabel?.stringValue = self?.usage.paseoStatus ?? "" }
         usage.fixture = isSmoke
         usage.relayed = { [weak self] in self?.remoteHermes?.usage }
+        streamTimer = Timer.scheduledTimer(withTimeInterval: 0.2, repeats: true) { [weak self] _ in self?.refreshStreams() }
         timer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
             let began = ProcessInfo.processInfo.systemUptime
             defer { self?.recordTransitionWork("poll2s", since: began) }
@@ -533,9 +542,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                     return
                 }
                 self.capture(destination: destination)
-                if CommandLine.arguments.contains("--ui-smoke-update-notices") { self.verifyUpdateNotices(destination: destination) }
+                if CommandLine.arguments.contains("--ui-smoke-hybrid") { self.verifyHybridChat(destination: destination) }
+                else if CommandLine.arguments.contains("--ui-smoke-update-notices") { self.verifyUpdateNotices(destination: destination) }
                 else if CommandLine.arguments.contains("--ui-smoke-update-reminder") { self.verifyUpdateReminder(destination: destination) }
                 else if CommandLine.arguments.contains("--ui-smoke-connect-offer") { self.verifyConnectOffer(destination: destination) }
+                else if CommandLine.arguments.contains("--ui-smoke-streaming") { self.verifyStreaming(destination: destination) }
                 else if CommandLine.arguments.contains("--ui-smoke-faces") { self.verifyDdotsFaces(destination: destination) }
                 else if CommandLine.arguments.contains("--ui-smoke-stop") { self.verifyAgentStop(destination: destination) }
                 else if CommandLine.arguments.contains("--ui-smoke-notices") { self.verifyRoomNotices(destination: destination) }
@@ -565,6 +576,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 else if CommandLine.arguments.contains("--ui-smoke-chat") { self.verifyChatInteraction(destination: destination) }
                 else if CommandLine.arguments.contains("--ui-smoke-bubble-hidden") { self.verifyBubbleReveal(destination: destination) }
                 else { NSApp.terminate(nil) }
+            }
+        }
+    }
+
+    func refreshStreams() {
+        guard !isSmoke, !streamPolling else { return }
+        guard !model.paused, hermesEnabled, slack.connected, slack.chatOpen else {
+            slack.model.receiveStreams([]); return
+        }
+        let source = hermes, revision = hermesRevision
+        streamPolling = true
+        streamQueue.async { [weak self] in
+            let previews = (source as? HermesBridge).map { StreamPreview.read(home: $0.home) }
+                ?? (source as? RemoteHermes)?.streamPreviews ?? []
+            let fresh = previews.filter { $0.valid(at: Date().timeIntervalSince1970) }
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.streamPolling = false
+                guard revision == self.hermesRevision, !self.model.paused, self.hermesEnabled, self.slack.chatOpen else { return }
+                self.slack.model.receiveStreams(fresh)
             }
         }
     }
@@ -1226,48 +1257,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         statusItem.button?.image = MenuBarIcon.image(description: AppIdentity.name)
         menu = NSMenu()
         menu.delegate = self
-        // What is used every day stays at the top; settings, connections and previews sit one level down.
+        // Daily actions stay in the menu; configuration and previews live in the settings window.
         addMenu("대화 열기", #selector(showChat))
         addMenu("작업 목록", #selector(showDashboard))
-        addMenu("내 캘린더…", #selector(showCalendar))
+        addMenu("내 캘린더", #selector(showCalendar))
         menu.addItem(.separator())
         addMenu("펫 숨기기", #selector(togglePet)); petMenuItem = menu.items.last
         addMenu("잠시 쉬기", #selector(togglePause)); pauseMenuItem = menu.items.last
         menu.addItem(.separator())
-        let view = addSubmenu("보기 설정")
-        addMenu("말풍선 항상 보이기", #selector(toggleBubbleAlwaysShown), to: view)
-        view.items.last?.state = pet.bubbleAlwaysShown ? .on : .off
-        addMenu(ThreeTapController.title, #selector(toggleThreeTap), to: view); tapMenuItem = view.items.last
-        addMenu("수정 요청문 복사", #selector(copyThreeTapRequest), to: view); tapCopyItem = view.items.last
-        refreshThreeTapMenu()
-        addMenu("위치 초기화", #selector(resetPosition), to: view)
-        addMenu("이 Mac 화면을 다른 Mac에도 맞추기…", #selector(makeSyncStandard), to: view)
-        view.addItem(.separator())
-        addMenu("옵션…", #selector(showOptions), to: view)
-        let links = addSubmenu("연결")
-        addMenu("Slack 연결…", #selector(configureSlack), to: links)
-        addMenu("Hermes 연결…", #selector(configureHermes), to: links)
-        addMenu("다른 Mac과 캐릭터 공유…", #selector(configureRelay), to: links)
-        addMenu("업데이트 연결…", #selector(connectAppUpdate), to: links)
-        links.addItem(.separator())
-        addMenu("승인 알림 연결 안내", #selector(showHooksHelp), to: links)
-        let vault = addSubmenu("새우튀김 보관함"); vaultMenuItem = menu.items.last
-        vaultMenuItem?.isHidden = ShrimpVault.defaultBot.isEmpty
-        addMenu("보관함 폴더 지정…", #selector(configureShrimpVault), to: vault)
-        addMenu("보관함 저장 뒤 Slack 원본 삭제", #selector(toggleShrimpOriginalDeletion(_:)), to: vault)
-        vault.items.last?.state = (UserDefaults.standard.object(forKey: ShrimpReceipts.setting) == nil || UserDefaults.standard.bool(forKey: ShrimpReceipts.setting)) ? .on : .off
-        let previews = addSubmenu("미리보기")
-        addMenu("동작 미리보기", #selector(preview), to: previews)
-        addMenu("마우스 시선 미리보기", #selector(previewPointer), to: previews)
-        menu.addItem(.separator())
+        addMenu("설정…", #selector(showOptions))
+        menu.items.last?.keyEquivalent = ","
         addMenu("업데이트 확인…", #selector(checkAppUpdate))
+        menu.addItem(.separator())
         addMenu("ddots 종료", #selector(quit))
+        menu.items.last?.keyEquivalent = "q"
         statusItem.menu = menu
     }
     @MainActor @objc func checkAppUpdate() { appUpdate?.checkNow() }
     @MainActor @objc func connectAppUpdate() { appUpdate?.connect() }
-    @MainActor @objc func toggleShrimpOriginalDeletion(_ sender: NSMenuItem) {
-        let next = sender.state != .on
+    @MainActor @objc func toggleShrimpOriginalDeletion(_ sender: NSButton) {
+        let next = sender.state == .on
         UserDefaults.standard.set(next, forKey: ShrimpReceipts.setting)
         sender.state = next ? .on : .off
     }
@@ -1281,7 +1290,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             defaults = UserDefaults(suiteName: name)!; defaults.removePersistentDomain(forName: name); tapSmokeDefaults = name
         } else { defaults = .standard }
         threeTap = ThreeTapController(defaults: defaults, live: !isSmoke)
-        threeTap.onChange = { [weak self] in self?.refreshThreeTapMenu() }
+        threeTap.onChange = { [weak self] in self?.refreshThreeTapSettings() }
         threeTap.onTap = { [weak self] in
             guard let self, self.panel.isVisible, !self.pet.resting else { return }
             self.petClicked(count: 1)
@@ -1300,31 +1309,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
     }
     @MainActor
-    private func refreshThreeTapMenu() {
+    private func refreshThreeTapSettings() {
         guard let threeTap else { return }
         let fault = threeTap.health.failure
-        tapMenuItem?.state = threeTap.enabled && fault == nil ? .on : .off
-        tapMenuItem?.isEnabled = fault == nil
-        tapMenuItem?.toolTip = fault.map { "작동을 멈췄어요: " + $0 } ?? (threeTap.health == .absent ? "트랙패드가 연결되면 사용할 수 있어요." : "")
-        tapCopyItem?.isHidden = fault == nil
-        // NSMenu auto-enabling would undo the fault state because the target still responds.
-        tapMenuItem?.action = fault == nil ? #selector(toggleThreeTap) : nil
+        tapCheckbox?.state = threeTap.enabled && fault == nil ? .on : .off
+        tapCheckbox?.isEnabled = fault == nil
+        tapCheckbox?.toolTip = fault.map { "작동을 멈췄어요: " + $0 } ?? (threeTap.health == .absent ? "트랙패드가 연결되면 사용할 수 있어요." : "")
+        tapCopyButton?.isHidden = fault == nil
     }
     @MainActor
     @objc func toggleThreeTap() { threeTap.toggle() }
     @MainActor
     @objc func copyThreeTapRequest() { if let failure = threeTap.failure { ThreeTapController.copy(failure) } }
-    @objc func toggleBubbleAlwaysShown(_ sender: NSMenuItem) {
+    @objc func toggleBubbleAlwaysShown(_ sender: NSButton) {
         pet.bubbleAlwaysShown.toggle()
         sender.state = pet.bubbleAlwaysShown ? .on : .off
         if !isSmoke { UserDefaults.standard.set(pet.bubbleAlwaysShown, forKey: BubbleReveal.settingsKey) }
     }
     func addMenu(_ title: String, _ selector: Selector, to parent: NSMenu? = nil) {
         let item = NSMenuItem(title: title, action: selector, keyEquivalent: ""); item.target = self; (parent ?? menu).addItem(item)
-    }
-    func addSubmenu(_ title: String) -> NSMenu {
-        let item = NSMenuItem(title: title, action: nil, keyEquivalent: ""), sub = NSMenu(title: title)
-        item.submenu = sub; menu.addItem(item); return sub
     }
     /// Any item of the menu or its submenus, by title.
     func menuItem(titled title: String, in parent: NSMenu? = nil) -> NSMenuItem? {
@@ -1692,11 +1695,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         usage.tick(paused: model.paused, smoke: isSmoke)
         if !model.paused { refresh() }; updatePet()
     }
-    @objc func showOptions() {
+    @MainActor @objc func showOptions() {
         if optionsWindow == nil {
-            let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 360, height: 768), styleMask: [.titled, .closable], backing: .buffered, defer: false)
-            window.title = "ddots 옵션"; window.isReleasedWhenClosed = false
-            let content = NSView(frame: NSRect(x: 0, y: 0, width: 360, height: 768))
+            let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 360, height: OptionsLayout.contentHeight), styleMask: [.titled, .closable], backing: .buffered, defer: false)
+            window.title = "ddots 설정"; window.isReleasedWhenClosed = false
+            let content = NSView(frame: NSRect(x: 0, y: 0, width: 360, height: OptionsLayout.contentHeight))
             let usageTitle = NSTextField(labelWithString: "사용량")
             usageTitle.font = .systemFont(ofSize: 14, weight: .semibold)
             usageTitle.frame = NSRect(x:24,y:669,width:312,height:24); content.addSubview(usageTitle)
@@ -1716,9 +1719,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             opacity.isContinuous = true; opacity.setAccessibilityLabel("대화창 불투명도")
             opacity.toolTip = "55%부터 100%까지 · 낮출수록 배경이 더 비칩니다"
             content.addSubview(opacity)
+            let opacityEnds = NSTextField(labelWithString: "더 투명하게                         더 선명하게")
+            opacityEnds.font = .systemFont(ofSize: 10); opacityEnds.textColor = .secondaryLabelColor
+            opacityEnds.frame = NSRect(x: 24, y: 287, width: 312, height: 15); content.addSubview(opacityEnds)
             let opacityHint = NSTextField(labelWithString: "‘투명도 줄이기’가 켜져 있으면 항상 불투명하게 보입니다.")
             opacityHint.font = .systemFont(ofSize: 11); opacityHint.textColor = .secondaryLabelColor
-            opacityHint.frame = NSRect(x: 24, y: 282, width: 312, height: 17); content.addSubview(opacityHint)
+            opacityHint.frame = NSRect(x: 24, y: 265, width: 312, height: 17); content.addSubview(opacityHint)
             opacitySlider = opacity; opacityValueLabel = opacityValue
             let nameLabel = NSTextField(labelWithString: "펫 이름")
             nameLabel.font = .systemFont(ofSize: 14, weight: .semibold)
@@ -1770,17 +1776,84 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             loginSettings.bezelStyle = .rounded; loginSettings.frame = NSRect(x:24,y:421,width:220,height:30)
             content.addSubview(loginSettings)
             loginCheckbox = login; loginStatusLabel = loginStatus; loginSettingsButton = loginSettings
-            for view in content.subviews { view.frame.origin.y += 56 }
+            for view in content.subviews where view.frame.minY >= 421 { view.frame.origin.y += 56 }
             let updateNotices = NSButton(checkboxWithTitle: "업데이트 알림 받기", target: self, action: #selector(toggleUpdateNotices(_:)))
             updateNotices.identifier = NSUserInterfaceItemIdentifier(UpdateNoticeSettings.key)
-            updateNotices.frame = NSRect(x:24,y:22,width:312,height:24); content.addSubview(updateNotices)
+            updateNotices.frame = NSRect(x:24,y:439,width:312,height:24); content.addSubview(updateNotices)
             updateNoticeCheckbox = updateNotices
-            window.contentView = content; window.center()
+            for view in content.subviews where view.frame.minY >= 380 { view.frame.origin.y += 56 }
+            let themeTitle = NSTextField(labelWithString: "대화창 테마")
+            themeTitle.font = .systemFont(ofSize: 14, weight: .semibold)
+            themeTitle.frame = NSRect(x:24,y:389,width:120,height:22)
+            content.addSubview(themeTitle)
+            let themePicker = NSPopUpButton(frame: NSRect(x:155,y:384,width:183,height:30), pullsDown: false)
+            themePicker.addItems(withTitles: ChatTheme.allCases.map(\.title))
+            themePicker.target = self; themePicker.action = #selector(changeChatTheme(_:))
+            themePicker.setAccessibilityLabel("대화창 테마")
+            content.addSubview(themePicker); chatThemePicker = themePicker
+            func action(_ title: String, _ selector: Selector) -> NSButton {
+                let button = NSButton(title: title, target: self, action: selector)
+                button.bezelStyle = .rounded
+                button.frame = NSRect(x: 24, y: 0, width: 312, height: 32)
+                return button
+            }
+            func note(_ text: String) -> NSTextField {
+                let label = NSTextField(wrappingLabelWithString: text)
+                label.font = .systemFont(ofSize: 12); label.textColor = .secondaryLabelColor
+                label.frame = NSRect(x: 24, y: 0, width: 312, height: 48)
+                return label
+            }
+            func check(_ title: String, _ selector: Selector) -> NSButton {
+                let button = NSButton(checkboxWithTitle: title, target: self, action: selector)
+                button.frame = NSRect(x: 24, y: 0, width: 312, height: 26)
+                return button
+            }
+            let tabs = NSTabView(frame: NSRect(x: 0, y: 0, width: 620, height: 640))
+            tabs.autoresizingMask = [.width, .height]
+            func page(_ title: String, _ blocks: [[NSView]]) {
+                let item = NSTabViewItem(identifier: title); item.label = title
+                item.view = SettingsPages.make(blocks: blocks)
+                tabs.addTabViewItem(item)
+            }
+            page("일반", [[usageTitle, paseoStatus], [login, loginStatus, loginSettings],
+                         [updateNotices], [action("업데이트 연결…", #selector(connectAppUpdate))]])
+            let bubble = check("말풍선 항상 보이기", #selector(toggleBubbleAlwaysShown(_:)))
+            bubbleCheckbox = bubble
+            let tap = check(ThreeTapController.title, #selector(toggleThreeTap)); tapCheckbox = tap
+            // Keep the size endpoint labels together with their slider.
+            let endpoints = content.subviews.filter { $0 is NSTextField && $0.frame.minY == 65 }
+            page("화면과 펫", [[themeTitle, themePicker], [opacityTitle, opacityValue, opacity, opacityEnds, opacityHint],
+                [resetChat], [nameLabel, nameField, saveName, nameHint],
+                [title, value, slider, hint, reset] + endpoints,
+                [bubble], [tap], [action("펫 위치 초기화", #selector(resetPosition))]])
+            page("연결과 동기화", [
+                [action("Slack 연결…", #selector(configureSlack))],
+                [action("Hermes 연결…", #selector(configureHermes))],
+                [action("다른 Mac과 캐릭터 공유…", #selector(configureRelay))],
+                [action("화면 배치 동기화…", #selector(makeSyncStandard))],
+                [note("이 Mac의 섹션·순서·접힘·숨김·사진을 다른 Mac에도 적용합니다. 다른 Mac에만 있는 배치·사진은 지웁니다.")],
+                [action("승인 알림 연결 안내", #selector(showHooksHelp))]])
+            if !ShrimpVault.defaultBot.isEmpty {
+                let deletion = check("보관함 저장 뒤 Slack 원본 삭제", #selector(toggleShrimpOriginalDeletion(_:)))
+                vaultDeleteCheckbox = deletion
+                page("새우튀김 보관함", [[action("보관함 폴더 지정…", #selector(configureShrimpVault))],
+                    [deletion], [note("켜면 보관함에 저장한 뒤 Slack 원본을 삭제합니다. 원본도 남기려면 이 설정을 끄세요.")]])
+            }
+            let copy = action("수정 요청문 복사", #selector(copyThreeTapRequest)); tapCopyButton = copy
+            page("고급", [[action("동작 미리보기", #selector(preview))],
+                [action("마우스 시선 미리보기", #selector(previewPointer))], [copy]])
+            window.contentView = tabs; settingsTabs = tabs; tabs.delegate = self
             optionsWindow = window; sizeSlider = slider; sizeValueLabel = value
+
         }
+        fitOptionsToScreen()
+        bubbleCheckbox?.state = pet.bubbleAlwaysShown ? .on : .off
+        vaultDeleteCheckbox?.state = (UserDefaults.standard.object(forKey: ShrimpReceipts.setting) == nil || UserDefaults.standard.bool(forKey: ShrimpReceipts.setting)) ? .on : .off
+        refreshThreeTapSettings()
         refreshLoginLaunch()
         updateNoticeCheckbox?.state = updateNoticeSettings.enabled ? .on : .off
         paseoStatusLabel?.stringValue = usage.paseoStatus
+        chatThemePicker?.selectItem(at: ChatTheme.allCases.firstIndex(of: ChatTheme.load()) ?? 0)
         let opacityPercent = BubbleOpacity.load()
         opacitySlider?.doubleValue = opacityPercent; opacityValueLabel?.stringValue = "\(Int(opacityPercent))%"
         let percent = (pet.petScale * 100).rounded()
@@ -1790,6 +1863,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         petNameHint?.textColor = .secondaryLabelColor
         NSApp.activate(ignoringOtherApps: true); optionsWindow?.makeKeyAndOrderFront(nil)
     }
+    private func fitOptionsToScreen() {
+        guard let window = optionsWindow,
+              let screen = NSScreen.screens.first(where: { $0.frame.contains(NSEvent.mouseLocation) })
+                ?? window.screen ?? NSScreen.main else { return }
+        let visible = screen.visibleFrame
+        let titleBar = window.frame.height - window.contentRect(forFrameRect: window.frame).height
+        window.setContentSize(NSSize(width: 620, height: OptionsLayout.viewportHeight(
+            visibleHeight: visible.height, titleBarHeight: titleBar)))
+        window.setFrameOrigin(NSPoint(x: visible.midX - window.frame.width / 2,
+                                      y: visible.midY - window.frame.height / 2))
+        scrollOptionsToTop()
+    }
+
+    func tabView(_ tabView: NSTabView, didSelect tabViewItem: NSTabViewItem?) { scrollOptionsToTop() }
+
+    func scrollOptionsToTop() {
+        guard let scroll = settingsScroll,
+              let document = scroll.documentView else { return }
+        scroll.layoutSubtreeIfNeeded()
+        document.scroll(NSPoint(x: 0, y: document.isFlipped ? 0 : max(0, document.bounds.height - scroll.contentSize.height)))
+    }
+
     @MainActor @objc func toggleUpdateNotices(_ sender: NSButton) {
         updateNoticeSettings.setEnabled(sender.state == .on)
         appUpdate?.noticesChanged()
@@ -1826,9 +1921,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         petNameHint?.stringValue = "이름을 저장했어요. 모든 화면에 적용했습니다."
         petNameHint?.textColor = .secondaryLabelColor
     }
+    @objc func changeChatTheme(_ sender: NSPopUpButton) {
+        guard ChatTheme.allCases.indices.contains(sender.indexOfSelectedItem) else { return }
+        let theme = ChatTheme.allCases[sender.indexOfSelectedItem]
+        if !isSmoke { UserDefaults.standard.set(theme.rawValue, forKey: ChatTheme.settingsKey) }
+        panel.appearance = theme.appearance
+    }
     @objc func changeChatOpacity(_ sender: NSSlider) {
         let percent = BubbleOpacity.clamped(sender.doubleValue)
-        UserDefaults.standard.set(percent, forKey: BubbleOpacity.settingsKey)
+        if !isSmoke { UserDefaults.standard.set(percent, forKey: BubbleOpacity.settingsKey) }
         pet.chatOpacityPercent = percent; opacityValueLabel?.stringValue = "\(Int(percent))%"
     }
     @objc func resizePet(_ sender: NSSlider) { applyPetSize(sender.doubleValue) }
@@ -2158,6 +2259,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     /// UI smoke uses synthetic messages only. Exercise the same panel and view lifetime as a real click.
     func verifyChatInteraction(destination: URL) {
+        let savedAppearance = panel.appearance
+        let picker = NSPopUpButton()
+        picker.addItems(withTitles: ChatTheme.allCases.map(\.title))
+        for (index, theme) in ChatTheme.allCases.enumerated() {
+            picker.selectItem(at: index); changeChatTheme(picker)
+            if let appearance = theme.appearance {
+                smokeCheck(pet.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == appearance.name, "Chat theme reaches the bubble and its content")
+            } else {
+                smokeCheck(panel.appearance == nil, "System theme follows macOS")
+            }
+        }
+        panel.appearance = savedAppearance
         if !IMessageFeature.enabled { verifySlackOnlyChat(destination: destination); return }
         verifyPetEdges(destination: destination)
         // The Slack side has scroll views of its own, so ask for the one the conversation registered.
@@ -2287,7 +2400,5 @@ extension AppDelegate: NSMenuDelegate {
         guard menu === self.menu else { return }
         petMenuItem?.title = panel.isVisible ? "펫 숨기기" : "펫 보이기"
         pauseMenuItem?.title = model.paused ? "다시 시작" : "잠시 쉬기"
-        // The vault belongs to 새우튀김; an organization without one (the public edition) has no such menu.
-        vaultMenuItem?.isHidden = ShrimpVault.defaultBot.isEmpty
     }
 }

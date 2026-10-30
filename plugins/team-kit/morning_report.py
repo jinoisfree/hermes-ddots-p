@@ -117,14 +117,19 @@ def snapshot(home, args, src, *, now=None):
         status = ('sent' if record.get('complete') and record.get('thread_ts') else
                   'incomplete' if items or record.get('parts') or record.get('complete') is False else 'empty')
         result = {'kind': name, 'status': status, 'count': len(items), 'original_report_url': url}
-        if items:
+        skill_section = record.get('skills') if name == 'learning' else None
+        if skill_section:
+            result['skill_count'] = len(skill_section.get('items', []))
+        if items or (skill_section or {}).get('items'):
             if black:
                 render = renderer.render if name == 'learning' else renderer.render_replies
                 pages = render(day, items, renderer._watch())
             else:
                 pages = renderer.render(day, items, WORKSPACE, after_apply=True, compact=True)
+            if skill_section:
+                pages = local('learning_report').with_skills(pages, skill_section)
             # A manual reply is a fresh view, not a new daily report/review thread.
-            summary = pages[0].split('\n\n📎', 1)[0]
+            summary = re.sub(r'\n\n📎[^\n]*', '', pages[0])
             summary += ('\n\n📎 전체 내용·검토: <' + url + '|원래 보고>' if url else '\n\n원래 보고 전달 미완료')
             result['summary'] = summary
             if view == 'details':

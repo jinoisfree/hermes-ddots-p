@@ -9,12 +9,13 @@ import uuid
 import deadline_time as dates
 import work_content as content
 
-MARKER='[[체크: 일정 | 제출: lv1 | lv2 | 확인]]'
-LEGEND='lv1 = 개인(Obsidian→미리알림), lv2 = 공용(노션+Obsidian→미리알림), 일정은 체크하면 함께 생성'
+MARKER='[[버튼: :hp-memo: 메모 | :hp-notion: 메모+노션 | :hp-check: 확인]]'
+LEGEND='메모 = 개인(Obsidian 메모→미리알림), 메모+노션 = 공용(노션+Obsidian 메모→미리알림), 확인 = 만들지 않음'
 
 
 def selection(text):
     text=str(text or '').strip()
+    text=text.replace('메모+노션','lv2').replace('메모 작성','lv1')
     if re.fullmatch(r'(?:선택:\s*)?(?:건너뛰기|확인)',text):return (None,False)
     private=bool(re.search(r'\blv1\b|비공개|개인(?:으로)?|\bprivate\b',text,re.I))
     shared=bool(re.search(r'\blv2\b|공용|공유|\bshared\b',text,re.I))
@@ -28,7 +29,14 @@ def selection(text):
 def authorized(td, expected=None):
     if not td._task_capture_owner_chat():raise ValueError('WORK_CAPTURE_OWNER_CHAT_REQUIRED')
     if problem:=td._personal_role_problem('personal_work_bundle',{}):raise ValueError(problem)
-    picked=selection(td._notes_current_owner_text())
+    text=td._notes_current_owner_text()
+    # Reuse explicit click values and current inbound legend context from the A/B guard.
+    from hermes_constants import get_hermes_home
+    path=Path(__file__).resolve().parent.parent/'team-kit'/'task_capture.py'
+    spec=importlib.util.spec_from_file_location('_mail_task_capture',path)
+    helper=importlib.util.module_from_spec(spec);spec.loader.exec_module(helper)
+    text=helper.mail_choice(text, mail=helper.mail_thread(get_hermes_home(), td.get_session_env('HERMES_SESSION_ID','')))
+    picked=selection(text)
     if picked is None:raise ValueError('WORK_SCOPE_CHOICE_REQUIRED: '+LEGEND+'\n'+MARKER)
     if expected is not None and picked!=expected:raise ValueError('WORK_SCOPE_CHOICE_MISMATCH')
     return picked

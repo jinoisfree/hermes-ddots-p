@@ -1,0 +1,938 @@
+{
+  "version": 1,
+  "updated": "2026-10-29",
+  "reports": [
+    {
+      "id": "default.learning",
+      "profile": "default",
+      "owner": "위키담당",
+      "title": "학습·스킬 통합",
+      "send": "08:30 / 휴일 11:00",
+      "channel": "학습 채널",
+      "kind": "정기",
+      "launch": "com.starter_user.hermes.learning-report",
+      "state": "state/team-learning-reports.json",
+      "zero": "0건 보고",
+      "period": "전날",
+      "required": true,
+      "expected_launch": {
+        "StartCalendarInterval": {
+          "Hour": 8,
+          "Minute": 30
+        },
+        "StartInterval": 300
+      },
+      "config_checks": {
+        "plugins.entries.team-kit.settings.learning.enabled": true,
+        "plugins.entries.team-kit.settings.learning_report_channel": "REPLACE_SLACK_ID"
+      }
+    },
+    {
+      "id": "personal-secretary.learning",
+      "profile": "personal-secretary",
+      "owner": "개인비서",
+      "title": "학습·스킬 통합",
+      "send": "08:30 / 휴일 11:00",
+      "channel": "학습 채널",
+      "kind": "정기",
+      "launch": "com.starter_user.hermes.learning-report",
+      "state": "state/team-learning-reports.json",
+      "zero": "0건 보고",
+      "period": "전날",
+      "required": true,
+      "expected_launch": {
+        "StartCalendarInterval": {
+          "Hour": 8,
+          "Minute": 30
+        },
+        "StartInterval": 300
+      },
+      "config_checks": {
+        "plugins.entries.team-kit.settings.learning.enabled": true,
+        "plugins.entries.team-kit.settings.learning_report_channel": "REPLACE_SLACK_ID"
+      }
+    },
+    {
+      "id": "work-assistant.learning",
+      "profile": "work-assistant",
+      "owner": "업무비서",
+      "title": "학습·스킬 통합",
+      "send": "08:30 / 휴일 11:00",
+      "channel": "학습 채널",
+      "kind": "정기",
+      "launch": "com.starter_user.hermes.learning-report",
+      "state": "state/team-learning-reports.json",
+      "zero": "0건 보고",
+      "period": "전날",
+      "required": true,
+      "expected_launch": {
+        "StartCalendarInterval": {
+          "Hour": 8,
+          "Minute": 30
+        },
+        "StartInterval": 300
+      },
+      "config_checks": {
+        "plugins.entries.team-kit.settings.learning.enabled": true,
+        "plugins.entries.team-kit.settings.learning_report_channel": "REPLACE_SLACK_ID"
+      }
+    },
+    {
+      "id": "system-doctor.learning",
+      "profile": "system-doctor",
+      "owner": "진단담당",
+      "title": "학습·스킬 통합",
+      "send": "08:30 / 휴일 11:00",
+      "channel": "학습 채널",
+      "kind": "정기",
+      "launch": "com.starter_user.hermes.learning-report",
+      "state": "state/team-learning-reports.json",
+      "zero": "0건 보고",
+      "period": "전날",
+      "required": true,
+      "expected_launch": {
+        "StartCalendarInterval": {
+          "Hour": 8,
+          "Minute": 30
+        },
+        "StartInterval": 300
+      },
+      "config_checks": {
+        "plugins.entries.team-kit.settings.learning.enabled": true,
+        "plugins.entries.team-kit.settings.learning_report_channel": "REPLACE_SLACK_ID"
+      }
+    },
+    {
+      "id": "default.wiki",
+      "profile": "default",
+      "owner": "위키담당",
+      "title": "Wiki 점검·백업",
+      "send": "08:30 / 휴일 11:00",
+      "channel": "보고 채널",
+      "kind": "정기",
+      "launch": "com.starter_user1.wiki-daily",
+      "zero": "점검 결과",
+      "period": "당일",
+      "buttons": "승인·거부(기존 위키 규칙)",
+      "expected_launch": {
+        "StartCalendarInterval": [
+          {
+            "Hour": 8,
+            "Minute": 30
+          },
+          {
+            "Hour": 11,
+            "Minute": 0
+          }
+        ]
+      }
+    },
+    {
+      "id": "system-doctor.30632a50f4a2",
+      "profile": "system-doctor",
+      "owner": "진단담당",
+      "title": "지난 대화 보존 확인",
+      "send": "0 9 1 10 *",
+      "channel": "private-service-27",
+      "kind": "중지",
+      "job": "30632a50f4a2",
+      "enabled": false,
+      "expected_schedule": {
+        "kind": "cron",
+        "expr": "0 9 1 10 *",
+        "display": "0 9 1 10 *"
+      },
+      "script": "session_retention_check.py",
+      "note": "아침 시스템 보고에 통합",
+      "zero": "조건별 생략",
+      "expected_deliver": "slack:REPLACE_SLACK_ID"
+    },
+    {
+      "id": "system-doctor.7728e5fdafc4",
+      "profile": "system-doctor",
+      "owner": "진단담당",
+      "title": "아침 시스템 보고",
+      "send": "08:30 / 휴일 11:00",
+      "channel": "private-service-27",
+      "kind": "정기",
+      "job": "7728e5fdafc4",
+      "enabled": true,
+      "expected_schedule": {
+        "kind": "cron",
+        "expr": "0,30 8,11 * * *",
+        "display": "0,30 8,11 * * *"
+      },
+      "script": "morning_system_restday.py",
+      "note": "",
+      "zero": "조건별 생략",
+      "state": "watcher-state/morning-system-delivery.json",
+      "expected_deliver": "slack:REPLACE_SLACK_ID"
+    },
+    {
+      "id": "system-doctor.f05e273a85b2",
+      "profile": "system-doctor",
+      "owner": "진단담당",
+      "title": "조직개편안",
+      "send": "08:30 / 휴일 11:00",
+      "channel": "보고 채널",
+      "kind": "정기",
+      "job": "f05e273a85b2",
+      "enabled": true,
+      "expected_schedule": {
+        "kind": "cron",
+        "expr": "0,30 8,11 * * *",
+        "display": "0,30 8,11 * * *"
+      },
+      "script": "org_review_daily_restday.py",
+      "note": "cron deliver는 예비 경로, 실제 전송은 org_review.channel",
+      "zero": "조건별 생략",
+      "config_checks": {
+        "plugins.entries.team-kit.settings.org_review.channel": "REPLACE_SLACK_ID"
+      },
+      "expected_deliver": "slack:REPLACE_SLACK_ID"
+    },
+    {
+      "id": "system-doctor.dc1fdc9f00c2",
+      "profile": "system-doctor",
+      "owner": "진단담당",
+      "title": "조직개편안 답글",
+      "send": "*/5 8-23 * * *",
+      "channel": "private-service-27",
+      "kind": "내부 처리",
+      "job": "dc1fdc9f00c2",
+      "enabled": true,
+      "expected_schedule": {
+        "kind": "cron",
+        "expr": "*/5 8-23 * * *",
+        "display": "*/5 8-23 * * *"
+      },
+      "script": "org_review_replies.py",
+      "note": "",
+      "zero": "조건별 생략",
+      "expected_deliver": "slack:REPLACE_SLACK_ID"
+    },
+    {
+      "id": "system-doctor.6a64897a98de",
+      "profile": "system-doctor",
+      "owner": "진단담당",
+      "title": "새 공개 채널 참여",
+      "send": "*/10 * * * *",
+      "channel": "private-service-27",
+      "kind": "내부 처리",
+      "job": "6a64897a98de",
+      "enabled": true,
+      "expected_schedule": {
+        "kind": "cron",
+        "expr": "*/10 * * * *",
+        "display": "*/10 * * * *"
+      },
+      "script": "channel_autojoin.py",
+      "note": "",
+      "zero": "조건별 생략",
+      "expected_deliver": "slack:REPLACE_SLACK_ID"
+    },
+    {
+      "id": "system-doctor.583c24420b29",
+      "profile": "system-doctor",
+      "owner": "진단담당",
+      "title": "매일 점검",
+      "send": "0 8 * * *",
+      "channel": "private-service-27",
+      "kind": "중지",
+      "job": "583c24420b29",
+      "enabled": false,
+      "expected_schedule": {
+        "kind": "cron",
+        "expr": "0 8 * * *",
+        "display": "0 8 * * *"
+      },
+      "script": "doctor_daily.py",
+      "note": "아침 시스템 보고에 통합",
+      "zero": "조건별 생략",
+      "expected_deliver": "slack:REPLACE_SLACK_ID"
+    },
+    {
+      "id": "personal-secretary.330f372c96ba",
+      "profile": "personal-secretary",
+      "owner": "개인비서",
+      "title": "선제 점검",
+      "send": "0 8,14 * * *",
+      "channel": "기존 채널",
+      "kind": "중지",
+      "job": "330f372c96ba",
+      "enabled": false,
+      "expected_schedule": {
+        "kind": "cron",
+        "expr": "0 8,14 * * *",
+        "display": "0 8,14 * * *"
+      },
+      "script": "",
+      "note": "중지 유지",
+      "zero": "조건별 생략",
+      "expected_deliver": "slack:REPLACE_SLACK_ID"
+    },
+    {
+      "id": "personal-secretary.a43b841190dd",
+      "profile": "personal-secretary",
+      "owner": "개인비서",
+      "title": "메일 알림",
+      "send": "08:00~22:30 30분마다 + 새 메일 신호",
+      "channel": "기존 채널",
+      "kind": "중지",
+      "job": "a43b841190dd",
+      "enabled": false,
+      "expected_schedule": {
+        "kind": "cron",
+        "expr": "*/30 8-21 * * *",
+        "display": "*/30 8-21 * * *"
+      },
+      "script": "mail_watch.py",
+      "note": "업무비서로 이관",
+      "zero": "조건별 생략",
+      "expected_deliver": "slack:private-service-19"
+    },
+    {
+      "id": "personal-secretary.653ede07b264",
+      "profile": "personal-secretary",
+      "owner": "개인비서",
+      "title": "마감 점검",
+      "send": "08:40 / 휴일 11:00",
+      "channel": "보고 채널",
+      "kind": "중지",
+      "job": "653ede07b264",
+      "enabled": false,
+      "expected_schedule": {
+        "kind": "cron",
+        "expr": "40 8 * * *",
+        "display": "40 8 * * *"
+      },
+      "script": "deadline_review.py",
+      "note": "업무비서로 이관",
+      "zero": "조건별 생략",
+      "expected_deliver": "local"
+    },
+    {
+      "id": "personal-secretary.b4eb6c1dfeb7",
+      "profile": "personal-secretary",
+      "owner": "개인비서",
+      "title": "마감 당일 재확인",
+      "send": "0 15 * * *",
+      "channel": "보고 채널",
+      "kind": "중지",
+      "job": "b4eb6c1dfeb7",
+      "enabled": false,
+      "expected_schedule": {
+        "kind": "cron",
+        "expr": "0 15 * * *",
+        "display": "0 15 * * *"
+      },
+      "script": "deadline_recheck.py",
+      "note": "업무비서로 이관",
+      "zero": "조건별 생략",
+      "expected_deliver": "local"
+    },
+    {
+      "id": "personal-secretary.1a932448f6da",
+      "profile": "personal-secretary",
+      "owner": "개인비서",
+      "title": "정기회의 초안",
+      "send": "0 14 * * 1",
+      "channel": "기존 채널",
+      "kind": "중지",
+      "job": "1a932448f6da",
+      "enabled": false,
+      "expected_schedule": {
+        "kind": "cron",
+        "expr": "0 14 * * 1",
+        "display": "0 14 * * 1"
+      },
+      "script": "doctor_eye_draft.py",
+      "note": "업무비서로 이관",
+      "zero": "조건별 생략",
+      "expected_deliver": "slack:REPLACE_SLACK_ID"
+    },
+    {
+      "id": "personal-secretary.30e7a58f5bdc",
+      "profile": "personal-secretary",
+      "owner": "개인비서",
+      "title": "개인 메일 요약",
+      "send": "09:00·18:00 / 휴일 11:00·18:00",
+      "channel": "보고 채널",
+      "kind": "정기",
+      "job": "30e7a58f5bdc",
+      "enabled": true,
+      "expected_schedule": {
+        "kind": "cron",
+        "expr": "0 9,11,18 * * *",
+        "display": "0 9,11,18 * * *"
+      },
+      "script": "personal_mail_summary_restday.py",
+      "note": "",
+      "zero": "조건별 생략",
+      "expected_deliver": "slack:REPLACE_SLACK_ID"
+    },
+    {
+      "id": "personal-secretary.b5f960288a19",
+      "profile": "personal-secretary",
+      "owner": "개인비서",
+      "title": "jv-dc-ai-collect-0810",
+      "send": "10 8 * * *",
+      "channel": "내부 처리",
+      "kind": "내부 처리",
+      "job": "b5f960288a19",
+      "enabled": true,
+      "expected_schedule": {
+        "kind": "cron",
+        "expr": "10 8 * * *",
+        "display": "10 8 * * *"
+      },
+      "script": "dc_ai_collect.py",
+      "note": "",
+      "zero": "조건별 생략",
+      "expected_deliver": "local"
+    },
+    {
+      "id": "personal-secretary.0f369c4f11a6",
+      "profile": "personal-secretary",
+      "owner": "개인비서",
+      "title": "jv-dc-ai-collect-1210",
+      "send": "10 12 * * *",
+      "channel": "내부 처리",
+      "kind": "내부 처리",
+      "job": "0f369c4f11a6",
+      "enabled": true,
+      "expected_schedule": {
+        "kind": "cron",
+        "expr": "10 12 * * *",
+        "display": "10 12 * * *"
+      },
+      "script": "dc_ai_collect.py",
+      "note": "",
+      "zero": "조건별 생략",
+      "expected_deliver": "local"
+    },
+    {
+      "id": "personal-secretary.25ce5efcab80",
+      "profile": "personal-secretary",
+      "owner": "개인비서",
+      "title": "jv-dc-ai-collect-1610",
+      "send": "10 16 * * *",
+      "channel": "내부 처리",
+      "kind": "내부 처리",
+      "job": "25ce5efcab80",
+      "enabled": true,
+      "expected_schedule": {
+        "kind": "cron",
+        "expr": "10 16 * * *",
+        "display": "10 16 * * *"
+      },
+      "script": "dc_ai_collect.py",
+      "note": "",
+      "zero": "조건별 생략",
+      "expected_deliver": "local"
+    },
+    {
+      "id": "personal-secretary.180a6688720d",
+      "profile": "personal-secretary",
+      "owner": "개인비서",
+      "title": "jv-dc-ai-collect-2010",
+      "send": "10 20 * * *",
+      "channel": "내부 처리",
+      "kind": "내부 처리",
+      "job": "180a6688720d",
+      "enabled": true,
+      "expected_schedule": {
+        "kind": "cron",
+        "expr": "10 20 * * *",
+        "display": "10 20 * * *"
+      },
+      "script": "dc_ai_collect.py",
+      "note": "",
+      "zero": "조건별 생략",
+      "expected_deliver": "local"
+    },
+    {
+      "id": "personal-secretary.6dcfefbeee59",
+      "profile": "personal-secretary",
+      "owner": "개인비서",
+      "title": "jv-dc-ai-report-0830",
+      "send": "08:30 / 휴일 11:00",
+      "channel": "보고 채널",
+      "kind": "정기",
+      "job": "6dcfefbeee59",
+      "enabled": true,
+      "expected_schedule": {
+        "kind": "cron",
+        "expr": "0,30 8,11 * * *",
+        "display": "0,30 8,11 * * *"
+      },
+      "script": "dc_ai_report_restday.py",
+      "note": "",
+      "zero": "조건별 생략",
+      "expected_deliver": "slack:REPLACE_SLACK_ID"
+    },
+    {
+      "id": "work-assistant.683898a15fbf",
+      "profile": "work-assistant",
+      "owner": "업무비서",
+      "title": "notion-completion-sync",
+      "send": "10분마다 확인",
+      "channel": "보고 채널",
+      "kind": "조건부",
+      "job": "683898a15fbf",
+      "enabled": true,
+      "expected_schedule": {
+        "kind": "interval",
+        "minutes": 10,
+        "display": "every 10m"
+      },
+      "script": "notion-completion-sync.py",
+      "note": "",
+      "zero": "조건별 생략",
+      "expected_deliver": "slack:REPLACE_SLACK_ID"
+    },
+    {
+      "id": "work-assistant.da3ea4d475f9",
+      "profile": "work-assistant",
+      "owner": "업무비서",
+      "title": "메일 알림",
+      "send": "08:00~22:30 30분마다 + 새 메일 신호",
+      "channel": "보고 채널",
+      "kind": "조건부",
+      "job": "da3ea4d475f9",
+      "enabled": true,
+      "expected_schedule": {
+        "kind": "cron",
+        "expr": "*/30 8-22 * * *",
+        "display": "*/30 8-22 * * *"
+      },
+      "script": "mail_watch.py",
+      "note": "",
+      "zero": "조건별 생략",
+      "expected_deliver": "slack:REPLACE_SLACK_ID"
+    },
+    {
+      "id": "work-assistant.769789347f2d",
+      "profile": "work-assistant",
+      "owner": "업무비서",
+      "title": "마감 점검",
+      "send": "08:40 / 휴일 11:00",
+      "channel": "보고 채널",
+      "kind": "정기",
+      "job": "769789347f2d",
+      "enabled": true,
+      "expected_schedule": {
+        "kind": "cron",
+        "expr": "0,40 8,11 * * *",
+        "display": "0,40 8,11 * * *"
+      },
+      "script": "deadline_review_restday.py",
+      "note": "",
+      "zero": "조건별 생략",
+      "expected_deliver": "local"
+    },
+    {
+      "id": "work-assistant.70976d377616",
+      "profile": "work-assistant",
+      "owner": "업무비서",
+      "title": "마감 당일 재확인",
+      "send": "0 15 * * *",
+      "channel": "보고 채널",
+      "kind": "정기",
+      "job": "70976d377616",
+      "enabled": true,
+      "expected_schedule": {
+        "kind": "cron",
+        "expr": "0 15 * * *",
+        "display": "0 15 * * *"
+      },
+      "script": "deadline_recheck.py",
+      "note": "",
+      "zero": "조건별 생략",
+      "expected_deliver": "local"
+    },
+    {
+      "id": "work-assistant.bbf498cc15a0",
+      "profile": "work-assistant",
+      "owner": "업무비서",
+      "title": "정기회의 초안",
+      "send": "0 14 * * 1",
+      "channel": "보고 채널",
+      "kind": "정기",
+      "job": "bbf498cc15a0",
+      "enabled": true,
+      "expected_schedule": {
+        "kind": "cron",
+        "expr": "0 14 * * 1",
+        "display": "0 14 * * 1"
+      },
+      "script": "doctor_eye_draft.py",
+      "note": "",
+      "zero": "조건별 생략",
+      "expected_deliver": "slack:REPLACE_SLACK_ID"
+    },
+    {
+      "id": "work-assistant.fa146ff6e693",
+      "profile": "work-assistant",
+      "owner": "업무비서",
+      "title": "zoom-alarm-sync",
+      "send": "10분마다 확인",
+      "channel": "캘린더 알림",
+      "kind": "조건부",
+      "job": "fa146ff6e693",
+      "enabled": true,
+      "expected_schedule": {
+        "kind": "interval",
+        "minutes": 10,
+        "display": "every 10m"
+      },
+      "script": "zoom-alarm-sync.py",
+      "note": "회의 5분 전 알림 추가; Slack 정기보고 아님",
+      "zero": "조건별 생략",
+      "expected_deliver": "slack:REPLACE_SLACK_ID"
+    },
+    {
+      "id": "work-assistant.92caac4cfd21",
+      "profile": "work-assistant",
+      "owner": "업무비서",
+      "title": "hp-gap-review",
+      "send": "월~금 08:50 / 평일 공휴일 11:00",
+      "channel": "보고 채널",
+      "kind": "정기",
+      "job": "92caac4cfd21",
+      "enabled": true,
+      "expected_schedule": {
+        "kind": "cron",
+        "expr": "0,50 8,11 * * 1-5",
+        "display": "0,50 8,11 * * 1-5"
+      },
+      "script": "gap_review_restday.py",
+      "note": "",
+      "zero": "조건별 생략",
+      "expected_deliver": "slack:REPLACE_SLACK_ID"
+    },
+    {
+      "id": "work-assistant.e40c9b912740",
+      "profile": "work-assistant",
+      "owner": "업무비서",
+      "title": "Pie 메일 신호",
+      "send": "* 8-22 * * *",
+      "channel": "내부 처리",
+      "kind": "내부 처리",
+      "job": "e40c9b912740",
+      "enabled": true,
+      "expected_schedule": {
+        "kind": "cron",
+        "expr": "* 8-22 * * *",
+        "display": "* 8-22 * * *"
+      },
+      "script": "pie_mail_signal.py",
+      "note": "",
+      "zero": "조건별 생략",
+      "expected_deliver": "local"
+    },
+    {
+      "id": "sns-manager.learning",
+      "profile": "sns-manager",
+      "owner": "SNS담당",
+      "title": "고객 응대 학습·자동 답장",
+      "send": "08:30 / 휴일 11:00",
+      "channel": "학습 채널(학습)·보고 채널(답장)",
+      "kind": "정기",
+      "zero": "학습 0건 보고·답장 0건 생략",
+      "period": "전날 또는 마지막 보고 이후",
+      "launch": "com.starter_user.hermes.sns-manager.learning-report",
+      "expected_launch": {
+        "StartCalendarInterval": {
+          "Hour": 8,
+          "Minute": 30
+        },
+        "StartInterval": 300
+      }
+    },
+    {
+      "id": "sns-manager.skills",
+      "profile": "sns-manager",
+      "owner": "SNS담당",
+      "title": "스킬 변경",
+      "send": "고객 응대 학습 보고에 포함",
+      "channel": "학습 채널",
+      "kind": "통합",
+      "zero": "변경 없으면 생략",
+      "period": "전날 또는 마지막 보고 이후",
+      "state": "state/private-service-24-learning-reports.json",
+      "launch": "com.starter_user.hermes.skill-report",
+      "expected_launch": {
+        "StartCalendarInterval": {
+          "Hour": 8,
+          "Minute": 29
+        },
+        "StartInterval": 300
+      },
+      "note": "08:29 독립 발송 없음; 스냅샷 수집 유지"
+    },
+    {
+      "id": "sns-manager.ai",
+      "profile": "sns-manager",
+      "owner": "SNS담당",
+      "title": "Claude·GPT 공식 소식",
+      "send": "08:30 / 휴일 11:00",
+      "channel": "보고 채널",
+      "kind": "정기",
+      "zero": "0건 보고",
+      "period": "전날 또는 마지막 보고 이후",
+      "state": "state/ai-digest.json",
+      "launch": "com.starter_user.hermes.sns-manager.ai-digest",
+      "expected_launch": {
+        "StartCalendarInterval": [
+          {
+            "Hour": 2,
+            "Minute": 30
+          },
+          {
+            "Hour": 5,
+            "Minute": 30
+          },
+          {
+            "Hour": 8,
+            "Minute": 30
+          },
+          {
+            "Hour": 11,
+            "Minute": 30
+          },
+          {
+            "Hour": 14,
+            "Minute": 30
+          },
+          {
+            "Hour": 17,
+            "Minute": 30
+          },
+          {
+            "Hour": 20,
+            "Minute": 30
+          },
+          {
+            "Hour": 23,
+            "Minute": 30
+          },
+          {
+            "Hour": 11,
+            "Minute": 0
+          }
+        ]
+      },
+      "config_checks": {
+        "plugins.entries.team-kit.settings.ai_digest.enabled": true,
+        "plugins.entries.team-kit.settings.report_channel": "REPLACE_SLACK_ID"
+      }
+    },
+    {
+      "id": "sns-manager.waiting",
+      "profile": "sns-manager",
+      "owner": "SNS담당",
+      "title": "고객 미답변 목록",
+      "send": "08~21시 매시 정각",
+      "channel": "보고 채널",
+      "kind": "정기",
+      "zero": "미답변 없으면 생략",
+      "period": "전날 또는 마지막 보고 이후",
+      "launch": "com.starter_user.hermes.sns-manager.instagram-digest",
+      "expected_launch": {
+        "StartCalendarInterval": [
+          {
+            "Hour": 8,
+            "Minute": 0
+          },
+          {
+            "Hour": 9,
+            "Minute": 0
+          },
+          {
+            "Hour": 10,
+            "Minute": 0
+          },
+          {
+            "Hour": 11,
+            "Minute": 0
+          },
+          {
+            "Hour": 12,
+            "Minute": 0
+          },
+          {
+            "Hour": 13,
+            "Minute": 0
+          },
+          {
+            "Hour": 14,
+            "Minute": 0
+          },
+          {
+            "Hour": 15,
+            "Minute": 0
+          },
+          {
+            "Hour": 16,
+            "Minute": 0
+          },
+          {
+            "Hour": 17,
+            "Minute": 0
+          },
+          {
+            "Hour": 18,
+            "Minute": 0
+          },
+          {
+            "Hour": 19,
+            "Minute": 0
+          },
+          {
+            "Hour": 20,
+            "Minute": 0
+          },
+          {
+            "Hour": 21,
+            "Minute": 0
+          }
+        ]
+      }
+    },
+    {
+      "id": "sns-manager.dm",
+      "profile": "sns-manager",
+      "owner": "SNS담당",
+      "title": "고객 문의·자동 답장·승인",
+      "send": "DM 2분 확인 / 톡톡 수신 시",
+      "channel": "SNS담당방",
+      "kind": "조건부",
+      "zero": "사건 없으면 생략",
+      "period": "전날 또는 마지막 보고 이후",
+      "launch": "com.starter_user.hermes.sns-manager.instagram-watch",
+      "expected_launch": {
+        "StartInterval": 120
+      }
+    },
+    {
+      "id": "sns-manager.comments",
+      "profile": "sns-manager",
+      "owner": "SNS담당",
+      "title": "댓글·예약 게시 결과",
+      "send": "댓글 08~22:59 약 10분 / 게시 매분",
+      "channel": "SNS담당방·원래 스레드",
+      "kind": "조건부",
+      "zero": "사건 없으면 생략",
+      "period": "전날 또는 마지막 보고 이후",
+      "launch": "com.starter_user.hermes.sns-manager.instagram-feed",
+      "expected_launch": {
+        "StartInterval": 60
+      }
+    },
+    {
+      "id": "sns-manager.news",
+      "profile": "sns-manager",
+      "owner": "SNS담당",
+      "title": "리셋 피드·X 소식",
+      "send": "08~22시 출처별 약 1시간",
+      "channel": "보고 채널",
+      "kind": "조건부",
+      "zero": "새 소식 없으면 생략",
+      "period": "전날 또는 마지막 보고 이후",
+      "launch": "com.starter_user.hermes.sns-manager.news-watch",
+      "expected_launch": {
+        "StartCalendarInterval": [
+          {
+            "Minute": 0
+          },
+          {
+            "Minute": 30
+          }
+        ]
+      }
+    },
+    {
+      "id": "system-doctor.memory",
+      "profile": "system-doctor",
+      "owner": "진단담당",
+      "title": "기억 정리 결과",
+      "send": "03:40 처리 → 진단담당 아침 학습 스레드",
+      "channel": "학습 채널",
+      "kind": "조건부",
+      "launch": "com.starter_user.hermes.memory-tidy",
+      "zero": "변경·실패 없으면 생략",
+      "expected_launch": {
+        "StartCalendarInterval": {
+          "Hour": 3,
+          "Minute": 40
+        }
+      },
+      "note": "기억 정리 결과는 학습 검토·롤백 대상과 별개"
+    },
+    {
+      "id": "system-doctor.night",
+      "profile": "system-doctor",
+      "owner": "진단담당",
+      "title": "새벽 진단·자동 수정",
+      "send": "03:00 처리 → 아침 시스템 보고 스레드",
+      "channel": "private-service-27",
+      "kind": "내부 처리",
+      "launch": "com.starter_user.hermes.system-doctor.night-batch",
+      "expected_launch": {
+        "StartCalendarInterval": {
+          "Hour": 3,
+          "Minute": 0
+        }
+      }
+    },
+    {
+      "id": "system-doctor.plugins",
+      "profile": "system-doctor",
+      "owner": "진단담당",
+      "title": "새 플러그인 공개 여부·결과",
+      "send": "발견·선택 반영 후, 새벽 보류",
+      "channel": "보고 채널",
+      "kind": "조건부"
+    },
+    {
+      "id": "system-doctor.system",
+      "profile": "system-doctor",
+      "owner": "진단담당",
+      "title": "게이트웨이 종료·재시작",
+      "send": "사건 발생 시",
+      "channel": "private-service-27",
+      "kind": "조건부"
+    },
+    {
+      "id": "work-assistant.wait",
+      "profile": "work-assistant",
+      "owner": "업무비서",
+      "title": "조건 대기",
+      "send": "등록한 조건을 10분마다 확인",
+      "channel": "원래 스레드",
+      "kind": "조건부",
+      "note": "충족·만료·지속 오류 때; wait-* 예약은 동적 등록"
+    },
+    {
+      "id": "personal-secretary.wait",
+      "profile": "personal-secretary",
+      "owner": "개인비서",
+      "title": "조건 대기",
+      "send": "등록한 조건을 10분마다 확인",
+      "channel": "원래 스레드",
+      "kind": "조건부",
+      "note": "충족·만료·지속 오류 때; wait-* 예약은 동적 등록"
+    },
+    {
+      "id": "research-assistant.request",
+      "profile": "research-assistant",
+      "owner": "연구담당",
+      "title": "요청한 조사 결과",
+      "send": "대화 요청 시",
+      "channel": "원래 대화",
+      "kind": "요청형",
+      "zero": "정기 보고 없음"
+    }
+  ]
+}
