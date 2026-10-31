@@ -1,0 +1,21 @@
+schema_version: 1
+id: linked-work
+entrypoint: hermes_packs.linked_work
+requires:
+  packs: [notes, calendar, notion, mail]
+  services: [role_roster, owner_vault, account_scope, tool_approval, source_adapters]
+safety:
+  approval_policy: host
+  background_write: existing_company_linked_work_exceptions_only
+  preserve: [original_bodies, attachments, source_identity, owner_instructions, rollback_receipts]
+  ambiguous_write_retry: forbidden
+  source_deletion_propagation: forbidden
+settings:
+  notion_completion_sync:
+    type: object
+    default: {}
+    private: true
+compatibility:
+  hosts: [team-delegation, team-kit]
+  registration: host
+  entrypoints: [notion_completion_sync.py, common_work_links.py]

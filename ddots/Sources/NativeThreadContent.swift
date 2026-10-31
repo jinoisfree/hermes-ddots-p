@@ -152,7 +152,7 @@ extension ChatView {
         return NativeThreadCard.Content(id: thread.id, top: top, replies: replies, rail: rail, actions: actions, deleting: deleting,
                                         style: style, bell: slack.bells[thread.id], onBell: { slack.onBell?(thread) },
                                         clickCard: pick, textClick: textClick, bubbleWidth: model.bubbleWidth, quiet: quiet, expanded: expanded,
-                                        statusTitle: state.map { SlackNotice.badgeStatus($0.text) } ?? "", replyTarget: target)
+                                        replyTarget: target)
     }
 
     /// The project record above a thread in ddots, as the SwiftUI card shows it.
@@ -223,9 +223,9 @@ extension ChatView {
             NativeBodyCache.entries[identity] = entry
         }
         let checks = entry.checks
-        let marks = message.fromUser ? [] : message.marks.map { mark in
+        let marks = SlackNotice.visibleMarks(message.marks).map { mark in
             NativeThreadCard.Mark(color: MessageFormat.color(mark.color) ?? NSColor.labelColor.withAlphaComponent(0.35),
-                                  text: nativeMarkText(SlackNotice.displayStatus(mark.text), font: .systemFont(ofSize: ChatMetrics.bodyFont), dark: inputs.dark))
+                                  text: nativeMarkText(mark.text, font: .systemFont(ofSize: ChatMetrics.bodyFont), dark: inputs.dark))
         }
         return NativeThreadCard.Post(
             id: message.id, mine: message.fromUser, text: entry.text, speaker: message.speaker,

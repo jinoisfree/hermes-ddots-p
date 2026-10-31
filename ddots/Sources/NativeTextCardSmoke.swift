@@ -104,6 +104,10 @@ extension AppDelegate {
         smokeCheck(NSPasteboard.general.string(forType:.string) == expected, "Native selected text copies its displayed body")
         card.value?.content.clickCard()
         smokeCheck(isolated.picked == thread.id, "Native card click picks its thread")
+        isolated.picked = nil; isolated.pickByButton(thread)
+        smokeCheck(isolated.picked == thread.id && isolated.open.contains(thread.id), "A reply button press picks and opens its thread")
+        isolated.pickByButton(thread)
+        smokeCheck(isolated.open.contains(thread.id), "A second button press keeps the thread open")
         try? "PASS: delegate link, fold heights=\(foldedHeight)/\(expandedHeight), highlights=\(highlights), selected text copy, pick\nMouse drag and Command-C event delivery, local checkbox toggle passed.\n".write(to:destination.appendingPathComponent("native-text.txt"),atomically:true,encoding:.utf8)
     }
 }

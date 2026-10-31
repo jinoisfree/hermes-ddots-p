@@ -21,8 +21,8 @@ enum SlackToken {
         process.waitUntilExit()
         return process.terminationStatus == 0 ? String(data: data, encoding: .utf8) : nil
     }
-    private static func read() -> String? {
-        security(["find-generic-password", "-s", service, "-a", account, "-w"]).flatMap(SlackAPI.validToken)
+    private static func read(service name: String? = nil) -> String? {
+        security(["find-generic-password", "-s", name ?? service, "-a", account, "-w"]).flatMap(SlackAPI.validToken)
     }
     /// Items the app made itself in earlier builds under its current identifier.
     private static func legacyQuery(_ identifier: String) -> [String: Any] {
@@ -36,6 +36,11 @@ enum SlackToken {
     }
     static func load() -> String? {
         if let token = read() { return token }
+        if !UserDefaults.standard.bool(forKey: "ddotsIgnorePreviousSlackToken") {
+            for identifier in AppIdentity.previousBundleIDs {
+                if let token = read(service: identifier + ".slack-token") { return token }
+            }
+        }
         // An older item moves over the first time it is asked for; macOS asks about that one read, for the last time.
         let identifiers = [AppIdentity.bundleID]
         for identifier in identifiers {
@@ -52,6 +57,8 @@ enum SlackToken {
         return read() == token
     }
     static func delete() {
+        // Disconnect this installation without deleting the recovery app's credential.
+        UserDefaults.standard.set(true, forKey: "ddotsIgnorePreviousSlackToken")
         _ = security(["delete-generic-password", "-s", service, "-a", account])
         SecItemDelete(legacyQuery(AppIdentity.bundleID) as CFDictionary)
     }
@@ -104,6 +111,8 @@ final class SlackController {
     private(set) var localRead: [String: Double] = [:]
     private(set) var localThreads: [String: Double] = [:]
     private var ownRead: [String: Double] = [:]
+    /// Below each room's oldest ringing thread: the room receipt sent to Slack stays under it (`SlackUnread.entry`).
+    private var ringingCap: [String: Double] = [:]
     private var remoteQuiet: [String: Double] = [:]
     private var readRooms = Set<String>()
     private var readThreads = Set<String>()
@@ -313,6 +322,16 @@ final class SlackController {
             self.model.roomPictures[Ddots.sectionPicture(zone)] = nil
             self.model.removeSection(zone)
         }
+        model.onEditHeader = { [weak self] id in
+            guard let self, let room = self.model.room, room.id == id,
+                  let value = SlackRoomDialogs.editHeader(title: self.model.headerTitle(room), description: self.model.headerDescription(room)) else { return }
+            self.model.headerTitles[id] = value.0.isEmpty ? nil : value.0
+            self.model.headerDescriptions[id] = value.0.isEmpty ? nil : value.1
+            if self.persists {
+                UserDefaults.standard.set(self.model.headerTitles, forKey: "slackHeaderTitles")
+                UserDefaults.standard.set(self.model.headerDescriptions, forKey: "slackHeaderDescriptions")
+            }
+        }
         model.onGroupRename = { [weak self] zone in
             guard let self, let name = SlackRoomDialogs.renameGroup(self.model.groupName(zone)) else { return }
             self.model.groupNames[zone] = name
@@ -476,6 +495,8 @@ final class SlackController {
         let known = Set(model.sections + [Ddots.directZone])
         model.zoneOf = (defaults.dictionary(forKey: "slackZones") as? [String: Int] ?? [:]).filter { model.sections.contains($0.value) }
         model.groupsOpen = Set((defaults.array(forKey: "slackGroupsOpen") as? [Int] ?? []).filter { model.sections.contains($0) })
+        model.headerTitles = defaults.dictionary(forKey: "slackHeaderTitles") as? [String: String] ?? [:]
+        model.headerDescriptions = defaults.dictionary(forKey: "slackHeaderDescriptions") as? [String: String] ?? [:]
         for (key, name) in defaults.dictionary(forKey: "slackGroupNames") as? [String: String] ?? [:] { if let zone = Int(key), known.contains(zone) { model.groupNames[zone] = name } }
         model.roomPictures = SlackRoomPictures.load()
         // Reading the keychain can stop to ask the user (a locked keychain, a new build), so it never happens
@@ -638,7 +659,8 @@ final class SlackController {
                                           // A character's conversation is read for ddots even when it was taken off the Slack list.
                                           skipped: Ddots.enabled ? model.hidden.subtracting(model.ddotsRooms) : model.hidden, characters: cast)
         request.readRooms = readRooms; request.readThreads = readThreads
-        request.localRead = localRead; request.localThreads = localThreads; request.writesRead = persists
+        request.localRead = localRead.reduce(into: [:]) { $0[$1.key] = min($1.value, ringingCap[$1.key] ?? .infinity) }
+        request.localThreads = localThreads; request.writesRead = persists
         let reading = request
         let oldPresentation = publishCache, excluded = incomingExclusions
         queue.async { [weak self] in
@@ -1035,10 +1057,10 @@ final class SlackController {
         // The rooms in each section trade places among themselves as messages come; a room changes section only when dragged.
         let free = listed.filter { !behind.contains($0.id) }
         // Like the direct conversations' tab, the sections come with ddots; without it every room is in the one list.
-        // A section of two rooms or more folds behind its tab; one room is shown as itself; an empty one keeps its tab to drop into.
+        // Every section keeps its compact, editable heading, even with one or no rooms.
         var rooms: [SlackRoom] = [], groups: [Int: [SlackRoom]] = [:], rowZones: [String: Int] = [:]
         func addSection(_ zone: Int, tab: SlackRoom, inside: [SlackRoom], open: Bool) {
-            let shown = inside.count == 1 ? inside : [tab] + (open ? inside : [])
+            let shown = [tab] + (open ? inside : [])
             rooms += shown
             for room in shown { rowZones[room.id] = zone }
         }
@@ -1068,8 +1090,8 @@ final class SlackController {
         // ddots appears once the characters' names are known; until then the choice of it is kept.
         let waiting = Ddots.enabled && model.selected == Ddots.room && cast.isEmpty
         // A room folded away behind the stack is still a room that can be shown; the stack itself is not.
-        let choosable = rooms.filter { !Ddots.isTab($0.id) } + (model.stackOpen || stacked.count < 2 ? [] : stacked)
-            + model.sections.filter { !model.groupsOpen.contains($0) && (groups[$0]?.count ?? 0) >= 2 }.flatMap { groups[$0] ?? [] }
+        let choosable = rooms.filter { !Ddots.isTab($0.id) } + (model.stackOpen ? [] : stacked)
+            + model.sections.filter { !model.groupsOpen.contains($0) }.flatMap { groups[$0] ?? [] }
         if !choosable.isEmpty, !waiting, !choosable.contains(where: { $0.id == model.selected }) { model.show(room: choosable.first?.id) }
         let onScreen = shownRooms
         let shown = Ddots.merged(snapshot.threads, rooms: onScreen)
@@ -1079,8 +1101,13 @@ final class SlackController {
         var changedRead = false
         // A room seen for the first time starts as read, so connecting does not flood the badge.
         for room in snapshot.threads.keys where lastRead[room] == nil { lastRead[room] = now; changedRead = true }
+        let entry = SlackUnread.entry(shown, notices: notices, lastRead: lastRead)
+        ringingCap = entry.cap
+        // Lowered for good, so leaving the room does not send a receipt past a thread still waiting to be clicked.
+        for (room, limit) in entry.cap where (localRead[room] ?? 0) > limit { localRead[room] = limit }
         if chatOpen, model.source == .slack {
-            for thread in shown where thread.latest > (lastRead[thread.room] ?? 0) { markRead(thread) }
+            // A ringing thread is read when the user clicks it, not when its room is entered.
+            for thread in entry.read { markRead(thread) }
             for room in onScreen { if let newest = snapshot.threads[room]?.map(\.latest).max(), newest > (lastRead[room] ?? 0) { lastRead[room] = newest; changedRead = true } }
         }
         if changedRead && persists { UserDefaults.standard.set(retention.filtered(lastRead), forKey: "slackLastRead") }

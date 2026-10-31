@@ -1,0 +1,23 @@
+schema_version: 1
+id: mail
+entrypoint: hermes_packs.mail
+requires:
+  packs: [files-docs]
+  services: [role_roster, owner_vault, account_scope, tool_approval]
+  optional_accounts: [gmail, apple_mail]
+safety:
+  approval_policy: host
+  send: approval
+  delete: approval
+  permanent_delete: deny
+  background_write: deny
+platforms:
+  apple_mail: [darwin]
+settings:
+  gmail:
+    type: object
+    default: {}
+    private: true
+compatibility:
+  hosts: [team-delegation]
+  registration: host

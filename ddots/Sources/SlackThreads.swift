@@ -405,6 +405,12 @@ enum SlackNotice {
     }
     /// Slack shortcodes and displayed emoji can decorate a status, but the remaining words must match exactly.
     static func isSettled(_ text: String) -> Bool { settled.contains(statusWords(text)) }
+    /// Hide generated state labels only. Ordinary attachment text remains readable.
+    static func visibleMarks(_ marks: [ChatMark]) -> [ChatMark] {
+        let generated = settled.union(["답변 필요", "답글 작성 중", "답변 완료", "승인됨", "처리 중", "답변 대기"])
+            .union(["workingText", "waitingText", "approvedText", "settledText"].map { statusWords(rules.text($0)) })
+        return marks.filter { !statusWords($0.text).isEmpty && !generated.contains(statusWords($0.text)) }
+    }
     /// A later approval request reopens a thread; finishing the request itself or a later post settles it.
     static func isSettled(_ thread: SlackThread, confirmed: Set<String> = []) -> Bool {
         if let state = hermesState(thread) { return state == .closed || (state == .asking && pendingApproval(thread).map { confirmed.contains($0.id) } == true) }
@@ -426,7 +432,7 @@ enum SlackNotice {
     /// The words the buttons send. Hermes reads "승인" as yes and "거부" as no; "거절" is not on its list.
     static var approveText: String { rules.text("approveText") }
     static var denyText: String { rules.text("denyText") }
-    /// What 의견 sends: the same word as the Slack button, so every path asks what to do and waits.
+    /// The 의견 button's word. In ddots it sends nothing: the draft opens on the thread (owner, 2026-10-31).
     static let reviseText = "의견"
     /// Hermes's own command: it opens a new thread that carries this conversation on, with everything said so far.
     static var branchText: String { rules.text("branchText") }
@@ -939,6 +945,17 @@ enum SlackUnread {
         let ringing = Set(notices.filter(SlackNotice.hasBell).flatMap(\.threads))
         return threads.filter { ringing.contains($0.id) && (remoteQuiet[$0.id] ?? 0) < $0.latest && read($0, roomRead: roomRead[$0.room] ?? 0, threadRead: threadRead, threadUnfollowed: threadUnfollowed, ownRead: ownRead) }
     }
+    /// What entering a room marks read (owner decision 2026-10-31): a thread whose bell rings waits until the user
+    /// clicks it. Its room's receipt also stays below its first post, so a Slack read mark made on entry cannot quiet it
+    /// on another Mac, whose own-write guard does not know this Mac's marks, and come back here as a dismissal.
+    static func entry(_ threads: [SlackThread], notices: [SlackNoticeItem], lastRead: [String: Double]) -> (read: [SlackThread], cap: [String: Double]) {
+        let ringing = Set(notices.filter(SlackNotice.hasBell).flatMap(\.threads))
+        var cap: [String: Double] = [:]
+        for thread in threads where ringing.contains(thread.id) && !thread.ts.isEmpty {
+            cap[thread.room] = min(cap[thread.room] ?? .infinity, thread.root.date.timeIntervalSince1970 - 0.000001)
+        }
+        return (threads.filter { !ringing.contains($0.id) && $0.latest > (lastRead[$0.room] ?? 0) }, cap)
+    }
     static func badge(_ count: Int) -> String { count > 99 ? "99+" : count > 0 ? String(count) : "" }
 }
 
@@ -1263,17 +1280,27 @@ struct SlackNoticeMemo {
 
 /// Which reply buttons ddots draws as buttons (owner decision 2026-10-31), the same rule as team-kit `button_policy.py`.
 /// General and learning: 승인 · 거절 · 의견 · 확인. Mail work registration: 메모 · 메모+노션 · 확인, only under the mail legend.
-/// Slack shows the words alone; ddots puts each word's picture beside it. A click still sends the button's own value.
+/// Slack shows the words alone; ddots shows a word's picture alone when it has one. A click still sends the button's own value.
 enum ReplyButtonPolicy {
     static let standard = ["승인", "거절", "의견", "확인"]
     static let mail = ["메모", "메모+노션", "확인"]
-    static let mailLegend = "메모 = 개인(Obsidian 메모→미리알림), 메모+노션 = 공용(노션+Obsidian 메모→미리알림), 확인 = 만들지 않음"
+    static let mailLegend = "메모 = 개인(Obsidian 메모), 메모+노션 = 공용(노션+Obsidian 메모), 확인 = 만들지 않음"
+    /// 2026-10-31 이전에 올라간 글의 안내 문장(미리알림 기능 제거 전). 옛 글의 버튼도 계속 인정한다.
+    static let mailLegendBefore20261031 = "메모 = 개인(Obsidian 메모→미리알림), 메모+노션 = 공용(노션+Obsidian 메모→미리알림), 확인 = 만들지 않음"
+    /// 다크개인비서 video buttons, kept as they are (owner, 2026-10-31), each set only under its own legend line.
+    static let contexts: [(words: [String], legend: String)] = [
+        (mail, mailLegend),
+        (mail, mailLegendBefore20261031),
+        (["제작해", "수정", "취소"], "제작해 = 이 제작안대로 만들기, 수정 = 고칠 점 말하기, 취소 = 만들지 않기"),
+        (["다운", "수정", "종결"], "다운 = 받은 파일 저장, 수정 = 고칠 점 말하기, 종결 = 이 작업 끝내기"),
+    ]
     /// When the rule took effect: commit 2930e23e (2026-10-31 KST), the first one enforcing it. Not a future date:
     /// buttons posted after it are judged by the rule alone.
     static let since: TimeInterval = 1793376226
     /// What a button could say before then: the gateway let only the standard words and this list
-    /// (reply-buttons.json `retired_labels`) become buttons, so an earlier set outside them was never posted by it.
-    static let retired: Set<String> = [":hp-check: 확인", ":hp-memo: 메모", ":hp-notion: 메모+노션", "건너뛰기", "공개", "그만", "나중에", "다운", "답할게", "롤백", "만들 곳 고르기", "모두 거부", "모두 거절", "모두 보류", "모두 승인", "못했어", "반영해", "발송 승인", "비공개", "새 업무로 만들기", "수정", "수정 요청", "수정할게", "완료했어", "이 업무에 반영", "이런 질문 그만", "이번엔 넘어가", "이어 진행", "제작해", "종결", "취소", "확인했어"]
+    /// (reply-buttons.json `retired_labels`) become buttons, so an earlier set outside them was never posted by it;
+    /// the daily-cap question's own words are added, as scripts posted them unfiltered.
+    static let retired: Set<String> = [":hp-check: 확인", ":hp-memo: 메모", ":hp-notion: 메모+노션", "건너뛰기", "공개", "그만", "나중에", "다운", "답할게", "롤백", "만들 곳 고르기", "모두 거부", "모두 거절", "모두 보류", "모두 승인", "못했어", "반영해", "발송 승인", "비공개", "새 업무로 만들기", "수정", "수정 요청", "수정할게", "완료했어", "이 업무에 반영", "이런 질문 그만", "이번엔 넘어가", "이어 진행", "제작해", "종결", "취소", "확인했어", "오늘 계속 고쳐", "이것만 고쳐", "내일로"]
     /// The word a button shows: the mail buttons of earlier reports carried a Slack emoji code in front.
     static func word(_ label: String) -> String {
         guard label.hasPrefix(":"), let end = label.dropFirst().firstIndex(of: ":") else { return label }
@@ -1287,29 +1314,39 @@ enum ReplyButtonPolicy {
         case "확인": return "checkmark"
         case "메모": return "note.text"
         case "메모+노션": return "square.stack"
+        case "되돌리기": return "arrow.uturn.backward"
         default: return nil
         }
     }
     static func allowed(_ labels: [String], body: String) -> Bool {
         guard !labels.isEmpty, Set(labels).count == labels.count else { return false }
         if labels.allSatisfy(standard.contains) { return true }
-        return labels.allSatisfy(mail.contains) && labels.contains { $0 != "확인" } && body.contains(mailLegend)
+        return contexts.contains { context in
+            labels.allSatisfy(context.words.contains) && labels.contains { !standard.contains($0) } && body.contains(context.legend)
+        }
     }
     /// Sets only plugin scripts post, awaiting an owner decision on their words (team-kit `button_policy.SCRIPT_PENDING`).
     /// The gateway refuses them from staff and tools, and team-kit lets only the owning script post them.
     static let scriptPending = [
+        #"확인 \| 되돌리기"#, #"\d+(?: \| \d+)* \| 거절 \| 의견 \| 확인"#,
+    ]
+    /// When the owner's 2026-10-31 decisions on script buttons took effect; script sets posted before it keep answering.
+    static let scriptSince: TimeInterval = 1793417083
+    /// Script sets posted before the owner's 2026-10-31 decisions; earlier reports' buttons keep answering.
+    static let legacyScript = [
         #"확인 \| 롤백"#, #"오늘 계속 고쳐 \| 이것만 고쳐 \| 내일로"#, #"완료했어 \| 못했어 \| 수정할게 \| 확인했어"#, #"공개 \| 비공개 \| 나중에"#,
         #"(?:노션|메모|일정) 기준(?: \| (?:노션|메모|일정) 기준)* \| 그대로 두기"#, #"\d+번 연결(?: \| \d+번 연결)* \| 연결 안 함"#,
         #"연결 \| 연결 안 함"#, #"확실한 \d+건 모두 연결 \| 하나씩 볼게"#,
     ]
-    static func script(_ labels: [String]) -> Bool {
+    static func script(_ labels: [String], sets: [String] = scriptPending) -> Bool {
         let joined = labels.joined(separator: " | ")
-        return scriptPending.contains { joined.range(of: "^(?:" + $0 + ")$", options: .regularExpression) != nil }
+        return sets.contains { joined.range(of: "^(?:" + $0 + ")$", options: .regularExpression) != nil }
     }
     /// Whether these buttons may be pressed: an allowed set, a script's pending set, or an earlier report's set
     /// made only of words the gateway allowed back then.
     static func pressable(_ labels: [String], message: ChatMessage) -> Bool {
         if allowed(labels, body: message.body) || script(labels) { return true }
+        if message.date.timeIntervalSince1970 < scriptSince && script(labels, sets: legacyScript) { return true }
         return message.date.timeIntervalSince1970 < since && !labels.isEmpty && Set(labels).count == labels.count
             && labels.allSatisfy { standard.contains($0) || retired.contains($0) }
     }

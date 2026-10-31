@@ -167,6 +167,30 @@ extension SlackRoomDialogs {
         }
     }
 
+    /// Local display overrides only; the canonical Slack room name stays intact.
+    static func editHeader(title: String, description: String) -> (String, String)? {
+        let heading = NSTextField(string: title), detail = NSTextField(string: description)
+        heading.setAccessibilityLabel("대화 제목"); detail.setAccessibilityLabel("대화 설명")
+        let stack = NSStackView(views: [NSTextField(labelWithString: "제목"), heading, NSTextField(labelWithString: "설명"), detail])
+        stack.orientation = .vertical; stack.alignment = .leading; stack.spacing = 6
+        stack.frame = NSRect(x: 0, y: 0, width: width, height: 110)
+        for field in [heading, detail] { field.widthAnchor.constraint(equalToConstant: width).isActive = true }
+        let alert = NSAlert()
+        alert.messageText = "대화 제목과 설명"
+        alert.informativeText = "이 Mac의 ddots에 표시할 글이에요. 슬랙의 방 이름은 그대로예요."
+        alert.accessoryView = stack
+        alert.addButton(withTitle: "저장"); alert.addButton(withTitle: "취소"); alert.addButton(withTitle: "기본값 복원")
+        alert.window.initialFirstResponder = heading
+        NSApp.activate(ignoringOtherApps: true)
+        switch alert.runModal() {
+        case .alertFirstButtonReturn:
+            let name = heading.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            return (name.isEmpty ? title : name, detail.stringValue.trimmingCharacters(in: .whitespacesAndNewlines))
+        case .alertThirdButtonReturn: return ("", "")
+        default: return nil
+        }
+    }
+
     /// Asks for a group's new name. It stays on this Mac. Nil when called off; empty brings back the usual name.
     static func renameGroup(_ old: String) -> String? {
         let field = NSTextField(frame: NSRect(x: 0, y: 0, width: width, height: 24))

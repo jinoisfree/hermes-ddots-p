@@ -1,0 +1,20 @@
+name: diagnosis
+version: 1.0.0
+description: Read-only doctor tools, bounded requests and redacted diagnostic records.
+provides_tools:
+  - team_diagnosis_request
+  - diagnosis_health_read
+  - diagnosis_slack_read
+  - diagnosis_logs_read
+  - diagnosis_state_read
+  - diagnosis_runs_read
+  - diagnosis_code_read
+  - diagnosis_history_read
+  - diagnosis_case_read
+  - diagnosis_records_read
+  - diagnosis_deployment_read
+  - diagnosis_recurrence_read
+  - diagnosis_log_patterns_read
+  - diagnosis_prompt_overhead_read
+  - diagnosis_skill_review_read
+  - diagnosis_shell_read

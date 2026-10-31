@@ -1,0 +1,6 @@
+name: notes
+version: 1.0.0
+description: Account-scoped Apple Notes and Obsidian operations with attachment preservation.
+provides_tools:
+  - apple_notes_direct_lookup
+  - apple_notes_direct_mutation

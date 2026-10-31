@@ -111,7 +111,18 @@ final class NativeThreadCard: NSTableCellView, NSTextViewDelegate {
     // MARK: Measuring without views
 
     /// NSTextView and the offscreen calculator use the same zero-padding TextKit container.
+    /// The same rendered body at the same width measures the same. Re-measuring a long answer for every frame of
+    /// a height ease took tens of milliseconds each time; bodies come from a cache, so identity is the key.
+    private static var measured: [ObjectIdentifier: (text: NSAttributedString, width: CGFloat, size: NSSize)] = [:]
     static func textSize(_ text: NSAttributedString, width: CGFloat) -> NSSize {
+        guard !(text is NSMutableAttributedString) else { return layoutSize(text, width: width) }
+        if let hit = measured[ObjectIdentifier(text)], hit.text === text, abs(hit.width - width) < 0.01 { return hit.size }
+        let size = layoutSize(text, width: width)
+        if measured.count > 256 { measured.removeAll(keepingCapacity: true) }
+        measured[ObjectIdentifier(text)] = (text, width, size)
+        return size
+    }
+    private static func layoutSize(_ text: NSAttributedString, width: CGFloat) -> NSSize {
         let storage = NSTextStorage(attributedString: text)
         let manager = NSLayoutManager()
         let container = NSTextContainer(containerSize: NSSize(width: max(1, width), height: .greatestFiniteMagnitude))
@@ -178,17 +189,8 @@ final class NativeThreadCard: NSTableCellView, NSTextViewDelegate {
             bell = NSRect(x: right - icon - (bellBox - icon) / 2, y: midY - bellBox / 2, width: bellBox, height: bellBox)
             right -= icon + bellGap
         }
-        var titles: [(String, Bool)] = []
-        if content.replyTarget { titles.append(("답글 작성 중", true)) }
-        if !content.statusTitle.isEmpty { titles.append((content.statusTitle, false)) }
-        var badges: [Header.Badge] = []
-        for (title, target) in titles {
-            let room = right - inset
-            guard room > 24 else { break }
-            let w = min(room, ceil(Self.width(title, font: footFont)) + 22)
-            badges.append(.init(title: title, replyTarget: target, frame: NSRect(x: right - w, y: midY - badgeHeight / 2, width: w, height: badgeHeight)))
-            right -= w + 8
-        }
+        // State is represented by the card's colour rail and reply outline, without duplicate words.
+        let badges: [Header.Badge] = []
         guard bell != nil || !badges.isEmpty else { return Header(bell: nil, badges: [], reserve: 0) }
         let rowWidth = width - inset - (badges.last?.frame.minX ?? bell!.minX + (bellBox - bellIconWidth) / 2)
         var inline = false
@@ -202,6 +204,13 @@ final class NativeThreadCard: NSTableCellView, NSTextViewDelegate {
     }
 
     private static var streamHeights: [String: (width: CGFloat, height: CGFloat)] = [:]
+    /// A written answer that became its final message eases from its tallest streamed height to its own.
+    private static var releasing: [String: (from: CGFloat, since: TimeInterval, shown: CGFloat, at: TimeInterval)] = [:]
+    static let releaseDuration: TimeInterval = 0.3
+    static let releaseDelay: TimeInterval = 0.25
+    static let releaseStep: CGFloat = 6
+    /// Asks the list to lay a card out again on the next frame while its height eases.
+    static var settle: ((String) -> Void)?
     static func layout(_ content: Content, width: CGFloat) -> Layout {
         let inset = content.style.inset
         let usable = max(1, width - 2 * inset)
@@ -236,13 +245,35 @@ final class NativeThreadCard: NSTableCellView, NSTextViewDelegate {
                     let size = textSize(post.text, width: limit)
                     let heightKey = content.id + ":" + post.id
                     var bodyHeight = size.height
-                    if post.streaming || (streamHeights[heightKey] != nil && post.foldTitle != "더 보기") {
+                    if post.streaming {
                         if let old = streamHeights[heightKey], abs(old.width - limit) < 0.5 {
                             bodyHeight = max(bodyHeight, old.height)
                         }
                         if streamHeights.count > 512, let oldest = streamHeights.keys.first { streamHeights.removeValue(forKey: oldest) }
                         streamHeights[heightKey] = (limit, bodyHeight)
-                    } else { streamHeights.removeValue(forKey: heightKey) }
+                        releasing.removeValue(forKey: heightKey)
+                    } else if let old = streamHeights[heightKey], abs(old.width - limit) < 0.5, old.height > bodyHeight + 0.5, post.foldTitle != "더 보기" {
+                        // The final message is the end point. Its height is its own, reached in one short ease
+                        // rather than kept as blank space or dropped in a single frame.
+                        let now = ProcessInfo.processInfo.systemUptime
+                        // Begin once the final message's own rendering work has passed, so the ease gets every frame.
+                        let start = releasing[heightKey] ?? (old.height, now + releaseDelay, old.height, 0)
+                        let t = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion ? 1 : min(1, max(0, (now - start.since) / releaseDuration))
+                        // At most a few points per drawn frame, even when frames come late. Several layouts in one
+                        // frame share that frame's step.
+                        let eased = (start.from - (start.from - bodyHeight) * CGFloat(t * t * (3 - 2 * t))).rounded()
+                        let target = bodyHeight
+                        if now - start.at < 1.0 / 90.0 { bodyHeight = start.shown }
+                        else {
+                            bodyHeight = t >= 1 && start.shown - target <= releaseStep ? target : max(eased, start.shown - releaseStep)
+                            releasing[heightKey] = (start.from, start.since, bodyHeight, bodyHeight != start.shown ? now : start.at)
+                        }
+                        if releasing[heightKey] == nil { releasing[heightKey] = start }
+                        if bodyHeight > target + 0.5 {
+                            let id = content.id
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0 / 60.0) { settle?(id) }
+                        } else { streamHeights.removeValue(forKey: heightKey); releasing.removeValue(forKey: heightKey) }
+                    } else { streamHeights.removeValue(forKey: heightKey); releasing.removeValue(forKey: heightKey) }
                     if !post.continuation {
                         item.aside = NSRect(x: x, y: y, width: ChatMetrics.avatar, height: ChatMetrics.avatar)
                         item.time = NSRect(x: textX, y: y, width: textWidth, height: 16)
@@ -463,6 +494,13 @@ final class NativeThreadCard: NSTableCellView, NSTextViewDelegate {
     final class Host: NSHostingView<AnyView> {
         var sizeChanged: (() -> Void)?
         override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+        /// A piece inside the list has no window edge to keep clear of. Following safe areas made every change in the
+        /// list's height re-lay out the whole chat (about 55ms), so a growing answer dropped most of its frames.
+        required init(rootView: AnyView) {
+            super.init(rootView: rootView)
+            if #available(macOS 13.3, *) { safeAreaRegions = [] }
+        }
+        @MainActor required dynamic init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
         override func invalidateIntrinsicContentSize() { super.invalidateIntrinsicContentSize(); sizeChanged?() }
     }
     /// The folded replies: who answered, how many, and two cards peeking out underneath like a pile.

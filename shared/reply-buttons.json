@@ -1,0 +1,13 @@
+{
+  "policy": "strict",
+  "standard": [
+    "승인",
+    "거절",
+    "의견",
+    "확인"
+  ],
+  "contexts": [],
+  "checklists": [],
+  "labels": [],
+  "patterns": []
+}

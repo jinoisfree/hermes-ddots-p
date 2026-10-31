@@ -136,6 +136,15 @@ import AppKit
         precondition((0..<8).map(zones.zone) == [0, 1, 1, 1, 2, 3, 4, 4] && (0..<8).map(zones.breaks) == [false, true, false, false, true, true, true, false]
                      && zones.above(0) == 0 && zones.above(3) == SlackZones.dividerHeight && zones.above(7) == SlackZones.dividerHeight * 4,
                      "ddots stands alone above the sections, and a line parts each section from the next")
+        for list in [false, true] {
+            let layout = SlackSectionLayout(sections: [false, true, false, false, true], zones: [0, 1, 1, 1, 2], list: list)
+            let row: CGFloat = list ? 58 : 72, heading: CGFloat = list ? 29 : 36
+            precondition(layout.tops[2] == row + SlackZones.dividerHeight + heading, "Room origin accounts for reduced heading height")
+            precondition(layout.tops[4] == row * 3 + heading + SlackZones.dividerHeight * 2, "Next section origin includes all children and separator")
+            let rail = layout.rail(at: 1)!
+            precondition(rail.maxY == layout.tops[3] + row - 10, "Expanded rail reaches the final child without entering the separator")
+            precondition(layout.rail(at: 4)?.height == 18 && layout.rail(at: 2) == nil, "Closed heading has a short rail; children do not draw separate rails")
+        }
         let plain = SlackZones(rooms: ["C1", "C2"], zoneOf: [:])
         precondition(plain.zones == [1, 1] && !plain.breaks(1) && plain.above(1) == 0, "rooms given no section are one run without lines")
         print("SlackLayoutTests passed")

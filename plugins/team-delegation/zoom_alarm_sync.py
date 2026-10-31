@@ -14,7 +14,19 @@ import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-HOME = Path.home() / '.hermes/profiles/work-assistant'
+# The cron entrypoint runs before gateway plugin initialization.
+_PACK_LIBRARY = Path(__file__).parent / "lib"
+if str(_PACK_LIBRARY) not in sys.path:
+    sys.path.insert(0, str(_PACK_LIBRARY))
+
+import importlib.util as _ilu, pathlib as _pl, sys as _sys
+team = _sys.modules.get('hermes_team_registry')
+if team is None:
+    _spec = _ilu.spec_from_file_location('hermes_team_registry', _pl.Path(__file__).with_name('team_registry.py'))
+    team = _sys.modules['hermes_team_registry'] = _ilu.module_from_spec(_spec)
+    _spec.loader.exec_module(team)
+
+HOME = team.home_of_role('work', Path.home() / '.hermes')
 WEEKDAYS = '월화수목금토일'
 
 
@@ -46,13 +58,15 @@ class Calendar:
     @property
     def tools(self):
         if self._tools is None:
-            from notion_completion_sync import load_module
+            from hermes_packs.linked_work.notion_completion_sync import load_module
             self._tools = load_module('_zoom_alarm_calendar_tools', Path(__file__).with_name('__init__.py'))
         return self._tools
 
     def day(self, date):
-        source = Path(__file__).with_name('eventkit_calendar_query.swift')
-        binary = self.tools._calendar_cache_root(self.tools.PERSONAL_PROFILE) / 'eventkit_calendar_query-v2'
+        tools = self.tools
+        from hermes_packs.calendar import QUERY_SOURCE
+        source = QUERY_SOURCE
+        binary = tools._calendar_cache_root(tools.PERSONAL_PROFILE) / 'eventkit_calendar_query-v2'
         if not binary.exists() or binary.stat().st_mtime_ns < source.stat().st_mtime_ns:
             compiled = self.runner(['/usr/bin/swiftc', '-parse-as-library', str(source), '-o', str(binary)],
                                    capture_output=True, text=True, timeout=120, check=False)
@@ -65,7 +79,7 @@ class Calendar:
 
     def company(self, row):
         """Same company-scope guard as the linked-work watcher; personal calendars stay with assistant."""
-        import notion_completion_sync
+        from hermes_packs.linked_work import notion_completion_sync
         try:
             notion_completion_sync.company_scope_guard(
                 'calendar', {'action': 'update', 'event_id': row['calendarItemIdentifier'], 'expected_start': row['start']}, strict=True)
@@ -148,7 +162,7 @@ def main(*, dry_run=False):
     import hermes_yaml as yaml
     home = Path(os.environ.get('HERMES_HOME', '')).resolve()
     if home != HOME.resolve():
-        raise RuntimeError('work-assistant home required')
+        raise RuntimeError(f"{team.first_with('work')} home required")
     config = yaml.safe_load((home / 'config.yaml').read_text())
     settings = config.get('plugins', {}).get('entries', {}).get('team-delegation', {}).get('settings', {}).get('zoom_alarm_sync', {})
     if settings.get('enabled') is not True:
@@ -161,7 +175,7 @@ def main(*, dry_run=False):
     lock_path = path.with_suffix('.lock')
     if any(p.is_symlink() for p in (path.parent, path, lock_path)):
         raise ValueError('sync_state_symlink')
-    from work_content import save
+    from hermes_packs.linked_work.work_content import save
     with lock_path.open('a') as lock:
         try:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -187,7 +201,7 @@ def main(*, dry_run=False):
             return
         save(path, state)
     if added or failed:
-        import slack_report
+        from hermes_packs.linked_work import slack_report
         item = report(added, failed, minutes, datetime.now(seoul()).strftime('%-m/%-d %H:%M'))
         try:
             missed = slack_report.post_dm(home, [item])

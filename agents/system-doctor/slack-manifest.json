@@ -31,7 +31,8 @@
         "users:read",
         "mpim:read",
         "assistant:write",
-        "files:read"
+        "files:read",
+        "channels:join"
       ]
     }
   },
@@ -47,6 +48,9 @@
         "app_context_changed"
       ]
     },
-    "socket_mode_enabled": true
+    "socket_mode_enabled": true,
+    "interactivity": {
+      "is_enabled": true
+    }
   }
 }

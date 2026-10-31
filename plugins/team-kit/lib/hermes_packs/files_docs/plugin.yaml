@@ -1,0 +1,18 @@
+name: files-docs
+version: 1.0.0
+description: Scoped file and document tools using the host approval middleware.
+provides_tools:
+  - file_list
+  - file_trash
+  - file_location
+  - file_link
+  - file_move
+  - folder_create
+  - file_copy
+  - doc_edit
+  - pdf_pages
+  - doc_convert
+  - doc_fill
+  - doc_read
+  - pdf_render
+  - folder_scan

@@ -1,0 +1,536 @@
+{
+  "version": 1,
+  "packs": {
+    "calendar": {
+      "schema_version": 1,
+      "id": "calendar",
+      "entrypoint": "hermes_packs.calendar",
+      "requires": {
+        "packs": [],
+        "services": [
+          "role_roster",
+          "owner_vault",
+          "account_scope",
+          "tool_approval"
+        ],
+        "optional_accounts": [
+          "google_calendar",
+          "eventkit_calendar"
+        ]
+      },
+      "safety": {
+        "approval_policy": "host",
+        "read": [
+          "calendar_direct_lookup",
+          "google_calendar_color_get"
+        ],
+        "host_guarded_write": [
+          "calendar_direct_mutation",
+          "google_calendar_color_set"
+        ],
+        "background_write": "host_linked_work_and_zoom_exceptions_only"
+      },
+      "platforms": {
+        "eventkit_calendar": [
+          "darwin"
+        ]
+      },
+      "settings": {
+        "personal_scopes": {
+          "type": "object",
+          "default": {},
+          "private": true
+        }
+      },
+      "compatibility": {
+        "hosts": [
+          "team-delegation"
+        ],
+        "registration": "host"
+      },
+      "tools": [
+        "calendar_direct_lookup",
+        "calendar_direct_mutation",
+        "google_calendar_color_get",
+        "google_calendar_color_set"
+      ]
+    },
+    "diagnosis": {
+      "schema_version": 1,
+      "id": "diagnosis",
+      "entrypoint": "hermes_packs.diagnosis",
+      "requires": {
+        "packs": [],
+        "services": [
+          "role_roster",
+          "owner_vault",
+          "session_authority",
+          "source_adapters"
+        ]
+      },
+      "safety": {
+        "tools": "read_only",
+        "scope": "existing_doctor_and_authorized_requesters",
+        "background_actions": "existing_night_batch_only",
+        "external_write": "existing_explicit_report_authority_only",
+        "preserve": [
+          "quiet_hours",
+          "request_limits",
+          "redaction",
+          "owner_approval",
+          "no_background_learning"
+        ]
+      },
+      "settings": {
+        "diagnosis": {
+          "type": "object",
+          "default": {},
+          "private": true
+        },
+        "diagnosis_request": {
+          "type": "object",
+          "default": {},
+          "private": true
+        }
+      },
+      "compatibility": {
+        "hosts": [
+          "team-delegation",
+          "team-kit"
+        ],
+        "registration": "host",
+        "entrypoints": [
+          "diagnosis_check.py",
+          "diagnosis_requests.py"
+        ]
+      },
+      "tools": [
+        "team_diagnosis_request",
+        "diagnosis_health_read",
+        "diagnosis_slack_read",
+        "diagnosis_logs_read",
+        "diagnosis_state_read",
+        "diagnosis_runs_read",
+        "diagnosis_code_read",
+        "diagnosis_history_read",
+        "diagnosis_case_read",
+        "diagnosis_records_read",
+        "diagnosis_deployment_read",
+        "diagnosis_recurrence_read",
+        "diagnosis_log_patterns_read",
+        "diagnosis_prompt_overhead_read",
+        "diagnosis_skill_review_read",
+        "diagnosis_shell_read"
+      ]
+    },
+    "files-docs": {
+      "schema_version": 1,
+      "id": "files-docs",
+      "entrypoint": "hermes_packs.files_docs",
+      "requires": {
+        "services": [
+          "file_paths",
+          "tool_approval"
+        ],
+        "packs": [],
+        "optional": {
+          "document_python": [
+            "openpyxl",
+            "python-docx",
+            "pypdf"
+          ],
+          "pdf_render": [
+            "pdftoppm"
+          ],
+          "doc_convert": [
+            "soffice"
+          ]
+        }
+      },
+      "safety": {
+        "read": [
+          "file_list",
+          "file_location",
+          "doc_read",
+          "pdf_render",
+          "folder_scan"
+        ],
+        "host_guarded_write": [
+          "file_trash",
+          "file_move",
+          "folder_create",
+          "file_copy",
+          "doc_edit",
+          "pdf_pages",
+          "doc_convert",
+          "doc_fill"
+        ],
+        "external_write": [
+          "file_link"
+        ],
+        "approval_policy": "host",
+        "background_write": "deny"
+      },
+      "platforms": {
+        "file_trash": [
+          "darwin"
+        ]
+      },
+      "settings": {
+        "lead_folders": {
+          "type": "array",
+          "default": [],
+          "private": true
+        },
+        "files": {
+          "type": "object",
+          "default": {},
+          "private": true
+        }
+      },
+      "compatibility": {
+        "hosts": [
+          "team-kit",
+          "team-delegation"
+        ],
+        "registration": "host"
+      },
+      "tools": [
+        "file_list",
+        "file_trash",
+        "file_location",
+        "file_link",
+        "file_move",
+        "folder_create",
+        "file_copy",
+        "doc_edit",
+        "pdf_pages",
+        "doc_convert",
+        "doc_fill",
+        "doc_read",
+        "pdf_render",
+        "folder_scan"
+      ]
+    },
+    "linked-work": {
+      "schema_version": 1,
+      "id": "linked-work",
+      "entrypoint": "hermes_packs.linked_work",
+      "requires": {
+        "packs": [
+          "notes",
+          "calendar",
+          "notion",
+          "mail"
+        ],
+        "services": [
+          "role_roster",
+          "owner_vault",
+          "account_scope",
+          "tool_approval",
+          "source_adapters"
+        ]
+      },
+      "safety": {
+        "approval_policy": "host",
+        "background_write": "existing_company_linked_work_exceptions_only",
+        "preserve": [
+          "original_bodies",
+          "attachments",
+          "source_identity",
+          "owner_instructions",
+          "rollback_receipts"
+        ],
+        "ambiguous_write_retry": "forbidden",
+        "source_deletion_propagation": "forbidden"
+      },
+      "settings": {
+        "notion_completion_sync": {
+          "type": "object",
+          "default": {},
+          "private": true
+        }
+      },
+      "compatibility": {
+        "hosts": [
+          "team-delegation",
+          "team-kit"
+        ],
+        "registration": "host",
+        "entrypoints": [
+          "notion_completion_sync.py",
+          "common_work_links.py"
+        ]
+      },
+      "tools": [
+        "common_work_create",
+        "common_work_get",
+        "common_work_link",
+        "common_work_complete",
+        "knowledge_ref_link",
+        "knowledge_ref_get",
+        "knowledge_ref_unlink",
+        "mail_work",
+        "linked_work_read",
+        "personal_work_bundle",
+        "personal_work_rollback"
+      ]
+    },
+    "mail": {
+      "schema_version": 1,
+      "id": "mail",
+      "entrypoint": "hermes_packs.mail",
+      "requires": {
+        "packs": [
+          "files-docs"
+        ],
+        "services": [
+          "role_roster",
+          "owner_vault",
+          "account_scope",
+          "tool_approval"
+        ],
+        "optional_accounts": [
+          "gmail",
+          "apple_mail"
+        ]
+      },
+      "safety": {
+        "approval_policy": "host",
+        "send": "approval",
+        "delete": "approval",
+        "permanent_delete": "deny",
+        "background_write": "deny"
+      },
+      "platforms": {
+        "apple_mail": [
+          "darwin"
+        ]
+      },
+      "settings": {
+        "gmail": {
+          "type": "object",
+          "default": {},
+          "private": true
+        }
+      },
+      "compatibility": {
+        "hosts": [
+          "team-delegation"
+        ],
+        "registration": "host"
+      },
+      "tools": [
+        "gmail_direct",
+        "google_reauth"
+      ]
+    },
+    "native-tools": {
+      "schema_version": 1,
+      "id": "native-tools",
+      "entrypoint": "hermes_packs.native_tools",
+      "requires": {
+        "packs": [],
+        "services": [
+          "role_roster",
+          "owner_vault",
+          "account_scope",
+          "tool_approval"
+        ]
+      },
+      "safety": {
+        "approval_policy": "host",
+        "contacts_write": "existing_owner_chat_policy",
+        "messages_wiki_runtime": "read_only",
+        "background_write": "forbidden",
+        "ambiguous_write_retry": "forbidden"
+      },
+      "platforms": {
+        "contacts": [
+          "darwin"
+        ],
+        "messages": [
+          "darwin"
+        ]
+      },
+      "settings": {},
+      "compatibility": {
+        "hosts": [
+          "team-delegation"
+        ],
+        "registration": "host"
+      },
+      "tools": [
+        "contacts_direct_lookup",
+        "contacts_direct_mutation",
+        "messages_direct_lookup",
+        "wiki_direct",
+        "request_usage_lookup",
+        "gateway_runtime_snapshot"
+      ]
+    },
+    "notes": {
+      "schema_version": 1,
+      "id": "notes",
+      "entrypoint": "hermes_packs.notes",
+      "requires": {
+        "packs": [
+          "files-docs"
+        ],
+        "services": [
+          "role_roster",
+          "owner_vault",
+          "account_scope",
+          "tool_approval"
+        ],
+        "optional_accounts": [
+          "apple_notes",
+          "obsidian"
+        ]
+      },
+      "safety": {
+        "approval_policy": "host",
+        "read": [
+          "apple_notes_direct_lookup"
+        ],
+        "host_guarded_write": [
+          "apple_notes_direct_mutation"
+        ],
+        "background_write": "host_linked_work_exceptions_only",
+        "preserve": [
+          "source_body",
+          "attachments",
+          "stable_identity",
+          "rollback_receipts"
+        ],
+        "ambiguous_write_retry": "forbidden"
+      },
+      "platforms": {
+        "apple_notes": [
+          "darwin"
+        ]
+      },
+      "settings": {
+        "obsidian_notes": {
+          "type": "object",
+          "default": {},
+          "private": true
+        }
+      },
+      "compatibility": {
+        "hosts": [
+          "team-delegation",
+          "team-kit"
+        ],
+        "registration": "host"
+      },
+      "tools": [
+        "apple_notes_direct_lookup",
+        "apple_notes_direct_mutation"
+      ]
+    },
+    "notion": {
+      "schema_version": 1,
+      "id": "notion",
+      "entrypoint": "hermes_packs.notion",
+      "requires": {
+        "packs": [
+          "files-docs"
+        ],
+        "services": [
+          "role_roster",
+          "work_publication_scope",
+          "tool_approval"
+        ],
+        "accounts": [
+          "notion_integration"
+        ]
+      },
+      "safety": {
+        "read": [
+          "search",
+          "databases",
+          "schema",
+          "query",
+          "page",
+          "users"
+        ],
+        "host_guarded_write": [
+          "create",
+          "update",
+          "append",
+          "edit",
+          "trash",
+          "batch",
+          "rollback",
+          "api"
+        ],
+        "approval_policy": "host",
+        "background_write": "host_linked_work_exception_only"
+      },
+      "settings": {
+        "notion": {
+          "type": "object",
+          "default": {},
+          "private": true
+        }
+      },
+      "compatibility": {
+        "hosts": [
+          "team-kit"
+        ],
+        "registration": "host"
+      },
+      "tools": [
+        "notion"
+      ]
+    },
+    "sns": {
+      "schema_version": 1,
+      "id": "sns",
+      "entrypoint": "hermes_packs.sns",
+      "requires": {
+        "packs": [],
+        "services": [
+          "role_roster",
+          "owner_vault",
+          "session_authority",
+          "tool_approval"
+        ],
+        "optional_accounts": [
+          "x"
+        ]
+      },
+      "safety": {
+        "x": "read_only",
+        "media_save": "owner_selected_current_media_only",
+        "overwrite": "forbidden",
+        "video_grants": "isolated_host_and_session",
+        "background_write": "forbidden"
+      },
+      "settings": {
+        "x_read": {
+          "type": "object",
+          "default": {},
+          "private": true
+        },
+        "media_save": {
+          "type": "object",
+          "default": {},
+          "private": true
+        }
+      },
+      "compatibility": {
+        "hosts": [
+          "team-kit",
+          "team-delegation"
+        ],
+        "registration": "host"
+      },
+      "tools": [
+        "x_posts",
+        "media_save"
+      ]
+    }
+  }
+}

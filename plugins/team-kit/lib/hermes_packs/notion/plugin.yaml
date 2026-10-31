@@ -1,0 +1,5 @@
+name: notion
+version: 1.0.0
+description: Notion operations with conversation approval and durable undo.
+provides_tools:
+  - notion

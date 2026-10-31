@@ -1,0 +1,30 @@
+schema_version: 1
+id: files-docs
+entrypoint: hermes_packs.files_docs
+requires:
+  services: [file_paths, tool_approval]
+  packs: []
+  optional:
+    document_python: [openpyxl, python-docx, pypdf]
+    pdf_render: [pdftoppm]
+    doc_convert: [soffice]
+safety:
+  read: [file_list, file_location, doc_read, pdf_render, folder_scan]
+  host_guarded_write: [file_trash, file_move, folder_create, file_copy, doc_edit, pdf_pages, doc_convert, doc_fill]
+  external_write: [file_link]
+  approval_policy: host
+  background_write: deny
+platforms:
+  file_trash: [darwin]
+settings:
+  lead_folders:
+    type: array
+    default: []
+    private: true
+  files:
+    type: object
+    default: {}
+    private: true
+compatibility:
+  hosts: [team-kit, team-delegation]
+  registration: host

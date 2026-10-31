@@ -1,0 +1,6 @@
+name: mail
+version: 1.0.0
+description: Account-scoped Gmail and Apple Mail with host approval enforcement.
+provides_tools:
+  - gmail_direct
+  - google_reauth

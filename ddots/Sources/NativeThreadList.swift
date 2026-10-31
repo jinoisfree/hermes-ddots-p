@@ -63,6 +63,13 @@ struct NativeThreadList: NSViewRepresentable {
     final class Host: NSHostingView<AnyView> {
         var sizeChanged: (() -> Void)?
         override func layout() { super.layout(); sizeChanged?() }
+        /// A piece inside the list has no window edge to keep clear of. Following safe areas made every change in the
+        /// list's height re-lay out the whole chat (about 55ms), so a growing answer dropped most of its frames.
+        required init(rootView: AnyView) {
+            super.init(rootView: rootView)
+            if #available(macOS 13.3, *) { safeAreaRegions = [] }
+        }
+        @MainActor required dynamic init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
         override func invalidateIntrinsicContentSize() {
             super.invalidateIntrinsicContentSize()
             sizeChanged?()
@@ -165,6 +172,7 @@ struct NativeThreadList: NSViewRepresentable {
                 let id = rows[row].id
                 // A hosted piece that grows or shrinks (a disclosure, a progress mark) re-measures its own row.
                 cell.hostedSizeChanged = { [weak self] in self?.scheduleRemeasure(id) }
+                NativeThreadCard.settle = { [weak self] id in self?.scheduleRemeasure(id) }
                 cell.register = { [weak self] key, view in self?.model?.rowViews.setObject(view, forKey: key as NSString) }
                 cell.configure(layout)
                 return cell
@@ -182,19 +190,36 @@ struct NativeThreadList: NSViewRepresentable {
         }
         var cardCounts: [String: Int] { ["row_created": rowCreated, "row_reused": rowReused, "text_created": textCreated, "text_reused": textReused, "appkit": textLayouts.count, "hosted": rows.filter { $0.inputs != nil && $0.card == nil }.count] }
         private var cardWidth: CGFloat { max(1, width - 2 * ChatMetrics.horizontalInset) }
+        private var shrinking: [String: (shown: CGFloat, at: TimeInterval)] = [:]
         private func measure(_ row: NativeThreadRow) -> CGFloat {
             if let fixed = row.fixedHeight { return max(1, fixed) }
             if let content = row.card?() {
                 let layout = NativeThreadCard.layout(content, width: cardWidth)
                 textLayouts[row.id] = layout
                 report(layout)
-                return layout.height
+                return eased(row.id, layout.height)
             }
             textLayouts.removeValue(forKey: row.id)
             measuring.configure(row, width: cardWidth)
             measuring.frame.size = NSSize(width: width, height: 1)
             measuring.layoutSubtreeIfNeeded()
             return max(1, ceil(measuring.host.fittingSize.height))
+        }
+        /// While the reader follows an answer at the bottom, a card that becomes shorter (its "생각 중" line giving way
+        /// to the first words, say) gives up the space a few points a frame instead of pulling the page down at once.
+        private func eased(_ id: String, _ height: CGFloat) -> CGFloat {
+            let now = ProcessInfo.processInfo.systemUptime
+            guard model?.followsStream == true, !SlackModel.reducesMotion,
+                  let previous = shrinking[id]?.shown ?? heights[id], height < previous - 0.5, previous - height < 160 else {
+                shrinking.removeValue(forKey: id); return height
+            }
+            let last = shrinking[id]?.at ?? 0
+            let shown = now - last < 1.0 / 90.0 ? previous : max(height, previous - NativeThreadCard.releaseStep)
+            shrinking[id] = (shown, shown == previous ? last : now)
+            if shown > height {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.0 / 60.0) { [weak self] in self?.scheduleRemeasure(id) }
+            } else { shrinking.removeValue(forKey: id) }
+            return shown
         }
         func update(rows next: [NativeThreadRow], stamp: SlackModel.EntryViewportStamp) {
             guard !updating else { return }

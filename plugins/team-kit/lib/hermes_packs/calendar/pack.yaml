@@ -1,0 +1,22 @@
+schema_version: 1
+id: calendar
+entrypoint: hermes_packs.calendar
+requires:
+  packs: []
+  services: [role_roster, owner_vault, account_scope, tool_approval]
+  optional_accounts: [google_calendar, eventkit_calendar]
+safety:
+  approval_policy: host
+  read: [calendar_direct_lookup, google_calendar_color_get]
+  host_guarded_write: [calendar_direct_mutation, google_calendar_color_set]
+  background_write: host_linked_work_and_zoom_exceptions_only
+platforms:
+  eventkit_calendar: [darwin]
+settings:
+  personal_scopes:
+    type: object
+    default: {}
+    private: true
+compatibility:
+  hosts: [team-delegation]
+  registration: host

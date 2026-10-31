@@ -438,7 +438,7 @@ struct ChatView: View {
             }
             VStack(alignment: .leading, spacing: 6) {
                 if !message.body.isEmpty { messageText(message, palette: palette).onSelectedTextClick(textClick) }
-                ForEach(Array(message.marks.enumerated()), id: \.offset) { _, mark in markNote(mark, message: message) }
+                ForEach(Array(SlackNotice.visibleMarks(message.marks).enumerated()), id: \.offset) { _, mark in markNote(mark, message: message) }
                 ForEach(message.files) { fileView($0, in: message) }
             }.font(.system(size: ChatMetrics.bodyFont)).selectableText(selectable)
                 .foregroundColor(message.fromUser ? .white : Color(nsColor:palette.foreground.nsColor))

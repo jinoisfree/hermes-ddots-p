@@ -1,0 +1,25 @@
+schema_version: 1
+id: sns
+entrypoint: hermes_packs.sns
+requires:
+  packs: []
+  services: [role_roster, owner_vault, session_authority, tool_approval]
+  optional_accounts: [x]
+safety:
+  x: read_only
+  media_save: owner_selected_current_media_only
+  overwrite: forbidden
+  video_grants: isolated_host_and_session
+  background_write: forbidden
+settings:
+  x_read:
+    type: object
+    default: {}
+    private: true
+  media_save:
+    type: object
+    default: {}
+    private: true
+compatibility:
+  hosts: [team-kit, team-delegation]
+  registration: host

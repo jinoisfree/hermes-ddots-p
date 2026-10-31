@@ -1,0 +1,227 @@
+{
+  "version": 1,
+  "entries": [
+    {
+      "path": "shared/common-router-claims.sqlite3",
+      "kind": "sqlite",
+      "owner": "hermes_router",
+      "tables": {
+        "inbound_claims": [
+          "claim_key",
+          "selected_profile",
+          "reason",
+          "platform",
+          "scope_id",
+          "chat_id",
+          "thread_id",
+          "message_id",
+          "created_at"
+        ],
+        "thread_routes": [
+          "route_key",
+          "selected_profile",
+          "platform",
+          "scope_id",
+          "chat_id",
+          "thread_id",
+          "updated_at"
+        ],
+        "pending_approval_routes": [
+          "route_key",
+          "selected_profile",
+          "operation",
+          "preview_digest",
+          "platform",
+          "scope_id",
+          "chat_id",
+          "thread_id",
+          "expires_at",
+          "updated_at"
+        ]
+      },
+      "legacy_tables": [
+        "model_route_decisions",
+        "route_corrections",
+        "route_switch_offers",
+        "route_switch_pending"
+      ],
+      "locking": "SQLite transaction; use backup API for a consistent copy",
+      "update": "preserve",
+      "optional": true
+    },
+    {
+      "path": "shared/common-work-links.sqlite3",
+      "kind": "sqlite",
+      "owner": "hermes_packs.linked_work",
+      "tables": {
+        "common_work": [
+          "common_id",
+          "title",
+          "status",
+          "created_at",
+          "completed_at",
+          "scope",
+          "scope_set_at",
+          "reminder_policy"
+        ],
+        "source_links": [
+          "common_id",
+          "domain",
+          "source_id",
+          "metadata_json",
+          "linked_at"
+        ],
+        "common_work_events": [
+          "event_id",
+          "common_id",
+          "event_type",
+          "payload_json",
+          "created_at"
+        ],
+        "personal_bundle_executions": [
+          "bundle_key",
+          "payload_digest",
+          "status",
+          "receipt_json",
+          "created_at",
+          "updated_at"
+        ],
+        "knowledge_refs": [
+          "ref_id",
+          "common_id",
+          "ref_type",
+          "external_id",
+          "relation_type",
+          "authority",
+          "link_reason",
+          "source_session_id",
+          "receipt_id",
+          "metadata_json",
+          "verified_at",
+          "created_at",
+          "unlinked_at",
+          "unlink_reason"
+        ],
+        "source_health": [
+          "common_id",
+          "domain",
+          "source_id",
+          "status",
+          "reason",
+          "metadata_json",
+          "checked_at",
+          "failures"
+        ]
+      },
+      "legacy_tables": [],
+      "locking": "SQLite transaction; use backup API for a consistent copy",
+      "update": "preserve",
+      "optional": true
+    },
+    {
+      "path": "shared/project-threads.sqlite3",
+      "kind": "sqlite",
+      "owner": "hermes_router.project_threads",
+      "tables": {
+        "projects": [
+          "id",
+          "data"
+        ]
+      },
+      "legacy_tables": [],
+      "locking": "SQLite transaction; use backup API for a consistent copy",
+      "update": "preserve",
+      "optional": true
+    },
+    {
+      "path": "shared/holidays.json",
+      "kind": "json",
+      "owner": "hermes_team_services.rest_day",
+      "required_keys": [
+        "fetched_at",
+        "years",
+        "days"
+      ],
+      "update": "preserve",
+      "optional": true
+    },
+    {
+      "path": "shared/rest-day-gate.json",
+      "kind": "json",
+      "owner": "hermes_team_services.rest_day",
+      "required_keys": [],
+      "update": "preserve",
+      "optional": true
+    },
+    {
+      "path": "shared/personal-work-rollback.json",
+      "kind": "json",
+      "owner": "hermes_packs.notes",
+      "required_keys": [
+        "version",
+        "entries",
+        "scopes"
+      ],
+      "update": "preserve",
+      "optional": true
+    },
+    {
+      "path": "shared/reply-buttons.json",
+      "kind": "json",
+      "owner": "hermes_reply",
+      "required_keys": [
+        "policy",
+        "labels",
+        "contexts"
+      ],
+      "update": "preserve",
+      "optional": true
+    },
+    {
+      "path": "shared/diagnosis-cases",
+      "kind": "directory",
+      "owner": "hermes_packs.diagnosis",
+      "update": "preserve",
+      "optional": true
+    },
+    {
+      "path": "shared/diagnosis-records",
+      "kind": "directory",
+      "owner": "hermes_packs.diagnosis",
+      "update": "preserve",
+      "optional": true
+    },
+    {
+      "path": "shared/diagnosis-requests",
+      "kind": "directory",
+      "owner": "hermes_packs.diagnosis",
+      "update": "preserve",
+      "optional": true
+    },
+    {
+      "path": "shared/project-audits",
+      "kind": "directory",
+      "owner": "hermes_router",
+      "update": "preserve",
+      "optional": true
+    },
+    {
+      "path": "shared/secretary-skills",
+      "kind": "directory",
+      "owner": "hermes_team_services",
+      "update": "preserve",
+      "optional": true
+    },
+    {
+      "path": "state/schedule-assembly.json",
+      "kind": "json",
+      "owner": "hermes_schedule",
+      "required_keys": [
+        "version",
+        "baselines"
+      ],
+      "update": "preserve",
+      "optional": true
+    }
+  ]
+}

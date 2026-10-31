@@ -1,0 +1,6 @@
+name: sns
+version: 1.0.0
+description: Read-only social posts and owner-authorized local media operations.
+provides_tools:
+  - x_posts
+  - media_save

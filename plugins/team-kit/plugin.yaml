@@ -1,7 +1,7 @@
 name: team-kit
 version: 0.9.5
 description: "Context bridge, tool policy, reversible learning and recall, work handoffs, private location, read-only diagnosis, public X reading, and read-only Slack history."
-author: starter_user
+author: Hermes Community
 provides_hooks:
   - pre_api_request
   - pre_gateway_dispatch
@@ -12,6 +12,8 @@ provides_hooks:
   - post_llm_call
   - post_api_request
   - api_request_error
+  - pre_auxiliary_call
+  - post_auxiliary_call
 provides_middleware:
   - llm_request
 provides_tools:
@@ -51,6 +53,5 @@ provides_tools:
   - mail_read
   - calendar_read
   - notes_read
-  - reminders_read
   - file_link
   - file_location

@@ -945,17 +945,17 @@ extension AppDelegate {
         model.toggleStack()
         check(model.rooms.map(\.id) == [Ddots.room, Ddots.group(1), Ddots.group(2), Ddots.group(3), Ddots.stack] && model.pins.allSatisfy(\.isEmpty), "Folded again, the tab is back at the bottom: \(model.rooms.map(\.id))")
         check(model.stacked.map(\.id) == ["DDS", "Dassistant", "DCOW", "DJANG", "DRACCOON"] && model.members[Ddots.stack]?.count == 5, "Behind it are all of them, characters first: \(model.stacked.map(\.id))")
-        // Channels put in no section are in the first; two or more fold behind its tab. One alone shows as itself.
+        // Every section retains its heading, including a section with one room.
         check(model.groups[1]?.map(\.id) == ["CCOW", "CTRUTH", "CTEAM"] && model.rowZones[Ddots.room] == 0 && model.rowZones[Ddots.stack] == 4,
               "ddots stands above the sections; the channels fill the first and the direct conversations are the fourth: \(model.rowZones)")
         model.move("CCOW", toZone: 2)
-        check(model.rooms.map(\.id) == [Ddots.room, Ddots.group(1), "CCOW", Ddots.group(3), Ddots.stack] && model.groups[2]?.map(\.id) == ["CCOW"] && model.rowZones["CCOW"] == 2,
-              "A channel dragged alone into a section shows as itself there: \(model.rooms.map(\.id))")
+        check(model.rooms.map(\.id) == [Ddots.room, Ddots.group(1), Ddots.group(2), Ddots.group(3), Ddots.stack] && model.groups[2]?.map(\.id) == ["CCOW"] && model.rowZones[Ddots.group(2)] == 2,
+              "A section with one room retains its collapsed heading: \(model.rooms.map(\.id))")
         model.move("CTRUTH", toZone: 2)
-        check(model.rooms.map(\.id) == [Ddots.room, "CTEAM", Ddots.group(2), Ddots.group(3), Ddots.stack] && model.chosenTab == Ddots.room,
-              "With two in it the section folds behind its tab, and the one left in the first shows as itself: \(model.rooms.map(\.id))")
+        check(model.rooms.map(\.id) == [Ddots.room, Ddots.group(1), Ddots.group(2), Ddots.group(3), Ddots.stack] && model.chosenTab == Ddots.room,
+              "Both sections retain their headings as rooms move: \(model.rooms.map(\.id))")
         model.toggleGroup(2)
-        check(model.rooms.map(\.id) == [Ddots.room, "CTEAM", Ddots.group(2), "CCOW", "CTRUTH", Ddots.group(3), Ddots.stack], "Unfolded, the section shows its rooms under its tab: \(model.rooms.map(\.id))")
+        check(model.rooms.map(\.id) == [Ddots.room, Ddots.group(1), Ddots.group(2), "CCOW", "CTRUTH", Ddots.group(3), Ddots.stack], "Unfolded, the section shows its rooms under its tab: \(model.rooms.map(\.id))")
         model.move(Ddots.room, toZone: 2); model.move("DDS", toZone: 2); model.move(Ddots.stack, toZone: 3); model.move(Ddots.group(3), toZone: 2); model.move("CTEAM", toZone: 4)
         check(model.zoneOf == ["CCOW": 2, "CTRUTH": 2], "ddots, the tabs and the direct conversations keep their places, and no channel goes among them: \(model.zoneOf)")
         model.groupNames[3] = "업무"
@@ -970,7 +970,7 @@ extension AppDelegate {
         check(model.sections == [1, 2, 3, 5] && model.rooms.map(\.id) == [Ddots.room, Ddots.group(1), Ddots.group(2), Ddots.group(3), Ddots.group(5), Ddots.stack]
               && model.groupName(5) == "section 4" && model.groupName(Ddots.directZone) == "section 5", "A new section is added above the direct conversations: \(model.rooms.map(\.id))")
         model.move("CCOW", toZone: 5)
-        check(model.rowZones["CCOW"] == 5, "A channel can be dragged into the new section")
+        check(model.groups[5]?.contains { $0.id == "CCOW" } == true && model.rowZones[Ddots.group(5)] == 5, "A channel can be dragged into the new collapsed section")
         model.removeSection(5)
         check(model.sections == [1, 2, 3] && model.zoneOf.isEmpty && model.groups[1]?.contains { $0.id == "CCOW" } == true, "Its channels go back to the first section")
         model.removeSection(1)

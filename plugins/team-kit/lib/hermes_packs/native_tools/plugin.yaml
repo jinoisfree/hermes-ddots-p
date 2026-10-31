@@ -1,0 +1,10 @@
+name: native-tools
+version: 1.0.0
+description: Scoped contacts, messages, wiki and runtime inspection.
+provides_tools:
+  - contacts_direct_lookup
+  - contacts_direct_mutation
+  - messages_direct_lookup
+  - wiki_direct
+  - request_usage_lookup
+  - gateway_runtime_snapshot

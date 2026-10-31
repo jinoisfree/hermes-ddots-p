@@ -6,7 +6,7 @@ import Foundation
 enum AgentStop {
     /// Slack keeps slash commands out of threads; Hermes reads a known leading "!" command as "/".
     static let command = "!stop"
-    static let undoRequest = "방금 중지한 작업에서 이미 바꾼 것(메모·미리알림·파일·Notion·NAS·보낸 메시지 등)을 목록으로 먼저 보여 줘. 내가 확인하면 원래대로 되돌려 줘. 확인 전에는 아무것도 바꾸지 마."
+    static let undoRequest = "방금 중지한 작업에서 이미 바꾼 것(메모·파일·Notion·NAS·보낸 메시지 등)을 목록으로 먼저 보여 줘. 내가 확인하면 원래대로 되돌려 줘. 확인 전에는 아무것도 바꾸지 마."
 
     /// A character is writing in the thread: its typing mark, or its "생각 중" line still standing.
     static func working(_ thread: SlackThread, typing: [TypingIndicator]) -> Bool {

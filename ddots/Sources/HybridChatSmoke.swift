@@ -35,6 +35,7 @@ extension AppDelegate {
                         let tag = "\(name) \(label) \(Int(width))pt"
                         let frames = header.all
                         if c.bell != nil && header.bell == nil { failures.append(tag + ": bell missing") }
+                        if !header.badges.isEmpty { failures.append(tag + ": redundant state badge") }
                         if let first = frames.first, frames.contains(where: { abs($0.midY - first.midY) > 0.5 }) { failures.append(tag + ": centres differ") }
                         if let bell = header.bell {
                             let icon = NativeThreadCard.bellIconWidth, iconLeft = bell.minX + (bell.width - icon) / 2
@@ -109,9 +110,9 @@ extension AppDelegate {
                             let layout = NativeThreadCard.layout(card, width: width)
                             check(layout.placed.allSatisfy { $0.frame.minX >= 0 && $0.frame.maxX <= width + 1 }, "Thread pieces stay inside \(width)pt")
                         }
-                        check(card.bell == true && card.replyTarget && !card.statusTitle.isEmpty, "Active card carries bell, reply badge and status badge")
+                        check(card.bell == true && card.replyTarget && card.statusTitle.isEmpty, "Active card keeps bell and reply outline without status words")
                     }
-                    if i == 1 { check(card.statusTitle == "답변 완료", "Settled badge shows its words without ✅: \(card.statusTitle)") }
+                    check(card.statusTitle.isEmpty, "Card state uses the rail without a text badge, card \(i)")
                     check(card.statusTitle.unicodeScalars.first.map { !($0.properties.isEmoji && $0.value > 0x7F) } ?? true, "Status badge starts with words, card \(i)")
                     check(!card.actions.contains { $0.identifier.hasPrefix("reply-") || $0.title.hasPrefix("답글") }, "Card foot has no reply count button, card \(i)")
                     check(!card.actions.contains { $0.title == "펼치기" }, "Card foot has no 펼치기, card \(i)")
@@ -155,8 +156,62 @@ extension AppDelegate {
             check(model.target == nil && model.draft == "방에 남길 초안", "New post draft survives target switching")
             await verifyCardClicks(destination: destination, check: check)
             await verifyLongReportButtons(destination: destination, check: check)
+            await verifySectionSidebar(destination: destination, check: check)
             NSApp.terminate(nil)
         }
+    }
+
+    /// Synthetic section geometry and badge alignment in both themes and sidebar widths.
+    @MainActor private func verifySectionSidebar(destination: URL, check: (Bool, String) -> Void) async {
+        let model = slack.model
+        let a = SlackRoom(id: "CCOW", name: "학습 채널"), b = SlackRoom(id: "CTRUTH", name: "보고 채널"), c = SlackRoom(id: "CTEAM", name: "업무")
+        model.sections = [1, 2]; model.groupNames = [1: "함께 나누는 대화", 2: "업무"]
+        model.groups = [1: [a, b], 2: [c]]; model.groupsOpen = [1, 2]
+        model.rooms = [SlackRoom(id: Ddots.group(1), name: model.groupName(1)), a, b, SlackRoom(id: Ddots.group(2), name: "업무"), c]
+        model.rowZones = [Ddots.group(1): 1, a.id: 1, b.id: 1, Ddots.group(2): 2, c.id: 2]
+        model.selected = a.id; model.headerTitles[a.id] = "오늘의 대화"; model.headerDescriptions[a.id] = "사용자가 편집한 설명"
+        check(model.headerTitle(a) == "오늘의 대화" && model.headerDescription(a) == "사용자가 편집한 설명" && a.name == "학습 채널", "Header display overrides preserve the Slack name")
+        model.unread = [a.id: 7]
+        model.roomNotices = [a.id: .init(alerts: 2, questions: 3), Ddots.group(1): .init(alerts: 2, questions: 3)]
+        for dark in [true, false] {
+            panel.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
+            for width in [SlackSidebar.expandedWidth, SlackSidebar.width] {
+                resizeChat(to: CGSize(width: 760 + width, height: 850)); model.sidebarWidth = width
+                try? await Task.sleep(nanoseconds: 650_000_000)
+                let list = SlackSidebar.isList(width), heading = chat.smokeFrames["room-" + Ddots.group(1)]
+                check(heading.map { abs($0.height - (list ? 29 : 36)) < 1 } ?? false, "Reduced section height, dark=\(dark), width=\(width)")
+                if let rail = chat.smokeFrames["section-rail-" + Ddots.group(1)], let selection = chat.smokeFrames["room-selection-box-" + a.id] {
+                    check(selection.minX - rail.maxX >= (list ? 9 : 3), "Selection is clear of section rail, width=\(width)")
+                    check(rail.height > 18, "Expanded section has one continuous rail")
+                } else { check(false, "Section rail and selection are measured") }
+                let title = chat.smokeFrames["room-name-" + Ddots.group(1)]
+                let dots = ["unread", "question", "alert"].compactMap { chat.smokeFrames["section-dot-" + Ddots.group(1) + "-" + $0] }
+                check(dots.count == 3 && dots.allSatisfy { abs($0.width - 2) < 0.1 && abs($0.height - 2) < 0.1 }, "Section signals are three 2pt dots")
+                if let title, let first = dots.first, let last = dots.last, let heading {
+                    check(abs(first.minX - title.maxX - 3) < 0.5 && dots.allSatisfy { abs($0.minX - first.minX) < 0.1 }
+                          && abs(last.minY - first.minY - 8) < 0.1 && last.maxX <= heading.maxX - 1,
+                          "Section dots sit vertically 3pt after the name without clipping")
+                    if !list { check(abs(title.midX - heading.midX) < 0.5, "Compact section name stays centred independently of its dots") }
+                } else { check(false, "Section name and dots are measured") }
+                let before = chat.smokeFrames["room-face-" + a.id]
+                if !list, let face = before, let strip = chat.smokeFrames["sidebar-blank"] {
+                    check(abs(face.midX - strip.midX) < 1, "Photo remains centred with three coloured counts")
+                }
+                capture(destination: destination.appendingPathComponent("sections-\(dark ? "dark" : "light")-\(list ? "wide" : "compact")"))
+                model.unread[a.id] = 0; model.roomNotices[a.id] = .init(); model.roomNotices[Ddots.group(1)] = .init()
+                try? await Task.sleep(nanoseconds: 450_000_000)
+                check(before.map { abs($0.midX - (chat.smokeFrames["room-face-" + a.id]?.midX ?? -1)) < 0.5 } ?? false, "Removing all counts does not move the photo")
+                check(chat.smokeFrames["section-signals-" + Ddots.group(1)].map { $0.height < 0.5 } ?? false, "Section dots disappear when all notifications clear")
+                check(title.map { abs($0.midX - (chat.smokeFrames["room-name-" + Ddots.group(1)]?.midX ?? -1)) < 0.5 } ?? false, "Clearing section dots does not shift its name")
+                model.unread[a.id] = 107; model.roomNotices[a.id] = .init(alerts: 12, questions: 3)
+                model.roomNotices[Ddots.group(1)] = .init(alerts: 12, questions: 3)
+            }
+        }
+        model.groupsOpen = []; model.rooms = [model.rooms[0], model.rooms[3]]
+        try? await Task.sleep(nanoseconds: 650_000_000)
+        check(chat.smokeFrames["section-rail-" + Ddots.group(1)].map { abs($0.height - 18) < 1 } ?? false, "Closed section returns to an 18pt rail")
+        check(chat.smokeFrames["section-signals-" + Ddots.group(1)].map { abs($0.height - 10) < 0.1 } ?? false, "Closed section keeps the same vertical colour dots")
+        capture(destination: destination.appendingPathComponent("sections-folded"))
     }
 
     /// Real mouse clicks on a native card: a click opens it and picks it as the reply target, 접기 folds it, the bell flips.
@@ -287,7 +342,7 @@ extension AppDelegate {
             guard let strip = chat.smokeFrames["sidebar-blank"], abs(strip.width - SlackSidebar.width) < 1 else {
                 smokeCheck(false, "Compact strip is measured: \(String(describing: chat.smokeFrames["sidebar-blank"]))"); return
             }
-            for tab in model.rooms.map(\.id) {
+            for tab in model.rooms.map(\.id) where tab != Ddots.stack && Ddots.groupZone(tab) == nil {
                 for part in ["room-face-", "room-name-"] {
                     guard let frame = chat.smokeFrames[part + tab] else { off.append(part + tab + " missing"); continue }
                     if abs(frame.midX - strip.midX) > 1 { off.append("\(part)\(tab) \(frame.midX) vs \(strip.midX)") }
@@ -296,19 +351,21 @@ extension AppDelegate {
             if let brand = chat.smokeFrames["brand-d"], abs(brand.midX - strip.midX) > 1 { off.append("brand \(brand.midX) vs \(strip.midX)") }
             smokeCheck(off.isEmpty && !model.rooms.isEmpty, "Compact strip tabs are centred, dark=\(dark): " + off.prefix(4).joined(separator: "; "))
         }
-        // 의견 asks the character what to do: the word goes to this thread, nothing else is sent (no Slack here).
+        // 의견 sends nothing: the draft opens on the thread (no Slack here).
         var sent: [(String, String?)] = []
         let savedSend = model.onSend
         defer { model.onSend = savedSend }
         model.onSend = { text, _, thread, _ in sent.append((text, thread?.id)) }
         model.answerHermes(report, label: "의견")
+        smokeCheck(sent.isEmpty && model.target?.id == report.id, "의견 on a Slack-button report opens the draft on it")
         var plain = ChatMessage(id: "hybrid-plain-ask", fromUser: false, speaker: "개인비서", body: "이대로 진행할까요?\n승인하면 이대로 보낼게.", date: date, profile: "personal-secretary")
         plain.hermesReplyState = .asking
         let ask = SlackThread(id: "hybrid-plain", room: room, ts: "hybrid-plain", root: plain, replies: [], replyCount: 0,
                               loaded: true, latest: date.timeIntervalSince1970, latestFromUser: false)
         model.threads = [ask]
         model.opinion(ask)
-        smokeCheck(sent.map(\.0) == ["의견", "의견"] && sent.map(\.1) == [report.id, ask.id], "의견 sends 의견 into its own thread from both button kinds: \(sent)")
+        // 의견 sends nothing (owner, 2026-10-31): the draft opens on that thread for the owner to write the instruction.
+        smokeCheck(sent.isEmpty && model.target?.id == ask.id, "의견 opens the draft on its own thread and sends nothing: \(sent), target=\(String(describing: model.target?.id))")
         // A question without a what-to-do section keeps its buttons after the whole message.
         smokeCheck(ReplyButtonPolicy.split(plain.body) == nil, "No what-to-do section: no split")
     }

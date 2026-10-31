@@ -1,0 +1,24 @@
+schema_version: 1
+id: notes
+entrypoint: hermes_packs.notes
+requires:
+  packs: [files-docs]
+  services: [role_roster, owner_vault, account_scope, tool_approval]
+  optional_accounts: [apple_notes, obsidian]
+safety:
+  approval_policy: host
+  read: [apple_notes_direct_lookup]
+  host_guarded_write: [apple_notes_direct_mutation]
+  background_write: host_linked_work_exceptions_only
+  preserve: [source_body, attachments, stable_identity, rollback_receipts]
+  ambiguous_write_retry: forbidden
+platforms:
+  apple_notes: [darwin]
+settings:
+  obsidian_notes:
+    type: object
+    default: {}
+    private: true
+compatibility:
+  hosts: [team-delegation, team-kit]
+  registration: host

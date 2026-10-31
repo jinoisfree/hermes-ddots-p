@@ -1,0 +1,19 @@
+schema_version: 1
+id: native-tools
+entrypoint: hermes_packs.native_tools
+requires:
+  packs: []
+  services: [role_roster, owner_vault, account_scope, tool_approval]
+safety:
+  approval_policy: host
+  contacts_write: existing_owner_chat_policy
+  messages_wiki_runtime: read_only
+  background_write: forbidden
+  ambiguous_write_retry: forbidden
+platforms:
+  contacts: [darwin]
+  messages: [darwin]
+settings: {}
+compatibility:
+  hosts: [team-delegation]
+  registration: host

@@ -1,0 +1,25 @@
+schema_version: 1
+id: diagnosis
+entrypoint: hermes_packs.diagnosis
+requires:
+  packs: []
+  services: [role_roster, owner_vault, session_authority, host_bridge]
+safety:
+  tools: read_only
+  scope: existing_doctor_and_authorized_requesters
+  background_actions: existing_night_batch_only
+  external_write: existing_explicit_report_authority_only
+  preserve: [quiet_hours, request_limits, redaction, owner_approval, no_background_learning]
+settings:
+  diagnosis:
+    type: object
+    default: {}
+    private: true
+  diagnosis_request:
+    type: object
+    default: {}
+    private: true
+compatibility:
+  hosts: [team-delegation, team-kit]
+  registration: host
+  entrypoints: [diagnosis_check.py, diagnosis_requests.py]

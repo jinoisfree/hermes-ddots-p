@@ -1,0 +1,20 @@
+schema_version: 1
+id: notion
+entrypoint: hermes_packs.notion
+requires:
+  packs: [files-docs]
+  services: [role_roster, work_publication_scope, tool_approval]
+  accounts: [notion_integration]
+safety:
+  read: [search, databases, schema, query, page, users]
+  host_guarded_write: [create, update, append, edit, trash, batch, rollback, api]
+  approval_policy: host
+  background_write: host_linked_work_exception_only
+settings:
+  notion:
+    type: object
+    default: {}
+    private: true
+compatibility:
+  hosts: [team-kit]
+  registration: host

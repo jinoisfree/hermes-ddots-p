@@ -27,6 +27,13 @@ def existing(home):
 
 
 def main(argv=None):
+    if (ROOT / "installation.json").exists():
+        from install_support import modern_main, SetupError
+        try:
+            return modern_main(ROOT, argv)
+        except SetupError as error:
+            print(str(error), file=sys.stderr)
+            return 1
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('--list', action='store_true')
     p.add_argument('--agents')

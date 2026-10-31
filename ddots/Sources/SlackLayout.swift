@@ -303,7 +303,7 @@ enum SlackLayout {
 /// The sections of the room list, row by row: ddots alone at the top (section 0), then each section's rows. A line
 /// stands wherever the section changes from the row above.
 struct SlackZones: Equatable {
-    static let dividerHeight: CGFloat = 13
+    static let dividerHeight: CGFloat = 19
     /// The section of each row, from the top.
     let zones: [Int]
 
@@ -315,4 +315,30 @@ struct SlackZones: Equatable {
     func breaks(_ offset: Int) -> Bool { offset > 0 && zones.indices.contains(offset) && zones[offset] != zones[offset - 1] }
     /// How far the lines push down the row at `offset`.
     func above(_ offset: Int) -> CGFloat { CGFloat((0...max(0, offset)).filter(breaks).count) * Self.dividerHeight }
+}
+
+/// One source of geometry for compact section headers, full room rows and their continuous rails.
+struct SlackSectionLayout {
+    let tops: [CGFloat]
+    let heights: [CGFloat]
+    let sections: [Bool]
+    let zones: [Int]
+    init(sections: [Bool], zones: [Int], list: Bool, divided: Bool = true) {
+        self.sections = sections; self.zones = zones
+        var y: CGFloat = 0, tops: [CGFloat] = [], heights: [CGFloat] = []
+        for i in sections.indices {
+            if divided && i > 0 && zones[i] != zones[i - 1] { y += SlackZones.dividerHeight }
+            let height: CGFloat = sections[i] ? (list ? 29 : 36) : (list ? 58 : 72)
+            tops.append(y); heights.append(height); y += height
+        }
+        self.tops = tops; self.heights = heights
+    }
+    func rail(at index: Int) -> CGRect? {
+        guard sections.indices.contains(index), sections[index] else { return nil }
+        var last = index
+        while last + 1 < sections.count && !sections[last + 1] && zones[last + 1] == zones[index] { last += 1 }
+        let top = tops[index] + (heights[index] - 18) / 2
+        let bottom = last == index ? top + 18 : tops[last] + heights[last] - 10
+        return CGRect(x: 0, y: top, width: 2, height: bottom - top)
+    }
 }

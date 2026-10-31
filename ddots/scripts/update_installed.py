@@ -7,6 +7,7 @@ from pathlib import Path
 import re
 import shutil
 import subprocess
+import plistlib
 
 ROOT = Path(__file__).resolve().parents[1]
 DESTINATION = Path.home() / 'Applications/ddots.app'
@@ -53,14 +54,31 @@ def prune(destination):
             shutil.rmtree(old)
 
 
-def update(source, destination=DESTINATION):
+def update(source, destination=DESTINATION, channel='private', migrate_private=False):
     source = source.expanduser().absolute()
     destination = destination.expanduser().absolute()
     if source.resolve() == destination.resolve():
         raise RuntimeError('빌드 산출물과 설치 경로가 같습니다.')
-    verify(source)  # Nothing changes unless the new build has the expected signature.
+    if channel == 'private':
+        verify(source)
+    else:
+        verify(source, channel=channel)
     if destination.is_symlink() or not destination.is_dir():
         raise RuntimeError('설치본이 없습니다. 먼저 scripts/install.py를 실행해 주세요.')
+    if channel == 'public' and not migrate_private:
+        from update_channel import PUBLIC_BUNDLE
+        old_info = plistlib.loads((destination / 'Contents/Info.plist').read_bytes())
+        if old_info.get('CFBundleIdentifier') != PUBLIC_BUNDLE:
+            raise RuntimeError('이전 설치를 공개판으로 바꾸려면 --migrate-private를 지정하세요.')
+    if migrate_private:
+        if channel != 'public':
+            raise RuntimeError('공개판으로 전환할 때만 이전 설치를 이어받습니다.')
+        from update_channel import policy
+        _, previous_bundle, _ = policy('private')
+        verify(destination, channel='private')
+        info = plistlib.loads((source / 'Contents/Info.plist').read_bytes())
+        if previous_bundle not in info.get('DDotsPreviousBundleIdentifiers', []):
+            raise RuntimeError('공개 빌드에 이전 설치의 설정·Slack 연결 정보가 없습니다.')
     # Preserve even a damaged old app for recovery; never delete the existing installation.
     folder = backup_folder(destination)
     folder.mkdir(parents=True, exist_ok=True)
@@ -71,7 +89,10 @@ def update(source, destination=DESTINATION):
         destination.rename(backup)
         moved = True
         run('/usr/bin/ditto', '--norsrc', '--noextattr', '--noqtn', str(source), str(destination))
-        verify(destination)
+        if channel == 'private':
+            verify(destination)
+        else:
+            verify(destination, channel=channel)
         launch(destination)
     except BaseException:  # An interrupt in the middle of the copy must not leave half an app and no pet either.
         if moved:
@@ -86,10 +107,13 @@ def update(source, destination=DESTINATION):
             launch(destination)
         raise
     # Backup cleanup cannot trigger rollback after a successful launch.
-    try:
-        prune(destination)
-    except OSError as error:
-        print(f'갱신 완료, 이전 백업 정리 생략: {type(error).__name__}')
+    if not migrate_private:
+        try:
+            prune(destination)
+        except OSError as error:
+            print(f'갱신 완료, 이전 백업 정리 생략: {type(error).__name__}')
+    else:
+        print('공개판 전환: 이전 앱·설정·Slack 자격은 복구용으로 보존했습니다.')
     print(f'설치본 갱신 완료: {destination}')
 
 
@@ -120,10 +144,12 @@ def start_relay(destination=DESTINATION):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--source', type=Path, default=ROOT / 'dist/ddots.app')
+    parser.add_argument('--channel', choices=('private', 'public'), default='private')
+    parser.add_argument('--migrate-private', action='store_true')
     args = parser.parse_args()
     shared = stop_relay()
     try:
-        update(args.source)
+        update(args.source, channel=args.channel, migrate_private=args.migrate_private)
     finally:  # A failed update rolls back to the app that was there; its share comes back too.
         if shared:
             start_relay()

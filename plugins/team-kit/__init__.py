@@ -8,6 +8,15 @@ Mac browser through ~/.hermes/bin/hermes-browser.
 """
 from __future__ import annotations
 
+# Owner-specific text is rendered from private policy; public source stays generic.
+from pathlib import Path as _OwnerPath
+import sys as _owner_sys
+_owner_library = str((_OwnerPath(__file__).resolve().parent / 'lib').resolve())
+if _owner_library not in _owner_sys.path:
+    _owner_sys.path.insert(0, _owner_library)
+from hermes_facility.owner_text import render as _owner_text
+
+
 import copy
 import fnmatch
 import fcntl
@@ -22,8 +31,17 @@ import threading
 import tempfile
 from pathlib import Path
 from typing import Any
+import importlib.util as _ilu, pathlib as _pl, sys as _sys
+team = _sys.modules.get('hermes_team_registry')
+if team is None:
+    _spec = _ilu.spec_from_file_location('hermes_team_registry', _pl.Path(__file__).with_name('team_registry.py'))
+    team = _sys.modules['hermes_team_registry'] = _ilu.module_from_spec(_spec)
+    _spec.loader.exec_module(team)
 
 logger = logging.getLogger(__name__)
+# Shared packages (Common Router, project threads) import by name from team-kit/lib.
+if str(Path(__file__).with_name('lib')) not in _sys.path:
+    _sys.path.append(str(Path(__file__).with_name('lib')))
 
 # Human chat channels only. Tool, cron and kanban sessions hold customer DMs and unattended runs.
 CHAT_SOURCES = ("slack", "photon")
@@ -186,7 +204,7 @@ def _pre_llm_call(session_id: str = "", platform: str = "", **_: Any) -> dict[st
                 )
             except Exception as exc:
                 logger.warning("team-kit recent context skipped: %s", type(exc).__name__)
-        if (not project_scope and _LEARNING is not None and _PLUGIN_CONTEXT is not None
+        if (_LEARNING is not None and _PLUGIN_CONTEXT is not None
                 and _run_kind() == "chat" and not _.get("parent_session_id")
                 and not os.environ.get("HERMES_DIAGNOSIS_REQUEST")
                 and not os.environ.get("HERMES_ORG_REVIEW_RUN")):
@@ -194,7 +212,7 @@ def _pre_llm_call(session_id: str = "", platform: str = "", **_: Any) -> dict[st
                 recall_note = _LEARNING.extension("conversation_recall").context(
                     Path(get_hermes_home()), session_id, _.get("user_message", ""),
                     {"conversation_recall": _PLUGIN_CONTEXT.get_config("conversation_recall", {}),
-                     "context_bridge": settings})
+                     "context_bridge": settings}, project_scope=project_scope)
                 context = "\n\n".join(part for part in (context, recall_note) if part)
             except Exception as exc:
                 logger.warning("team-kit conversation recall skipped: %s", type(exc).__name__)
@@ -366,7 +384,7 @@ def _record(row: dict[str, Any]) -> None:
 
 def approval_text(tool_name: str, args: dict[str, Any]) -> str:
     """What the gate shows the user: the call that will run, short values (a path, a link) first so a
-    long body cannot push them out. "승인하면" is the wording the desktop-pet chat puts its buttons under."""
+    long body cannot push them out. "승인하면" is the wording the ddots chat puts its buttons under."""
     parts = []
     for key, value in sorted(args.items(), key=lambda item: len(str(item[1]))):
         text = " ".join((value if isinstance(value, str) else json.dumps(value, ensure_ascii=False, default=str)).split())
@@ -751,7 +769,7 @@ def _register_files(ctx) -> None:
     if not isinstance(configured, dict) or configured.get("enabled") is not True or not configured.get("folders"):
         return
     import importlib.util
-    spec = importlib.util.spec_from_file_location("team_kit_files", Path(__file__).with_name("files.py"))
+    spec = importlib.util.spec_from_file_location("team_kit_files", Path(__file__).parent / "lib/hermes_packs/files_docs/files.py")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     for name, handler in module.HANDLERS.items():
@@ -778,9 +796,8 @@ def _register_notion(ctx) -> None:
         return
     import importlib.util
     from hermes_constants import get_hermes_home
-    spec = importlib.util.spec_from_file_location("team_kit_notion", Path(__file__).with_name("notion.py"))
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    from hermes_packs.notion import load_api
+    module = load_api("team_kit_notion")
     home = Path(get_hermes_home())
     ctx.register_tool(name="notion", toolset="team-kit", schema=module.schema(configured),
                       handler=lambda args, **kwargs: module.handle(_notion_config(), home, args, files_config=_files_config(), chat=_run_kind() == "chat", require_snapshot=True, **kwargs),
@@ -817,10 +834,10 @@ def _news_watch_note(config, room=None) -> str:
             if not isinstance(source.get('account'), str) or not isinstance(topics, list) or not all(isinstance(t, str) for t in topics): return ''
             lines.append(f"X @{source['account']}: {' · '.join(topics)} / 계정당 {period}")
     # Mirrors news_watch.report_room: the owner report room (team-kit.settings.report_channel), else the owner's DM.
-    place = (f'보고 채널(<#{room}>)' if isinstance(room, str) and re.fullmatch(r'[CG][A-Z0-9]+', room)
+    place = (_owner_text(f'<<report_channel_label>>(<#{room}>)') if isinstance(room, str) and re.fullmatch(r'[CG][A-Z0-9]+', room)
              else '소유자 개인 DM')
-    end = (f'\n알림은 감시 프로그램이 {place}으로 직접 보낸다. SNS담당는 이 설정을 바꿀 수 없고 '
-           '변경은 Paseo Hermes-desktop-pet에서 한다. 설정이 바뀌면 이 안내도 바뀐다.')
+    end = (_owner_text(f'\n알림은 감시 프로그램이 {place}으로 직접 보낸다. <<customers_name>>는 이 설정을 바꿀 수 없고 '
+           '변경은 Paseo Hermes-ddots에서 한다. 설정이 바뀌면 이 안내도 바뀐다.'))
     body = '\n'.join(lines)
     return (body[:800-len(end)-1] + '…' if len(body)+len(end)>800 else body) + end
 
@@ -849,7 +866,7 @@ def _register_x_read(ctx) -> None:
         return
     import importlib.util
     from hermes_constants import get_hermes_home
-    spec = importlib.util.spec_from_file_location("team_kit_x_read", Path(__file__).with_name("x_read.py"))
+    spec = importlib.util.spec_from_file_location("team_kit_x_read", Path(__file__).parent / "lib/hermes_packs/sns/x_read.py")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     home = Path(get_hermes_home())
@@ -915,7 +932,7 @@ def _register_cron_status(ctx) -> None:
     import importlib.util
     from hermes_constants import get_hermes_home
     home = Path(get_hermes_home())
-    if home.name != "personal-secretary":
+    if not team.home_has_role(home, 'personal'):
         return
     spec = importlib.util.spec_from_file_location("team_kit_cron_status", Path(__file__).with_name("cron_status.py"))
     module = importlib.util.module_from_spec(spec)
@@ -985,8 +1002,8 @@ def _register_reviews(ctx):
         ctx.register_tool(name=name, toolset='team-kit', schema=schema,
             handler=lambda args, _name=name, **kw: reviews.handle(ctx.get_config('review_tools', {}), home, _name, args,
                 kind=_run_kind(), files_config=_files_config(), learning=_PROJECT_LEARNING, **kw), description=schema['description'], emoji='🔎')
-    if profile in reviews.PROFILES:
-        ctx.register_system_prompt_section('team-kit.review-tools', reviews.NOTES[profile], max_chars=1400)
+    if team.pick(reviews.PROFILES, profile, None) is not None:
+        ctx.register_system_prompt_section('team-kit.review-tools', team.pick(reviews.NOTES, profile), max_chars=1400)
         ctx.register_hook('post_tool_call', partial(reviews.module('review_evidence').observe, home,
             parser=reviews.module('learning_evidence').payload))
     ctx.register_middleware('llm_request', lambda request, **_: reviews.filter_request(
@@ -1013,7 +1030,7 @@ def _register_projects(ctx):
     ctx.register_hook("post_llm_call", partial(projects.ended, home, learning))
     dispatcher = learning.extension('project_dispatch')
     ctx.register_hook('pre_gateway_dispatch', partial(dispatcher.capture, home, learning))
-    if home.name == 'system-doctor':
+    if team.home_has_role(home, 'doctor'):
         # 조직개편안 lives in the owner's DM with 진단담당; its thread replies are handled by org_review.poll.
         ctx.register_hook('pre_gateway_dispatch', partial(learning.extension('org_review').skip_report_thread, home))
         if ctx.get_config('starter_plugins', {}).get('enabled') is True:
@@ -1041,6 +1058,23 @@ def _register_report_review(ctx):
                       handler=partial(reviews.handle, home, base=base), description='Review reported skill changes.', emoji='📋')
     _REPORT_REVIEW_BASE = base
     ctx.register_system_prompt_section('team-kit.report-review', reviews.NOTE, max_chars=1800)
+
+
+def _register_vault_backup(ctx):
+    """Opt-in wiki approval handler; the core's former interceptor is removed."""
+    if ctx.get_config('vault_backup_approval', {}).get('enabled') is not True:
+        return
+    from functools import partial
+    from hermes_constants import get_hermes_home
+    import importlib.util
+    home = Path(get_hermes_home())
+    if not team.home_has_role(home, 'wiki'):
+        return
+    spec = importlib.util.spec_from_file_location('team_vault_backup_base', Path(__file__).with_name('learning_report.py'))
+    base = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(base)
+    handler = base.learning.extension('vault_backup_approval')
+    ctx.register_hook('pre_gateway_dispatch', partial(handler.dispatch, home, base, team))
 
 
 def _register_report_status(ctx):
@@ -1082,7 +1116,7 @@ def _register_wait(ctx) -> None:
     spec = importlib.util.spec_from_file_location("team_kit_wait_jobs", Path(__file__).with_name("wait_jobs.py"))
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    if home.name not in module.PROFILES:
+    if not team.home_has_role(home, 'work', 'personal'):
         return
     ctx.register_tool(name="team_wait", toolset="team-kit", schema=module.SCHEMA,
                       handler=lambda args, **kwargs: module.handle(ctx.get_config("wait", {}), home, args,
@@ -1093,6 +1127,8 @@ def _register_wait(ctx) -> None:
 
 
 def register(ctx) -> None:
+    from hermes_facility.pack_selection import scoped_context
+    ctx = scoped_context(ctx)
     global _PLUGIN_CONTEXT, _LEARNING, _MORNING_REPORT, _OWNER_PRESENTATION, _PROJECTS, _PROJECT_LEARNING, _PROJECT_ERROR, _PROMPT_GUIDANCE, _TOOL_GUIDANCE
     global _WORK_OUTPUT, _BUTTON_POLICY
     _PLUGIN_CONTEXT = ctx
@@ -1115,6 +1151,26 @@ def register(ctx) -> None:
         streaming.register(ctx, get_hermes_home())
     except Exception:
         logger.exception('team-kit chat streaming registration failed')
+    try:
+        import importlib.util
+        from hermes_constants import get_hermes_home
+        spec = importlib.util.spec_from_file_location('team_kit_usage_ledger', Path(__file__).with_name('usage_ledger.py'))
+        usage_ledger = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(usage_ledger)
+        usage_ledger.register(ctx, get_hermes_home())
+    except Exception:
+        logger.exception('team-kit usage ledger registration failed')
+    try:
+        from hermes_constants import get_hermes_home
+        from hermes_router.plugin import register as register_router
+        register_router(ctx, get_hermes_home())
+    except Exception:
+        logger.exception('team-kit common router registration failed')
+    try:
+        from hermes_reply.plugin import register as register_reply
+        register_reply(ctx)
+    except Exception:
+        logger.exception('team-kit reply buttons registration failed')
     try:
         import importlib.util
         from hermes_constants import get_hermes_home
@@ -1183,7 +1239,7 @@ def register(ctx) -> None:
         _register_wait(ctx)
     except Exception:
         logger.exception("team-kit wait registration failed")
-    for name in ("mail_read", "calendar_read", "notes_read", "reminders_read"):
+    for name in ("mail_read", "calendar_read", "notes_read"):
         try:
             _register_personal_read(ctx, name)
         except Exception:
@@ -1206,9 +1262,9 @@ def register(ctx) -> None:
 
     try:
         requester = str(getattr(ctx, 'profile_name', ''))
-        if requester in ('sns-manager', 'work-assistant') and ctx.get_config('diagnosis_request', {}).get('enabled') is True:
+        if team.has_role(requester, 'customers', 'work') and ctx.get_config('diagnosis_request', {}).get('enabled') is True:
             import importlib.util
-            spec = importlib.util.spec_from_file_location('team_diagnosis_requests', Path(__file__).with_name('diagnosis_requests.py'))
+            spec = importlib.util.spec_from_file_location('team_diagnosis_requests', Path(__file__).parent / 'lib/hermes_packs/diagnosis/diagnosis_requests.py')
             requests = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(requests)
             if requester in requests.REQUESTERS:
@@ -1218,6 +1274,10 @@ def register(ctx) -> None:
     except Exception:
         logger.exception('team-kit diagnosis request registration failed')
 
+    try:
+        _register_vault_backup(ctx)
+    except Exception:
+        logger.exception("team-kit vault backup registration failed")
     try:
         _register_report_review(ctx)
     except Exception:

@@ -630,6 +630,11 @@ final class FakeSlack {
         let quiet = SlackUnread.quiet([thread, silent], notices: notices, roomRead: [room: 200], threadRead: [thread.id: 200, silent.id: 200], threadUnfollowed: [], remoteQuiet: [:])
         check(quiet.map(\.id) == [thread.id], "only an existing ringing bell is dismissed, never a silent thread")
         check(SlackUnread.quiet([thread], notices: notices, roomRead: [room: 200], threadRead: [thread.id: 200], threadUnfollowed: [], remoteQuiet: [thread.id: thread.latest]).isEmpty, "reopened bell stays open")
+        let entered = SlackUnread.entry([thread, silent], notices: notices, lastRead: [:])
+        check(entered.read.map(\.id) == [silent.id], "entering a room leaves a ringing thread unread until it is clicked")
+        check((entered.cap[room] ?? .infinity) < thread.root.date.timeIntervalSince1970, "the room receipt stays below a ringing thread's first post")
+        let settled = SlackUnread.entry([thread, silent], notices: [], lastRead: [:])
+        check(settled.read.count == 2 && settled.cap.isEmpty, "with no bell ringing, entering reads every thread as before")
         check(snap.threadUnfollowed.isEmpty, "subscribed receipt is not unfollowed")
         let unfollowed = FakeSlack(); unfollowed.history[room] = [root]; unfollowed.replies[room + ":" + ts] = [root, answer]
         let unfollowBridge = SlackBridge(api: unfollowed.api)
@@ -1079,6 +1084,9 @@ final class FakeSlack {
     }
 
     static func main() {
+        let generatedStatusMark = ChatMark(color: "#2EB67D", text: "✅ 답변 완료")
+        let attachment = ChatMark(color: "#2EB67D", text: "실제 첨부 내용 · 답변 완료 후 보관")
+        precondition(SlackNotice.visibleMarks([generatedStatusMark, attachment]) == [attachment], "Hide exact generated status labels while preserving attachment prose")
         hermesReplies()
         if CommandLine.arguments.contains("--hermes-replies-only") { print("PASS: Hermes states, labels, pet, legacy and chat.update refresh"); return }
         var memo = SlackThinkingMemo()
@@ -1813,6 +1821,7 @@ final class FakeSlack {
         // Reply buttons (owner decision 2026-10-31): the fixed sets only, mail words only under the mail legend.
         check(ReplyButtonPolicy.allowed(["승인", "거절", "의견", "확인"], body: "질문"), "The common four are buttons")
         check(ReplyButtonPolicy.allowed(["메모", "메모+노션", "확인"], body: "제안\n" + ReplyButtonPolicy.mailLegend), "Mail words under the legend are buttons")
+        check(ReplyButtonPolicy.allowed(["메모", "메모+노션", "확인"], body: "제안\n" + ReplyButtonPolicy.mailLegendBefore20261031), "Mail words under the pre-2026-10-31 legend still are buttons")
         check(!ReplyButtonPolicy.allowed(["메모", "메모+노션", "확인"], body: "제안"), "Mail words without the legend are not")
         check(!ReplyButtonPolicy.allowed(["승인", "롤백"], body: "x") && !ReplyButtonPolicy.allowed(["✅ 승인"], body: "x") && !ReplyButtonPolicy.allowed(["승인", "승인"], body: "x"),
               "Made-up, decorated or repeated words are not buttons")
@@ -1829,8 +1838,22 @@ final class FakeSlack {
         posted.date = Date()
         check(!ReplyButtonPolicy.pressable(["반영해", "건너뛰기"], message: posted) && !ReplyButtonPolicy.pressable(["진행해", "보류"], message: posted)
               && ReplyButtonPolicy.pressable(["승인"], message: posted), "A new message: only the fixed sets are pressable")
-        check(ReplyButtonPolicy.pressable(["확인", "롤백"], message: posted) && ReplyButtonPolicy.pressable(["1번 연결", "2번 연결", "연결 안 함"], message: posted)
-              && !ReplyButtonPolicy.pressable(["롤백", "확인"], message: posted), "A script's pending set keeps working in its exact form only")
+        check(ReplyButtonPolicy.pressable(["확인", "되돌리기"], message: posted) && ReplyButtonPolicy.pressable(["1", "2", "3", "거절", "의견", "확인"], message: posted)
+              && !ReplyButtonPolicy.pressable(["되돌리기", "확인"], message: posted) && !ReplyButtonPolicy.pressable(["1번 연결", "2번 연결", "연결 안 함"], message: posted),
+              "A script's pending set keeps working in its exact form only")
+        var beforeDecision = posted; beforeDecision.date = Date(timeIntervalSince1970: ReplyButtonPolicy.scriptSince - 60)
+        check(ReplyButtonPolicy.pressable(["1번 연결", "2번 연결", "연결 안 함"], message: beforeDecision) && ReplyButtonPolicy.pressable(["노션 기준", "그대로 두기"], message: beforeDecision),
+              "Script reports posted before the decisions still answer")
+        check(ReplyButtonPolicy.symbol("1") == nil && ReplyButtonPolicy.symbol("거절") == "xmark", "Candidate numbers are words; the rest have pictures")
+        check(!ReplyButtonPolicy.pressable(["확인", "롤백"], message: posted) && !ReplyButtonPolicy.pressable(["오늘 계속 고쳐", "이것만 고쳐", "내일로"], message: posted),
+              "Retired script words make no new buttons")
+        var earlier = posted; earlier.date = Date(timeIntervalSince1970: ReplyButtonPolicy.since - 60)
+        check(ReplyButtonPolicy.pressable(["확인", "롤백"], message: earlier) && ReplyButtonPolicy.pressable(["오늘 계속 고쳐", "이것만 고쳐", "내일로"], message: earlier),
+              "Earlier autofix reports still answer")
+        let film: String = "제작안\n제작해 = 이 제작안대로 만들기, 수정 = 고칠 점 말하기, 취소 = 만들지 않기"
+        check(ReplyButtonPolicy.allowed(["제작해", "수정", "취소"], body: film) && !ReplyButtonPolicy.allowed(["제작해", "수정", "취소"], body: "제작안")
+              && !ReplyButtonPolicy.allowed(["다운", "수정", "종결"], body: film), "Video buttons only under their own legend")
+        check(ReplyButtonPolicy.symbol("되돌리기") == "arrow.uturn.backward", "되돌리기 has its picture")
         // Buttons go after the what-to-do section; the words are split at a line and never cut.
         let deadlines: String = "*🔴 마감 3건*\n요약이에요.\n\n*할 일*\n1. 직인 받을 사람을 알려줘.\n\n*마감 현황*\n• 항목 1\n• 항목 2"
         let parts = ReplyButtonPolicy.split(deadlines)

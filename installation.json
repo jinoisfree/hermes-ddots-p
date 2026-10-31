@@ -1,0 +1,100 @@
+{
+  "version": 2,
+  "roles": {
+    "llm-wiki": {
+      "name": "지식 비서",
+      "roles": [
+        "wiki"
+      ],
+      "description": "자료를 읽고 지식과 근거를 정리합니다."
+    },
+    "personal-secretary": {
+      "name": "개인 비서",
+      "roles": [
+        "personal"
+      ],
+      "description": "개인 일정·메일과 아이디어를 돕습니다."
+    },
+    "work-assistant": {
+      "name": "업무 비서",
+      "roles": [
+        "work",
+        "responder"
+      ],
+      "description": "회사 자료·메일·마감을 돕습니다. 기본 응답 담당입니다."
+    },
+    "system-doctor": {
+      "name": "시스템 담당",
+      "roles": [
+        "doctor"
+      ],
+      "description": "읽기 전용 점검과 오류 진단을 돕습니다."
+    },
+    "sns-manager": {
+      "name": "고객 담당",
+      "roles": [
+        "customers",
+        "sns"
+      ],
+      "description": "SNS 자료·초안을 돕습니다. 개인 기억은 읽지 않습니다."
+    }
+  },
+  "packs": {
+    "calendar": {
+      "requires": [],
+      "mac_only": false,
+      "guide": "Google 일정 계정 또는 macOS 캘린더 접근을 연결하세요. 계정이 확인되기 전에는 수정하지 않습니다."
+    },
+    "diagnosis": {
+      "requires": [],
+      "mac_only": false,
+      "guide": "읽기 전용 진단입니다. 자동 수정·보고 예약은 켜지 않았습니다."
+    },
+    "files-docs": {
+      "requires": [],
+      "mac_only": false,
+      "guide": "작업 폴더를 지정하세요. 문서 변환은 LibreOffice, PDF 미리보기는 Poppler가 필요합니다."
+    },
+    "linked-work": {
+      "requires": [
+        "notes",
+        "calendar",
+        "notion",
+        "mail"
+      ],
+      "mac_only": false,
+      "guide": "메일·메모·일정·Notion 연결 뒤 사용하세요. 자동 감시·배경 수정은 별도 설정 전까지 꺼져 있습니다."
+    },
+    "mail": {
+      "requires": [
+        "files-docs"
+      ],
+      "mac_only": false,
+      "guide": "개인/회사 메일 계정을 구분해 연결하세요. Google OAuth 또는 macOS Mail 접근 권한이 필요합니다. 발송·삭제는 대화 승인 뒤입니다."
+    },
+    "native-tools": {
+      "requires": [],
+      "mac_only": true,
+      "guide": "macOS 연락처·메시지 접근은 시스템 설정에서 허용해야 합니다. 권한이 없으면 사용할 수 없습니다."
+    },
+    "notes": {
+      "requires": [
+        "files-docs"
+      ],
+      "mac_only": true,
+      "guide": "macOS 메모 접근 권한과 선택한 Obsidian 폴더를 연결하세요. 기존 메모를 복사하거나 지우지 않습니다."
+    },
+    "notion": {
+      "requires": [
+        "files-docs"
+      ],
+      "mac_only": false,
+      "guide": "Notion 통합을 만들고 사용할 페이지에 연결하세요. 읽기·수정 범위를 계정 설정에서 확인하세요."
+    },
+    "sns": {
+      "requires": [],
+      "mac_only": false,
+      "guide": "X 등 필요한 계정을 연결하세요. 자동 DM·게시·감시는 꺼져 있습니다."
+    }
+  }
+}

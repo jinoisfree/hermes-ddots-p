@@ -59,9 +59,26 @@ struct StreamPreview: Codable, Equatable, Identifiable {
 /// Opt-in, bounded local diagnostics. Contains counts and timing, never conversation text.
 enum StreamPreviewDiagnostics {
     private static var sections: [String: [String: String]] = [:]
+    private static var written: TimeInterval = 0
+    private static var flush: DispatchWorkItem?
     static func record(_ section: String, _ values: [String: String]) {
         guard UserDefaults.standard.bool(forKey: "streamPreviewDiagnostics"), sections[section] != values else { return }
         sections[section] = values
+        // Reveal frames change these counts up to 60 times a second. Writing a file on the main
+        // thread that often stutters the growing answer, so keep only the latest once a second.
+        let wait = written + 1 - ProcessInfo.processInfo.systemUptime
+        guard wait <= 0 else {
+            if flush == nil {
+                let work = DispatchWorkItem { flush = nil; write() }
+                flush = work
+                DispatchQueue.main.asyncAfter(deadline: .now() + wait, execute: work)
+            }
+            return
+        }
+        write()
+    }
+    private static func write() {
+        written = ProcessInfo.processInfo.systemUptime
         let folder = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
             .appendingPathComponent("ddots")
         try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
@@ -84,6 +101,9 @@ struct StreamReveal {
     }
     private var states: [String: State] = [:]
     private var order: [String] = []
+    /// A little longer than the gap between snapshots, so each piece is still flowing when the next arrives.
+    /// The text keeps a steady pace instead of jumping a line and waiting.
+    static let minimumSpan: TimeInterval = 0.35
     private func key(_ p: StreamPreview) -> String { (p.profile ?? "") + ":" + p.id }
 
     mutating func receive(_ previews: [StreamPreview], now: TimeInterval) {
@@ -111,7 +131,7 @@ struct StreamReveal {
             let count = preview.status == "working" ? characters.count : min(old?.target.status == "working" ? 1 : (old?.count ?? 1), characters.count)
             let remaining = characters.count - count
             states[id] = State(target: preview, characters: characters, count: count, startCount: count,
-                               started: now, duration: min(3.0, max(0.12, Double(remaining) / 150)))
+                               started: now, duration: min(3.0, max(Self.minimumSpan, Double(remaining) / 150)))
         }
     }
     mutating func frame(now: TimeInterval, immediately: Bool = false) -> [StreamPreview] {
@@ -127,15 +147,26 @@ struct StreamReveal {
         }
     }
     static func visiblePrefix(_ body: String) -> String {
+        let body = withoutOpenLink(body)
         // Do not briefly draw a half-received rich-text tag as a long line and
         // then remove it when '>' arrives. Completed tags use the normal renderer.
         guard let start = body.lastIndex(of: "<"), !body[start...].contains(">") else { return body }
         let tail = body[start...].lowercased()
         let tags = ["<span", "</span", "<b", "</b", "<strong", "</strong", "<i", "</i", "<em", "</em", "<u", "</u", "<s", "</s", "<del", "</del"]
-        if tags.contains(where: { $0.hasPrefix(tail) || tail == $0 || tail.hasPrefix($0 + " ") }) {
+        if tags.contains(where: { $0.hasPrefix(tail) || tail == $0 || tail.hasPrefix($0 + " ") })
+            || ["<http", "<mailto"].contains(where: { tail.hasPrefix($0) || $0.hasPrefix(tail) && tail.count > 1 }) {
             return String(body[..<start])
         }
         return body
+    }
+    /// A Markdown link whose address is still arriving shows only its words. Drawn raw, the address
+    /// stretched the line for a moment, and the answer kept that extra height into its final form.
+    private static func withoutOpenLink(_ body: String) -> String {
+        guard let middle = body.range(of: "](", options: .backwards),
+              !body[middle.upperBound...].contains(")"), !body[middle.upperBound...].contains("\n"),
+              let open = body[..<middle.lowerBound].lastIndex(of: "["),
+              !body[body.index(after: open)..<middle.lowerBound].contains("]") else { return body }
+        return String(body[..<open]) + String(body[body.index(after: open)..<middle.lowerBound])
     }
     var pending: Bool { states.values.contains { $0.count < $0.characters.count } }
 }

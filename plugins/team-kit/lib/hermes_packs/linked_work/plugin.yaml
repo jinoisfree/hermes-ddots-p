@@ -1,0 +1,15 @@
+name: linked-work
+version: 1.0.0
+description: Scoped work links, source reconciliation, owner decisions and rollback.
+provides_tools:
+  - common_work_create
+  - common_work_get
+  - common_work_link
+  - common_work_complete
+  - knowledge_ref_link
+  - knowledge_ref_get
+  - knowledge_ref_unlink
+  - mail_work
+  - linked_work_read
+  - personal_work_bundle
+  - personal_work_rollback

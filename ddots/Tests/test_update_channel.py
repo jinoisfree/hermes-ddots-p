@@ -15,6 +15,25 @@ class ChannelTests(unittest.TestCase):
     def tearDown(self):
         release.select_channel('private')
 
+    def test_transition_build_preserves_signing_key_and_binds_previous_identity(self):
+        original = (Path(__file__).resolve().parents[1] / 'Resources/Info.plist').read_bytes()
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / 'Info.plist'; path.write_bytes(original)
+            channel.configure(path, 'public', 'com.example.previous.ddots')
+            info = plistlib.loads(path.read_bytes())
+            self.assertEqual(info['DDotsPreviousBundleIdentifiers'], ['com.example.previous.ddots'])
+            self.assertEqual(info['CFBundleIdentifier'], channel.PUBLIC_BUNDLE)
+            self.assertFalse(info['DDotsUpdateRequiresToken'])
+            self.assertEqual(info['SUPublicEDKey'], plistlib.loads(original)['SUPublicEDKey'])
+
+    def test_invalid_transition_identity_does_not_change_plist(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / 'Info.plist'
+            for identity in ['../outside', 'com.example\nother', channel.PUBLIC_BUNDLE]:
+                path.write_bytes(b'original')
+                with self.assertRaises(ValueError): channel.configure(path, 'public', identity)
+                self.assertEqual(path.read_bytes(), b'original')
+
     def test_private_plist_is_byte_identical(self):
         original = (Path(__file__).resolve().parents[1] / 'Resources/Info.plist').read_bytes()
         with tempfile.TemporaryDirectory() as folder:

@@ -7,6 +7,23 @@ enum AppIdentity {
     static let name = "ddots"
     static let bundleID = "io.github.hermes-ddots-p.ddots"
     static let supportFolder = "Library/Application Support/ddots"
+    /// Only an explicitly prepared transition build can read an earlier ddots identity.
+    static func previousIdentifiers(_ info: [String: Any], current: String) -> [String] {
+        guard let identifiers = info["DDotsPreviousBundleIdentifiers"] as? [String] else { return [] }
+        return Array(Set(identifiers.filter {
+            $0 != current && $0.range(of: #"^[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+){2,}$"#,
+                                      options: .regularExpression) != nil
+        })).sorted()
+    }
+    static var previousBundleIDs: [String] {
+        previousIdentifiers(Bundle.main.infoDictionary ?? [:], current: bundleID)
+    }
+    /// Read earlier preferences as fallback; writes belong to the current app's domain.
+    /// The old preferences remain available to the recovery installation.
+    static func inheritPreferences(_ defaults: UserDefaults = .standard,
+                                   previous: [String]? = nil) {
+        for identifier in previous ?? previousBundleIDs { defaults.addSuite(named: identifier) }
+    }
     /// Command line of another process of this user, or empty when it cannot be read.
     static func arguments(of pid: pid_t) -> [String] {
         var mib: [Int32] = [CTL_KERN, KERN_PROCARGS2, pid]; var size = 0
@@ -33,7 +50,9 @@ enum AppIdentity {
     /// it must neither block a launch nor be asked to quit during an update. Neither is a build being put
     /// through its UI checks: it is gone in a moment, and the installed app must not quit at launch because of it.
     static func otherPets() -> [NSRunningApplication] {
-        NSRunningApplication.runningApplications(withBundleIdentifier: bundleID).filter {
+        ([bundleID] + previousBundleIDs).flatMap {
+            NSRunningApplication.runningApplications(withBundleIdentifier: $0)
+        }.filter {
             guard $0.processIdentifier != ProcessInfo.processInfo.processIdentifier else { return false }
             return isPet(arguments(of: $0.processIdentifier))
         }

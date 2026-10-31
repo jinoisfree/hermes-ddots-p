@@ -1,0 +1,8 @@
+name: calendar
+version: 1.0.0
+description: Account-scoped EventKit and Google Calendar operations.
+provides_tools:
+  - calendar_direct_lookup
+  - calendar_direct_mutation
+  - google_calendar_color_get
+  - google_calendar_color_set

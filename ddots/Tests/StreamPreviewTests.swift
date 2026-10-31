@@ -104,6 +104,10 @@ import Foundation
         precondition(StreamReveal.visiblePrefix("본문<span style=\"font-size:20") == "본문")
         precondition(StreamReveal.visiblePrefix("본문<span>제목") == "본문<span>제목")
         precondition(StreamReveal.visiblePrefix("비교 1 < 2") == "비교 1 < 2")
+        precondition(StreamReveal.visiblePrefix("메일 [자료 1](https://exam") == "메일 자료 1", "an unfinished link shows only its words")
+        precondition(StreamReveal.visiblePrefix("메일 [자료 1](https://example.com/1)") == "메일 [자료 1](https://example.com/1)")
+        precondition(StreamReveal.visiblePrefix("주소 <https://exam") == "주소 ")
+        precondition(StreamReveal.visiblePrefix("괄호 [참고](설명 중") == "괄호 참고")
         print("Stream previews: replacement, completion, isolation, expiry, corruption and private file reading passed")
     }
 }

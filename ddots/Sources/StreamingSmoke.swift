@@ -126,6 +126,74 @@ extension AppDelegate {
             try? await Task.sleep(nanoseconds: 3_100_000_000)
             check(chat.renderedThreads.last?.thread.replies[0].body == burst.body, "final reveal completes despite preview removal")
             check(chat.renderedThreads.last?.thread.replies[0].streaming == false, "final rendering restored after bounded reveal")
+            // The end point is the final Slack message as it will stay. Writing, the final arrival and the
+            // last controls must reach it as one continuous motion: no frame moves the page back down or leaps.
+            chat.receiveStreams([])
+            // Measure as a window the reader is watching: background timer coalescing would hide or invent gaps.
+            let watching = ProcessInfo.processInfo.beginActivity(options: [.userInitiated, .latencyCritical], reason: "streaming motion smoke")
+            defer { ProcessInfo.processInfo.endActivity(watching) }
+            let writer = ChatMessage(id: "synthetic-final-writer", fromUser: false, speaker: "개인비서", body: "◐ 생각 중...",
+                                     date: Date(timeIntervalSince1970: now - 1), profile: "personal-secretary")
+            thread.replies = [writer]; thread.replyCount = 1
+            chat.threads = Array(threads.dropLast()) + [thread]
+            // The request's own delayed retries finish within 0.45s, as a sent message's do long before its answer.
+            chat.requestScroll("slack-bottom"); await settle(); await settle()
+            let lines = (1...36).map { "\($0). 최종 메시지까지 부드럽게 이어지는 합성 문장입니다. [자료 \($0)](https://example.com/\($0))" }
+            let streamed = "## 최근 메일\n\n" + lines.joined(separator: "\n")
+            // Slack's record of the same answer, read the way the chat reads every Slack message.
+            let final = SlackText.display("*최근 메일*\n\n" + (1...36).map { "\($0). 최종 메시지까지 부드럽게 이어지는 합성 문장입니다. <https://example.com/\($0)|자료 \($0)>" }.joined(separator: "\n"), users: [:])
+            var tail = preview; tail.id = "final-motion"; tail.status = nil; tail.input_id = nil; tail.done = false
+            tail.execution = "claude-opus-5-5 · 답변 수신 중"
+            var positions: [CGFloat] = []
+            var times: [TimeInterval] = []
+            var marks: [String] = []
+            func mark(_ name: String) { marks.append("\(positions.count):\(name)") }
+            func sample() {
+                guard let scroll = chat.scrollView, let frame = chat.rowFrame(thread.id) else { return }
+                positions.append(frame.minY - scroll.contentView.bounds.minY); times.append(ProcessInfo.processInfo.systemUptime)
+            }
+            func frames(_ count: Int) async { for _ in 0..<count { try? await Task.sleep(nanoseconds: 16_666_667); sample() } }
+            let characters = Array(streamed)
+            var sent = 0
+            while sent < characters.count {
+                sent = min(characters.count, sent + 45)
+                tail.body = String(characters.prefix(sent)); tail.updated = Date().timeIntervalSince1970; tail.expires = tail.updated + 120
+                chat.receiveStreams([tail]); await frames(6)
+            }
+            tail.body = streamed; tail.done = true; tail.updated = Date().timeIntervalSince1970; tail.expires = tail.updated + 30
+            mark("done-preview"); chat.receiveStreams([tail]); await frames(12)
+            /// The written reply's body height as laid out, and the height its final text needs.
+            func bodyHeights() -> (placed: CGFloat, needed: CGFloat)? {
+                func card(_ view: NSView) -> NativeThreadCard? {
+                    if let found = view as? NativeThreadCard, found.value?.placed.contains(where: { if case .post(let p) = $0.piece { return p.id == writer.id }; return false }) == true { return found }
+                    return view.subviews.lazy.compactMap(card).first
+                }
+                guard let found = card(pet), let placed = found.value?.placed.first(where: { if case .post(let p) = $0.piece { return p.id == writer.id }; return false }),
+                      case .post(let post) = placed.piece else { return nil }
+                return (placed.text.height, NativeThreadCard.textSize(post.text, width: placed.text.width).height)
+            }
+            mark("slack-final")
+            thread.replies[0].body = final; thread.replies[0].hermesButtons = ["확인"]
+            chat.threads = Array(threads.dropLast()) + [thread]
+            await frames(30)
+            mark("preview-removed"); chat.receiveStreams([]); await frames(150); await frames(50)
+            try? (marks.joined(separator: " ") + "\n" + positions.map { String(format: "%.1f", $0) }.joined(separator: " ") + "\n" + times.map { String(format: "%.4f", $0) }.joined(separator: " ")).write(to: destination.appendingPathComponent("final-motion.txt"), atomically: true, encoding: .utf8)
+            let settledReply = chat.renderedThreads.last?.thread.replies.first
+            check(settledReply?.streaming == false && settledReply?.body == final, "final message is the settled end point")
+            let steps = zip(positions.dropFirst(), positions).map { $0 - $1 }
+            // Only the final message's own shorter height may ease the page down, a few points a frame.
+            let backward = steps.filter { $0 > 8 }
+            let leap = steps.map { -$0 }.max() ?? 0
+            print("final motion: frames=\(positions.count) backward=\(backward.count) maxBack=\(backward.max() ?? 0) maxLeap=\(leap)")
+            check(positions.count > 100, "final motion was sampled")
+            check(self.chat.expandedReplies.contains(writer.id), "a reply written in front of the reader stays open at its end point")
+            check(backward.isEmpty, "page never moves back down on the way to the final message (\(backward))")
+            check(leap < 40, "page never leaps on the way to the final message (largest step \(leap))")
+            if let place = chat.place() { check(place.fromBottom < 2, "end point rests at the newest line (distance: \(place.fromBottom))") }
+            if let heights = bodyHeights() {
+                check(abs(heights.placed - heights.needed) <= 1, "final message keeps no blank space from streaming (\(heights.placed) vs \(heights.needed))")
+            } else { check(false, "final message body is measured") }
+            capture(destination: destination.appendingPathComponent("final-settled"))
             print("Streaming UI smoke passed")
             NSApp.terminate(nil)
         }

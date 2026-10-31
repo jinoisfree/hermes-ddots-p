@@ -17,7 +17,11 @@ python3 "$ROOT/scripts/prepare_assets.py"
 xcrun swiftc -swift-version 5 -O -parse-as-library -module-cache-path "$BUILD/module-cache" -target arm64-apple-macosx13.0 -framework AppKit -framework SwiftUI -framework WebKit -F "$SPARKLE" -framework Sparkle -Xlinker -rpath -Xlinker @executable_path/../Frameworks "$ROOT"/Sources/*.swift -o "$BUILD/ddots"
 cp "$BUILD/ddots" "$APP/Contents/MacOS/ddots"
 cp "$ROOT/Resources/Info.plist" "$APP/Contents/Info.plist"
-python3 "$ROOT/scripts/update_channel.py" "$APP/Contents/Info.plist" --channel "$CHANNEL"
+CHANNEL_ARGS=(--channel "$CHANNEL")
+if [ -n "${DDOTS_PREVIOUS_BUNDLE_ID:-}" ]; then
+    CHANNEL_ARGS+=(--previous-bundle-id "$DDOTS_PREVIOUS_BUNDLE_ID")
+fi
+python3 "$ROOT/scripts/update_channel.py" "$APP/Contents/Info.plist" "${CHANNEL_ARGS[@]}"
 cp "$ROOT/docs/slack-app-manifest.json" "$APP/Contents/Resources/"
 python3 "$ROOT/scripts/build_info.py" "$APP/Contents/Resources/BuildInfo.json"
 cp "$ROOT/Resources/Pet/"* "$APP/Contents/Resources/Pet/"

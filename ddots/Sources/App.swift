@@ -5,6 +5,9 @@ import SwiftUI
 struct DdotsMain {
     static func main() {
         if AppMaintenance.run(arguments: CommandLine.arguments) { return }
+        if !CommandLine.arguments.contains("--ui-smoke") {
+            AppIdentity.inheritPreferences()
+        }
         if RelayAgent.runCommand(arguments: CommandLine.arguments) { return }
         if CommandLine.arguments.contains("--hermes-locate") {
             let suite = "ddots-locate-diagnostic-" + UUID().uuidString
@@ -333,6 +336,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
             self.chat.enterLatest()
         }
         slack.model.onConnect = { [weak self] in self?.configureSlack() }
+        slack.model.onWritten = { [weak self] id in self?.chat.expandedReplies.insert(id) }
         slack.onPicked = { [weak self] in self?.panel.makeKeyAndOrderFront(nil) }
         panel.onPasteAttachments = { [weak self] in
             guard let self, self.slack.model.source == .slack, self.slack.model.composerFocused,
@@ -457,7 +461,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         usage.onChange = { [weak self] in self?.updatePet(); self?.paseoStatusLabel?.stringValue = self?.usage.paseoStatus ?? "" }
         usage.fixture = isSmoke
         usage.relayed = { [weak self] in self?.remoteHermes?.usage }
-        streamTimer = Timer.scheduledTimer(withTimeInterval: 0.2, repeats: true) { [weak self] _ in self?.refreshStreams() }
+        streamTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in self?.refreshStreams() }
         timer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
             let began = ProcessInfo.processInfo.systemUptime
             defer { self?.recordTransitionWork("poll2s", since: began) }

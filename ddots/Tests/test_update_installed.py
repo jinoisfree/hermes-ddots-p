@@ -2,6 +2,7 @@ import importlib.util
 from pathlib import Path
 import tempfile
 import unittest
+import plistlib
 from unittest.mock import call, patch
 
 spec = importlib.util.spec_from_file_location('update_installed', Path(__file__).resolve().parents[1] / 'scripts/update_installed.py')
@@ -10,6 +11,47 @@ spec.loader.exec_module(m)
 
 
 class UpdateTests(unittest.TestCase):
+    def transition(self, previous=True):
+        from update_channel import policy, PUBLIC_BUNDLE
+        _, previous_bundle, _ = policy('private')
+        for app, bundle in [(self.dest, previous_bundle), (self.source, PUBLIC_BUNDLE)]:
+            (app / 'Contents').mkdir()
+            info = dict(CFBundleIdentifier=bundle)
+            if app == self.source and previous:
+                info['DDotsPreviousBundleIdentifiers'] = [previous_bundle]
+            (app / 'Contents/Info.plist').write_bytes(plistlib.dumps(info))
+
+    def test_public_transition_requires_declared_previous_identity_before_stopping(self):
+        self.transition(previous=False)
+        with patch.object(m, 'verify'), patch.object(m, 'stop') as stop:
+            with self.assertRaisesRegex(RuntimeError, '이전 설치'):
+                m.update(self.source, self.dest, channel='public', migrate_private=True)
+            stop.assert_not_called()
+        self.assertTrue((self.dest / 'old').exists())
+
+    def test_public_transition_is_explicit_and_preserves_recovery_app(self):
+        self.transition()
+        def copy(*args):
+            import shutil
+            shutil.copytree(self.source, self.dest)
+        with patch.object(m, 'verify') as verify, patch.object(m, 'stop'), \
+                patch.object(m, 'run', side_effect=copy), patch.object(m, 'launch'), \
+                patch.object(m, 'prune') as prune:
+            m.update(self.source, self.dest, channel='public', migrate_private=True)
+            self.assertEqual(verify.call_args_list, [call(self.source, channel='public'),
+                              call(self.dest, channel='private'), call(self.dest, channel='public')])
+            prune.assert_not_called()
+        backups = list(self.root.glob('*.bak-*'))
+        self.assertEqual(len(backups), 1)
+        self.assertEqual((backups[0] / 'old').read_text(), 'preserve')
+
+    def test_public_update_cannot_silently_replace_private_installation(self):
+        self.transition()
+        with patch.object(m, 'verify'), patch.object(m, 'stop') as stop:
+            with self.assertRaisesRegex(RuntimeError, 'migrate-private'):
+                m.update(self.source, self.dest, channel='public')
+            stop.assert_not_called()
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
