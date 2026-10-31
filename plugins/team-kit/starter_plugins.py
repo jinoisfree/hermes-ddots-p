@@ -66,7 +66,8 @@ def send(home, state, report, part, key, thread=False):
         part['attempted_at'] = time.time()
         L.save(state_path(home), state)
         body = {'channel': report['channel'], 'text': part['text'], 'metadata': R.layout.metadata(marker),
-                'parse': 'none', 'link_names': False, 'unfurl_links': False, 'unfurl_media': False}
+                'parse': 'none', 'link_names': False, 'unfurl_links': False, 'unfurl_media': False,
+                '_script_buttons': 'starter_plugins'}
         if thread: body['thread_ts'] = report['thread_ts']
         ts = str(R.slack(home, 'chat.postMessage', body)['ts'])
     part['ts'] = ts

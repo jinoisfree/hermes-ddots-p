@@ -13,7 +13,7 @@ extension ChatView {
                 Text("ddots").font(.system(size: 17, weight: .semibold))
                 Spacer(minLength: 0)
             } else {
-                Text("d").font(.system(size: 21, weight: .bold)).frame(maxWidth: .infinity)
+                Text("d").font(.system(size: 21, weight: .bold)).chatMeasure("brand-d", model: model).frame(maxWidth: .infinity)
             }
         }.padding(.horizontal, compact ? 0 : 16).frame(height: 72)
             .background { ChatDragRegion(model: model) }

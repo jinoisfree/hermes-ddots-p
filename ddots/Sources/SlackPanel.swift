@@ -278,19 +278,61 @@ final class SlackModel: ObservableObject {
     private(set) var renderedThreads: [ThreadRenderMemo] = []
     private var nextThreadRevision: UInt64 = 0
     private var streamPreviews: [StreamPreview] = []
+    func executionStatus(_ thread: SlackThread) -> String? {
+        streamPreviews.filter { $0.room == thread.room && $0.thread == thread.ts && !$0.done }
+            .max(by: { $0.updated < $1.updated })?.execution
+    }
+    private var streamReveal = StreamReveal()
+    private var streamRevealTick: DispatchWorkItem?
+    private var streamFollow: Place?
     func receiveStreams(_ previews: [StreamPreview]) {
+        streamReveal.receive(previews, now: ProcessInfo.processInfo.systemUptime)
+        revealStreamFrame()
+    }
+    private func revealStreamFrame() {
+        streamRevealTick?.cancel()
+        streamRevealTick = nil
+        let previews = streamReveal.frame(now: ProcessInfo.processInfo.systemUptime,
+            immediately: NSWorkspace.shared.accessibilityDisplayShouldReduceMotion)
+        applyStreamFrame(previews)
+        if streamReveal.pending {
+            let tick = DispatchWorkItem { [weak self] in self?.revealStreamFrame() }
+            streamRevealTick = tick
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0 / 60.0, execute: tick)
+        }
+    }
+    private func applyStreamFrame(_ previews: [StreamPreview]) {
         guard streamPreviews != previews else { return }
         let position = place()
+        if let held = streamFollow, held.scrolls != userScrolls || held.revision != scrollRevision {
+            streamFollow = nil
+        }
+        if streamFollow == nil, let position, position.fromBottom <= Self.followDistance, pageHold == nil {
+            streamFollow = Place(fromBottom: 0, scrolls: position.scrolls, revision: position.revision)
+        }
         objectWillChange.send()
+        let changedStatus = previews.filter { next in
+            streamPreviews.first(where: { $0.id == next.id && $0.profile == next.profile })?.execution != next.execution
+        }
+        for thread in threads where changedStatus.contains(where: { $0.room == thread.room && $0.thread == thread.ts }) {
+            threadRenderMemos.removeValue(forKey: thread.id)
+        }
         streamPreviews = previews
         refreshThreadRenderMemos()
         updateWriting()
         // Follow growing text only for a reader already at the bottom. Manual scrolling wins.
-        if let position, position.fromBottom <= 24, pageHold == nil { keep(position) }
+        // Retain the bottom anchor across deferred native row measurements. A new
+        // frame can arrive after the row grows but before keep() restores the viewport.
+        if let follow = streamFollow, pageHold == nil { keep(follow) }
+        if previews.isEmpty { streamFollow = nil }
     }
     private func refreshThreadRenderMemos() {
         let names = Dictionary(ddotsMembers.map { ($0.profile, $0.name) }, uniquingKeysWith: { first, _ in first })
         let displayed = threads.map { StreamPreview.applying(streamPreviews, to: $0, names: names) }
+        StreamPreviewDiagnostics.record("render", ["threads": String(threads.count), "previews": String(streamPreviews.count),
+            "matchedThreads": String(threads.filter { t in streamPreviews.contains { $0.room == t.room && $0.thread == t.ts } }.count),
+            "streamingMessages": String(displayed.flatMap(\.messages).filter(\.streaming).count),
+            "characters": String(displayed.flatMap(\.messages).filter(\.streaming).reduce(0) { $0 + $1.body.count })])
         let ids = Set(threads.map(\.id))
         threadRenderMemos = threadRenderMemos.filter { ids.contains($0.key) }
         for thread in displayed where threadRenderMemos[thread.id]?.thread != thread {
@@ -310,7 +352,7 @@ final class SlackModel: ObservableObject {
         return SlackThreadInputs(threadID: thread.id, threadRevision: memo.revision, expanded: open.contains(thread.id), picked: picked == thread.id,
             target: target, isDdots: isDdots, dark: dark, reduceMotion: reduceMotion, vaultActive: source == .slack && selected == thread.room,
             chatSearch: chat.rowSearchInputs, bell: bells[thread.id],
-            confirmed: confirmed.intersection(messages), expandedReplies: chat.expandedReplies.intersection(messages),
+            confirmed: confirmed.intersection(messages), expandedReplies: chat.expandedReplies.filter { messages.contains($0) || ($0.hasSuffix(":detail") && messages.contains(String($0.dropLast(7)))) },
             writing: typing[thread.id] ?? [], flash: flash.flatMap { $0 == thread.id || messages.contains($0) ? $0 : nil },
             highlighted: chat.highlightedID.flatMap { messages.contains($0) ? $0 : nil },
             findTerm: findHighlight?.thread == thread.id ? findHighlight?.term : nil,
@@ -726,13 +768,20 @@ final class SlackModel: ObservableObject {
         guard let text = SlackNotice.checklistAnswer(thread, selected: selected) else { return }
         onSend?(text, thread.room, thread, [])
     }
-    /// Asking for changes to such a draft opens a new post in shared room to its character, naming the draft.
-    func revise(_ thread: SlackThread) {
-        guard let relay = mailRelay(thread, ask: "이렇게 고쳐서 초안 다시 보여줘: ") else { reply(thread); return }
-        select(Ddots.room)
-        writeNewPost()
-        Self.animated { ddotsTarget = relay.member.profile; ddotsPicked = true }
-        if draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { draft = relay.text }
+    /// 의견 (owner, 2026-10-31): the character is told the owner has an opinion, asks what to do, and waits.
+    /// Nothing is approved. A mail draft posted outside the shared room is raised with its character there.
+    func opinion(_ thread: SlackThread) {
+        if let relay = mailRelay(thread, ask: "의견이 있어. 무엇을 어떻게 고칠지 먼저 물어봐 줘.") {
+            if let missing = absent(from: relay.post) {
+                onRefuse?("\(missing.name)\(Ddots.particle(missing.name)) #\(Ddots.channel) 채널에 없어요. 슬랙에서 채널에 초대한 뒤 다시 보내 주세요.")
+                return
+            }
+            relayed = (relay.text, relay.post)
+            onSend?(relay.text, relay.room, nil, [])
+            relayed = nil
+            return
+        }
+        onSend?(SlackNotice.reviseText, thread.room, thread, [])
     }
     /// A post made for the user, sent as worked out here rather than from the composer.
     private(set) var relayed: (text: String, post: DdotsPost)?
@@ -1092,7 +1141,6 @@ final class SlackModel: ObservableObject {
     var onConnect: (() -> Void)?
     var onSelect: ((String) -> Void)?
     var onOpen: ((SlackThread) -> Void)?
-    var onLoadSummary: ((SlackThread) -> Void)?
     var onOlder: (() -> Void)?
     /// The words go as typed; whoever sends works out what is added for the channel while the pressed face still stands.
     var onSend: ((_ text: String, _ room: String, _ thread: SlackThread?, _ files: [URL]) -> Void)?
@@ -1939,7 +1987,7 @@ extension ChatView {
         }
         .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize().foregroundColor(quiet)
         .help("새 채널·섹션 만들기, 뺀 방·보관된 방 다시 넣기").accessibilityLabel("방 추가").accessibilityIdentifier("slack-add-room")
-        .padding(.leading, list ? SlackSidebar.inset + 10 : SlackSidebar.inset)
+        .padding(.leading, list ? SlackSidebar.inset + 10 : 0)
         .frame(width: width, height: 40, alignment: list ? .leading : .center)
     }
 
@@ -2012,11 +2060,13 @@ extension ChatView {
                     .overlay(alignment: .topLeading) { if slack.pins.contains(room.id) { slackPinMark.offset(x: -8, y: -4) } }
                     .overlay(alignment: .bottomLeading) { if slack.muted.contains(room.id) { slackMuteMark.offset(x: -8, y: 3) } }
                     .overlay(alignment: .topTrailing) { slackNoticeMarks(room.id).offset(x: 7, y: 12) }
+                    .chatMeasure("room-face-" + room.id, model: model)
                 Text(room.name).font(.system(size: 10, weight: chosen ? .semibold : .medium)).lineLimit(1).minimumScaleFactor(0.85)
                     .foregroundColor(chosen || count > 0 ? .primary : quiet)
-                    .frame(width: SlackSidebar.width - SlackSidebar.inset - 8)
+                    .frame(width: SlackSidebar.width - 2 * SlackSidebar.inset - 2)
+                    .chatMeasure("room-name-" + room.id, model: model)
             }
-            .padding(.leading, SlackSidebar.inset)
+            // Faces and name sit on the strip's centre line, the same one the chosen tab's highlight is drawn around.
             .frame(width: SlackSidebar.width, height: SlackSidebar.tabHeight)
             .contentShape(Rectangle())
         }.buttonStyle(.plain).help(room.name).chatMeasure("room-" + room.id, model: model).accessibilityIdentifier("room-" + room.id).accessibilityLabel(slackRoomLabel(room, members: members, count: count))
@@ -2091,12 +2141,12 @@ extension ChatView {
                         slackFaces(members, room: pseudo).overlay(alignment: .topTrailing) { if waiting { dot.offset(x: 4, y: -3).transition(.scale.combined(with: .opacity)) } }
                             .overlay(alignment: .topLeading) { if slack.pins.contains(id) { slackPinMark.offset(x: -8, y: -4) } }
                             .overlay(alignment: .topTrailing) { if !open { slackNoticeMarks(id).offset(x: 7, y: 12) } }
+                            .chatMeasure("room-face-" + id, model: model)
                         HStack(spacing: 3) {
                             Text(title).lineLimit(1).font(.system(size: 10, weight: chosen ? .semibold : .medium)).foregroundColor(chosen || waiting ? .primary : quiet)
                             arrow
-                        }
+                        }.frame(maxWidth: SlackSidebar.width - 2 * SlackSidebar.inset - 2).chatMeasure("room-name-" + id, model: model)
                     }
-                    .padding(.leading, SlackSidebar.inset)
                     .frame(width: SlackSidebar.width, height: SlackSidebar.tabHeight)
                 }
             }.contentShape(Rectangle())
@@ -2434,30 +2484,11 @@ extension ChatView {
             if !slack.open.contains(thread.id), let live = slack.threads.first(where: { $0.id == thread.id }) { slack.pick(live, foldable: true) }
         } : nil
         VStack(alignment: .leading, spacing: 6) {
-            ThreadDigestView(thread: original) { slack.onLoadSummary?(original) }
+            // The top row shares a character's name line; above my own bubble or with a badge it keeps a line of its own.
+            if target || (mine && slack.bells[thread.id] != nil) { Color.clear.frame(height: NativeThreadCard.badgeHeight / 2 + 14) }
             // In ddots every character is in the room, so my own first line says who it went to.
-            if slack.isDdots, let project = slack.project(thread) {
+            if slack.isDdots, let project = slack.project(thread), (project.approvals ?? []).contains(where: \.pending) {
                 VStack(alignment: .leading, spacing: 4) {
-                    Text(project.title).font(.system(size: ChatMetrics.auxiliaryFont, weight: .semibold))
-                    Text(project.statusText).font(.system(size: ChatMetrics.auxiliaryFont)).foregroundColor(quiet)
-                    DisclosureGroup("공동 기록") {
-                        VStack(alignment: .leading, spacing: 5) {
-                            Text("목표 · " + project.goal)
-                            ForEach(Array((project.facts ?? []).enumerated()), id: \.offset) { _, fact in Text("공통 사실 · " + fact.text) }
-                            ForEach(Array((project.decisions ?? []).enumerated()), id: \.offset) { _, decision in Text("확정 · " + decision.text) }
-                            ForEach(project.tasks) { task in
-                                let owner = slack.ddotsMembers.first { $0.profile == task.profile }?.name ?? "담당자"
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Text(task.title + " · " + owner + " · " + task.statusText).fontWeight(.medium)
-                                    if !task.summary.isEmpty { Text(task.summary) }
-                                    if let next = task.nextStep, !next.isEmpty { Text("다음 · " + next) }
-                                    ForEach(task.references ?? [], id: \.self) { reference in
-                                        if let url = URL(string: reference), ["https", "http"].contains(url.scheme) { Link("원본 보기", destination: url) }
-                                    }
-                                }
-                            }
-                        }.frame(maxWidth: .infinity, alignment: .leading).textSelection(.enabled)
-                    }.font(.system(size: ChatMetrics.auxiliaryFont))
                     ForEach((project.approvals ?? []).filter(\.pending)) { approval in
                         VStack(alignment: .leading, spacing: 4) {
                             Text("승인 대기 · " + (slack.ddotsMembers.first { $0.profile == approval.profile }?.name ?? "담당자"))
@@ -2470,34 +2501,39 @@ extension ChatView {
                     }
                 }.frame(maxWidth: .infinity, alignment: .leading)
             }
-            if mine, slack.isDdots, let who = slack.ddotsOwner(thread) {
-                HStack(spacing: 4) {
-                    avatarBadge(who.name, profile: who.profile, size: 14)
-                    Text("처리: " + who.name).font(.system(size: ChatMetrics.auxiliaryFont, weight: .medium)).foregroundColor(quiet)
-                }.frame(maxWidth: .infinity, alignment: .trailing).padding(.trailing, 4).padding(.bottom, -2)
-            }
-            if !vaultLayout.hidden.contains(displayed.root.id) { slackLine(displayed.root, selectable: selectable, textClick: textClick).id(thread.root.id == thread.id ? "slack-root:" + thread.id : thread.root.id) }
+            if pending == thread.root.id, !vaultLayout.hidden.contains(displayed.root.id), let parts = buttonSplit(displayed.root) {
+                // What to do, its buttons, then the details (owner, 2026-10-31).
+                slackLine(parts.head, selectable: selectable, textClick: textClick).id(thread.root.id == thread.id ? "slack-root:" + thread.id : thread.root.id)
+                slackApproval(thread)
+                slackLine(parts.detail, selectable: selectable, textClick: textClick)
+            } else if !vaultLayout.hidden.contains(displayed.root.id) { slackLine(displayed.root, selectable: selectable, textClick: textClick).id(thread.root.id == thread.id ? "slack-root:" + thread.id : thread.root.id) }
             if let state, displayed.root.marks.isEmpty {
                 markNote(state, message: thread.root).font(.system(size: ChatMetrics.auxiliaryFont, weight: .medium)).padding(.leading, mine ? 4 : ChatMetrics.avatar + 9)
                     .frame(maxWidth: .infinity, alignment: mine ? .trailing : .leading).transition(.opacity)
             }
-            if pending == thread.root.id { slackApproval(thread) }
+            if pending == thread.root.id && (vaultLayout.hidden.contains(displayed.root.id) || buttonSplit(displayed.root) == nil) { slackApproval(thread) }
             if let selection = vaultLayout.anchors[displayed.root.id] {
                 vaultButtons(thread, selection: selection)
             }
             driveButtons(thread, message: displayed.root)
             if answered {
                 VStack(alignment: .leading, spacing: 6) {
-                    if shown.hidden > 0 { slackStack(thread, hidden: shown.hidden, expanded: expanded).transition(.opacity) }
+                    if shown.hidden > 0 { slackStack(thread, hidden: shown.hidden, expanded: expanded).padding(.leading, ChatMetrics.avatar + 9).transition(.opacity) }
                     ForEach(shown.replies) { reply in
-                        if !vaultLayout.hidden.contains(reply.id) { slackLine(reply, selectable: selectable, textClick: textClick, conversational: true).id(reply.id).transition(.opacity) }
-                        if pending == reply.id { slackApproval(thread).transition(.opacity) }
+                        if pending == reply.id, !vaultLayout.hidden.contains(reply.id), let parts = buttonSplit(reply) {
+                            slackLine(parts.head, selectable: selectable, textClick: textClick, conversational: true).id(reply.id).transition(.opacity)
+                            slackApproval(thread).transition(.opacity)
+                            slackLine(parts.detail, selectable: selectable, textClick: textClick, conversational: true).transition(.opacity)
+                        } else {
+                            if !vaultLayout.hidden.contains(reply.id) { slackLine(reply, selectable: selectable, textClick: textClick, conversational: true).id(reply.id).transition(.opacity) }
+                            if pending == reply.id { slackApproval(thread).transition(.opacity) }
+                        }
                         if let selection = vaultLayout.anchors[reply.id] {
                             vaultButtons(thread, selection: selection)
                         }
                         driveButtons(thread, message: reply)
                     }
-                    ForEach(writing) { typingBubble($0).transition(.opacity) }
+                    ForEach(writing) { typingBubble($0, compact: true).transition(.opacity) }
                     if let control = AgentStop.control(working: AgentStop.working(thread, typing: writing), stopped: slack.stopped.contains(thread.id)) {
                         stopControl(original, control: control).transition(.opacity)
                     }
@@ -2506,13 +2542,6 @@ extension ChatView {
                 // Under my own first line there is no picture to step in from, so the answers start at the left edge.
                 .padding(.top, 6)
             }
-            HStack(spacing: 10) {
-                Button { slack.reply(thread) } label: { Label("답글 \(thread.replyCount)개", systemImage: "bubble.left") }
-                    .buttonStyle(.plain).disabled(thread.ts.isEmpty).accessibilityIdentifier("reply-" + thread.id)
-                Text(threadSummary(thread, target: false).components(separatedBy: " · ").dropFirst().joined(separator: " · "))
-                    .lineLimit(1).foregroundColor(quiet)
-                Spacer(minLength: 0)
-            }.font(.system(size: ChatMetrics.auxiliaryFont)).padding(.top, 6)
             // Every button with its word where there is room, else the ones for taking the thread elsewhere as pictures alone.
             Group {
                 if SlackResizeSmoke.without("fitting") { slackFoot(thread, target: target, compact: false) }
@@ -2537,16 +2566,25 @@ extension ChatView {
             .stroke(slack.flash == thread.id || target ? Color.accentColor : Color.primary.opacity(dark ? 0.16 : 0.12),
                     lineWidth: slack.flash == thread.id ? 2 : target ? 1.5 : 1))
         .overlay(alignment: .topTrailing) {
-            if let unread = slack.bells[thread.id] {
-                // Yellow while the notification or question is unread; pressing it marks the thread read, and again unread.
-                Button { slack.onBell?(thread) } label: {
-                    Image(systemName: unread ? "bell.fill" : "bell").font(.system(size: 12, weight: .semibold))
-                        .foregroundColor(unread ? Color(red: 0.98, green: 0.78, blue: 0.18) : quiet.opacity(0.6))
-                        .padding(7).contentShape(Rectangle())
-                }.buttonStyle(.plain).help(unread ? "읽음으로 표시" : "읽지 않음으로 되돌리기")
-                    .accessibilityLabel(unread ? "읽지 않은 알림, 눌러서 읽음으로 표시" : "읽은 알림, 눌러서 되돌리기")
-                    .accessibilityIdentifier("bell-" + thread.id).transition(.opacity)
-            }
+            // The native card's top row: the bell at the end, "답글 작성 중" 10pt to its left, one centre line, inside the inset.
+            HStack(spacing: NativeThreadCard.bellGap) {
+                if target {
+                    Text("답글 작성 중").font(.system(size: ChatMetrics.auxiliaryFont, weight: .medium)).foregroundColor(.blue)
+                        .padding(.horizontal, 11).frame(height: NativeThreadCard.badgeHeight)
+                        .background(Capsule().fill(Color.blue.opacity(0.12)))
+                        .overlay(Capsule().stroke(Color.blue.opacity(0.65), lineWidth: 0.7)).fixedSize()
+                }
+                if let unread = slack.bells[thread.id] {
+                    // Yellow while the notification or question is unread; pressing it marks the thread read, and again unread.
+                    Button { slack.onBell?(thread) } label: {
+                        Image(systemName: unread ? "bell.fill" : "bell").font(.system(size: NativeThreadCard.bellPoint, weight: .semibold))
+                            .foregroundColor(unread ? Color(red: 0.98, green: 0.78, blue: 0.18) : quiet.opacity(0.6))
+                            .frame(width: NativeThreadCard.bellIconWidth, height: NativeThreadCard.badgeHeight).contentShape(Rectangle())
+                    }.buttonStyle(.plain).help(unread ? "읽음으로 표시" : "읽지 않음으로 되돌리기")
+                        .accessibilityLabel(unread ? "읽지 않은 알림, 눌러서 읽음으로 표시" : "읽은 알림, 눌러서 되돌리기")
+                        .accessibilityIdentifier("bell-" + thread.id).transition(.opacity)
+                }
+            }.padding(.top, ThreadAppearance.inset + 8 - NativeThreadCard.badgeHeight / 2).padding(.trailing, ThreadAppearance.inset)
         }
         .background(GeometryReader { geometry in
             Color.clear.onAppear { if expanded { slack.measured(thread: thread.id, height: geometry.size.height) } }
@@ -2560,11 +2598,33 @@ extension ChatView {
 
     /// Under a character at work: stop its run here. Once stopped: ask it to put back what it already changed.
     func stopControl(_ thread: SlackThread, control: AgentStop.Control) -> some View {
+        VStack(alignment: .leading, spacing: 5) {
         HStack(spacing: 6) {
             switch control {
             case .stop:
-                Button { slack.stop(thread) } label: { Label("중지", systemImage: "stop.fill") }
-                    .help("이 스레드에서 하던 작업을 멈춰요")
+                let displayed = slack.renderedThreads.first(where: { $0.thread.id == thread.id })?.thread ?? thread
+                let activity = displayed.messages.last(where: { !$0.fromUser && SlackText.isThinking($0.body) })?
+                    .body.components(separatedBy: "\n").dropFirst().first
+                    ?? (displayed.messages.contains(where: \.streaming) ? "답변을 작성하고 있습니다" : "답변을 준비하고 있습니다")
+                let started = thread.messages.last(where: { $0.fromUser })?.date ?? thread.root.date
+                TimelineView(.animation(minimumInterval: 1.0 / 12, paused: !model.expanded)) { timeline in
+                    HStack(spacing: 9) {
+                        Canvas { context, size in
+                            let phase = Int(timeline.date.timeIntervalSinceReferenceDate * 5) % 6
+                            for index in 0..<6 {
+                                let rect = CGRect(x: CGFloat(index % 2) * 5, y: CGFloat(index / 2) * 5, width: 2.5, height: 2.5)
+                                context.fill(Path(roundedRect: rect, cornerRadius: 0.6), with: .color(quiet.opacity(shouldReduceMotion || phase == index ? 0.9 : 0.3)))
+                            }
+                        }.frame(width: 8, height: 13).accessibilityHidden(true)
+                        Text(activity).foregroundColor(quiet).lineLimit(2).fixedSize(horizontal: false, vertical: true)
+                        Text("\(max(0, Int(timeline.date.timeIntervalSince(started))))초")
+                            .monospacedDigit().foregroundColor(quiet)
+                    }
+                }
+                Button { slack.stop(thread) } label: { Image(systemName: "stop.fill").font(.system(size: 9)).frame(width: 18, height: 18).contentShape(Rectangle()) }
+                    .accessibilityLabel("중지")
+                    .buttonStyle(.plain).foregroundColor(quiet)
+                    .help("중지")
                     .accessibilityIdentifier("stop-" + thread.id)
             case .undo:
                 Text("중지를 요청했어요").foregroundColor(quiet)
@@ -2573,7 +2633,8 @@ extension ChatView {
                     .accessibilityIdentifier("undo-" + thread.id)
             }
         }.buttonStyle(.bordered).controlSize(.small).font(.system(size: ChatMetrics.auxiliaryFont))
-            .disabled(!slack.connected).padding(.leading, 4)
+            .disabled(!slack.connected)
+        }.padding(.leading, ChatMetrics.avatar + 9)
     }
 
     /// A line of the conversation. Hermes's "생각 중..." placeholder is drawn as the writing dots the iMessage side uses.
@@ -2597,13 +2658,10 @@ extension ChatView {
         let _ = SlackInputSmoke.countLine()
         Group {
             if message.streaming {
-                HStack(alignment: .top, spacing: 9) {
-                    avatarBadge(message.speaker, profile: message.profile, size: ChatMetrics.avatar)
-                    Text(message.body).font(.system(size: ChatMetrics.bodyFont)).textSelection(.enabled)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                }
+                slackPost(message, selectable: selectable, textClick: textClick)
             } else if !message.fromUser && SlackText.isThinking(message.body) {
-                typingBubble(TypingIndicator(id: message.id, speaker: message.speaker, profile: message.profile))
+                typingBubble(TypingIndicator(id: message.id, speaker: message.speaker, profile: message.profile,
+                    activity: message.body.components(separatedBy: "\n").dropFirst().first), compact: true)
             } else if message.fromUser {
                 // My own lines stay as bubbles on the right, so the two sides are told apart at a glance.
                 row(ChatRow(message: message, showsSpeaker: false, showsDay: false), selectable: selectable, textClick: textClick)
@@ -2617,14 +2675,23 @@ extension ChatView {
         }.background(RoundedRectangle(cornerRadius: 8).fill(slack.flash == message.id ? Color.accentColor.opacity(0.18) : Color.clear))
     }
 
+    /// A report's what-to-do part and its details, for drawing its buttons between them; nil keeps it whole.
+    func buttonSplit(_ message: ChatMessage) -> (head: ChatMessage, detail: ChatMessage)? {
+        guard !message.fromUser, let parts = ReplyButtonPolicy.split(message.body) else { return nil }
+        var head = message; head.body = parts.head
+        var detail = message; detail.id = message.id + ":detail"; detail.body = parts.detail; detail.marks = []
+        return (head, detail)
+    }
+
     /// Under an approval request: answer it, write an opinion, or confirm it without sending.
     func slackApproval(_ thread: SlackThread) -> some View {
         Group {
             if SlackResizeSmoke.without("fitting") { slackApproval(thread, compact: false) }
             else {
+                // The answer buttons always show their picture and word; a narrow card scrolls them sideways.
                 ViewThatFits(in: .horizontal) {
                     slackApproval(thread, compact: false)
-                    slackApproval(thread, compact: true)
+                    ScrollView(.horizontal, showsIndicators: false) { slackApproval(thread, compact: true) }
                 }
             }
         }.threadControls().padding(.leading, ChatMetrics.avatar + 9).padding(.top, 2)
@@ -2698,12 +2765,11 @@ extension ChatView {
         }
     }
     private func slackApproval(_ thread: SlackThread, compact: Bool) -> some View {
-        let learning = SlackNotice.isLearningReport(thread), mail = !learning && SlackNotice.isMailDraft(thread)
-        let rules = DdotsConfig.shared.conversation
-        let approve = learning ? rules.text("learningApprove") : mail ? rules.text("mailApproveLabel") : SlackNotice.approveText
-        let deny = learning ? rules.text("learningDeny") : rules.text("denyLabel")
-        let revise = rules.text(learning ? "learningReviseLabel" : mail ? "mailReviseLabel" : "reviseLabel")
+        // Every request shows the same four words (owner decision 2026-10-31); what each sends stays as before for its kind.
+        let approve = "승인", deny = "거절", revise = "의견"
         let labels = SlackNotice.replyLabels(thread)
+        let request = SlackNotice.pendingApproval(thread)
+        let pressable = request.map { ReplyButtonPolicy.pressable(labels, message: $0) } ?? false
         let checklist = SlackNotice.checklistLabels(thread)
         return HStack(spacing: 8) {
             if !checklist.isEmpty {
@@ -2715,12 +2781,18 @@ extension ChatView {
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 8) {
                         ForEach(Array(labels.enumerated()), id: \.offset) { index, label in
-                            Button(label) { slack.answerHermes(thread, label: label) }
+                            let word = ReplyButtonPolicy.word(label)
+                            Button { slack.answerHermes(thread, label: label) } label: {
+                                if let symbol = ReplyButtonPolicy.symbol(label) { Label(word, systemImage: symbol) } else { Text(word) }
+                            }
+                                .disabled(!pressable)
+                                .help(pressable ? word : "정해진 버튼이 아니라 누를 수 없어요. 이 스레드에 글로 답해 주세요.")
                                 .accessibilityIdentifier("hermes-reply-" + thread.id + "-" + String(index))
-                                .accessibilityLabel(label)
+                                .accessibilityLabel(word)
                                 .font(.system(size: 12, weight: .semibold))
                                 .padding(.horizontal, 12).padding(.vertical, 5)
                                 .background(Capsule().fill(Color.primary.opacity(0.12)))
+                                .chatMeasure("hermes-reply-" + thread.id + "-" + String(index), model: model)
                         }
                     }
                 }.frame(width: 320)
@@ -2736,8 +2808,8 @@ extension ChatView {
                         .background(Capsule().fill(Color.primary.opacity(0.12))).overlay(Capsule().stroke(Color.primary.opacity(0.25), lineWidth: 1))
                 }.accessibilityIdentifier("deny-" + thread.id).accessibilityLabel(deny).help(deny)
                 // An opinion is a reply in the user's own words, so this aims the draft at the thread and waits for it to be typed.
-                Button { slack.revise(thread) } label: {
-                    Label(revise, systemImage: "text.bubble").font(.system(size: 12, weight: .semibold))
+                Button { slack.opinion(thread) } label: {
+                    Label(revise, systemImage: "pencil").font(.system(size: 12, weight: .semibold))
                         .padding(.horizontal, 12).padding(.vertical, 5)
                         .background(Capsule().fill(Color.primary.opacity(0.12))).overlay(Capsule().stroke(Color.primary.opacity(0.25), lineWidth: 1))
                 }.accessibilityIdentifier("revise-" + thread.id).accessibilityLabel(revise).help(revise)
@@ -2750,7 +2822,7 @@ extension ChatView {
                     .accessibilityLabel("확인, 메시지를 보내지 않고 넘어가기")
                     .help("메시지를 보내지 않고 넘어가기")
             }
-        }.buttonStyle(.plain).labelStyle(FootLabel(compact: compact)).fixedSize(horizontal: true, vertical: false)
+        }.buttonStyle(.plain).labelStyle(.titleAndIcon).fixedSize(horizontal: true, vertical: false)
             .chatMeasure("approval-" + thread.id, model: model)
     }
 
@@ -2802,18 +2874,6 @@ extension ChatView {
                         }.layoutPriority(1).transition(.opacity)
                     }
                 }
-            }
-            if let thread = slack.target {
-                HStack(spacing: 8) {
-                    Image(systemName: "arrowshape.turn.up.left.fill").foregroundColor(.white)
-                        .frame(width: 30, height: 22).background(Capsule().fill(Color.blue.opacity(0.35)))
-                    slackReplyAim(thread)
-                    Spacer(minLength: 4)
-                    Button { slack.writeNewPost() } label: { Image(systemName: "xmark") }
-                        .buttonStyle(.plain).help("답글 대상 해제 · 초안은 이 스레드에 보관")
-                        .accessibilityLabel("답글 대상 해제").accessibilityIdentifier("slack-clear-reply")
-                }.padding(.horizontal, 10).padding(.vertical, 7)
-                    .background(RoundedRectangle(cornerRadius: 9).fill(Color.primary.opacity(0.07)))
             }
             if !slack.failedHere.isEmpty || !slack.failedElsewhere.isEmpty { slackFailures }
             if !slack.attachments.isEmpty { slackAttachments }
@@ -2889,18 +2949,6 @@ extension ChatView {
             return slack.target == nil ? who.name + "에게 새 글" : who.name + " 스레드에 답글"
         }
         return slack.target == nil ? "\(slack.room.map { ($0.direct ? "@" : "#") + $0.name } ?? "Slack")에 새 글" : "스레드에 답글"
-    }
-    func threadSummary(_ thread: SlackThread, target: Bool) -> String {
-        var parts = ["답글 \(thread.replyCount)개"]
-        if thread.replyCount > 0, thread.latest > 0 {
-            parts.append("마지막 답글 " + Self.time.string(from: Date(timeIntervalSince1970: thread.latest)))
-        }
-        if target { parts.append("답글 작성 중") }
-        return parts.joined(separator: " · ")
-    }
-    private func slackReplyAim(_ thread: SlackThread) -> some View {
-        Text((thread.root.fromUser ? "내 글" : thread.root.speaker) + " · " + slackPreview(thread.root)).lineLimit(1)
-            .font(.system(size: ChatMetrics.auxiliaryFont)).foregroundColor(quiet).transition(.opacity)
     }
 }
 
@@ -3215,13 +3263,13 @@ extension ChatView {
     func slackPost(_ message: ChatMessage, selectable: Bool, textClick: (() -> Void)?, conversational: Bool = false) -> some View {
         let palette = model.palette(message.profile, dark: dark)
         let bubble = conversational && message.files.isEmpty && message.marks.isEmpty && ThreadAppearance.isConversational(message.body)
-        let folded = slack.findTerm(message) == nil && LongReply.needsFolding(message.body) && !model.expandedReplies.contains(message.id)
+        let folded = !message.streaming && slack.findTerm(message) == nil && LongReply.needsFolding(message.body) && !model.expandedReplies.contains(message.id)
         let blocks = slack.presentation(message.id, body: folded ? LongReply.preview(message.body) : message.body,
                                         dark: dark, link: palette.link, trusted: slack.vault.trusted(message)) {
             ShrimpCandidates.styled($0, trusted: slack.vault.trusted(message), accent: Color(nsColor: palette.link.nsColor))
                 ?? (slack.vault.pathLines(message).isEmpty ? slackStyled($0, palette: palette) : AttributedString($0))
         }
-        let actions = model.actions(for: message).filter { $0.isCalendar }
+        let actions = message.streaming ? [] : model.actions(for: message).filter { $0.isCalendar }
         return HStack(alignment: .top, spacing: 9) {
             avatarBadge(message.speaker, profile: message.profile, size: ChatMetrics.avatar)
             VStack(alignment: .leading, spacing: 5) {
@@ -3278,7 +3326,7 @@ extension ChatView {
                 .tint(Color(nsColor: palette.link.nsColor))
                 .padding(.horizontal, bubble ? 12 : 0).padding(.vertical, bubble ? 8 : 0)
                 .background(RoundedRectangle(cornerRadius: 12).fill(bubble ? Color(nsColor: ThreadAppearance.replySurface(dark: dark)) : .clear))
-                if LongReply.needsFolding(message.body) && !(slack.vault.trusted(message) && ShrimpAllHeader.parse(message.body) != nil) {
+                if !message.streaming && LongReply.needsFolding(message.body) && !(slack.vault.trusted(message) && ShrimpAllHeader.parse(message.body) != nil) {
                     Button(folded ? "더 보기" : "접기") { model.toggleReply(message.id) }
                         .font(.system(size: ChatMetrics.auxiliaryFont)).buttonStyle(.borderless)
                         .foregroundColor(Color(nsColor: palette.name.nsColor))
@@ -3349,10 +3397,6 @@ private struct SlackComposerInput: View {
             Button { slack.send() } label: { Image(systemName: "arrow.up").font(.system(size: 21, weight: .bold)).foregroundColor(.white).frame(width: 42, height: 42).background(Circle().fill(sendable ? Color.blue : Color.blue.opacity(0.4))) }
                 .buttonStyle(.plain).foregroundColor(sendable ? .blue : quiet).disabled(!sendable || room == nil)
                 .accessibilityLabel("보내기")
-            Button { slack.writeNewPost() } label: {
-                Image(systemName: "square.and.pencil").font(.system(size: 19)).frame(width: 38, height: 38)
-                    .background(RoundedRectangle(cornerRadius: 12).fill(Color.primary.opacity(0.07)))
-            }.buttonStyle(.plain).help("새 글 쓰기").accessibilityLabel("새 글 쓰기")
         }
     }
 }

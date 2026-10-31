@@ -652,8 +652,8 @@ def halt_response(home, *, response_text="", session_id="", turn_id="", **_):
     match = re.fullmatch(pattern, response_text) if isinstance(response_text, str) else None
     if not match: return None
     return (f"*🔴 업무 처리를 잠시 멈췄습니다*\n같은 업무 도구 호출이 {match[1]}회 반복돼 진행을 멈췄습니다. "
-            "마지막 오류와 기존 반영 상태를 확인해야 합니다. 이어 진행을 고르면 미완료 작업을 다시 연결하며, "
-            "불명확한 쓰기는 자동 재실행하지 않습니다.\n[[버튼: 이어 진행 | 그만]]")
+            "마지막 오류와 기존 반영 상태를 확인해야 합니다. 승인을 누르면 미완료 작업을 다시 연결해 이어 진행하고, 거절은 여기서 그만합니다. "
+            "불명확한 쓰기는 자동 재실행하지 않습니다.\n[[버튼: 승인 | 거절]]")
 
 
 def handle(home, args, *, learning, session_id="", turn_id="", **_):

@@ -37,6 +37,8 @@ HEADER = (
 
 _PLUGIN_CONTEXT: Any = None
 _LEARNING = None
+_WORK_OUTPUT = False
+_BUTTON_POLICY = None
 _REPORT_REVIEW_BASE = None
 _MORNING_REPORT = None
 _OWNER_PRESENTATION = None
@@ -184,6 +186,18 @@ def _pre_llm_call(session_id: str = "", platform: str = "", **_: Any) -> dict[st
                 )
             except Exception as exc:
                 logger.warning("team-kit recent context skipped: %s", type(exc).__name__)
+        if (not project_scope and _LEARNING is not None and _PLUGIN_CONTEXT is not None
+                and _run_kind() == "chat" and not _.get("parent_session_id")
+                and not os.environ.get("HERMES_DIAGNOSIS_REQUEST")
+                and not os.environ.get("HERMES_ORG_REVIEW_RUN")):
+            try:
+                recall_note = _LEARNING.extension("conversation_recall").context(
+                    Path(get_hermes_home()), session_id, _.get("user_message", ""),
+                    {"conversation_recall": _PLUGIN_CONTEXT.get_config("conversation_recall", {}),
+                     "context_bridge": settings})
+                context = "\n\n".join(part for part in (context, recall_note) if part)
+            except Exception as exc:
+                logger.warning("team-kit conversation recall skipped: %s", type(exc).__name__)
         if _REPORT_REVIEW_BASE is not None:
             try:
                 reviews = _REPORT_REVIEW_BASE.learning.extension('report_review')
@@ -682,6 +696,23 @@ def _work_output(response_text="", **context):
             Path(get_hermes_home()), response_text=response_text, **context)
 
 
+def _owner_output(response_text="", **context):
+    """The one team-kit output transform: work halts first, then only fixed button sets stay buttons.
+
+    The core keeps the first transform that returns text, so both steps share this hook."""
+    result = None
+    if _WORK_OUTPUT:
+        try:
+            result = _work_output(response_text=response_text, **context)
+        except Exception:
+            logger.exception("team-kit work output transform failed")
+    text = result if isinstance(result, str) and result else response_text
+    guarded = _BUTTON_POLICY.guard(text) if _BUTTON_POLICY is not None else text
+    if guarded != text:
+        logger.info("team-kit buttons: a marker outside the fixed sets went out as words")
+    return guarded if guarded != response_text else result
+
+
 def _work_api(**context):
     if _LEARNING is not None:
         from hermes_constants import get_hermes_home
@@ -1063,8 +1094,18 @@ def _register_wait(ctx) -> None:
 
 def register(ctx) -> None:
     global _PLUGIN_CONTEXT, _LEARNING, _MORNING_REPORT, _OWNER_PRESENTATION, _PROJECTS, _PROJECT_LEARNING, _PROJECT_ERROR, _PROMPT_GUIDANCE, _TOOL_GUIDANCE
+    global _WORK_OUTPUT, _BUTTON_POLICY
     _PLUGIN_CONTEXT = ctx
     _OWNER_PRESENTATION = None
+    _WORK_OUTPUT = False
+    try:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location('team_kit_button_policy', Path(__file__).with_name('button_policy.py'))
+        _BUTTON_POLICY = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(_BUTTON_POLICY)
+    except Exception:
+        _BUTTON_POLICY = None
+        logger.exception('team-kit button policy registration failed')
     try:
         import importlib.util
         from hermes_constants import get_hermes_home
@@ -1154,10 +1195,14 @@ def register(ctx) -> None:
     except Exception:
         logger.exception('team-kit prompt probe registration failed')
     ctx.register_hook("pre_llm_call", _pre_llm_call)
+    ctx.register_hook("transform_llm_output", _owner_output)
     ctx.register_hook("pre_tool_call", _pre_tool_call)
     if _NOTION is not None:
         ctx.register_hook("pre_tool_call", _notion_approval_arguments)
     _use_installed_browser()
+    # This setup's reply-button policy (owner, 2026-10-31): the core keeps to the standard set even if
+    # shared/reply-buttons.json goes missing; other Hermes installs without team-kit keep their default.
+    os.environ["HERMES_REPLY_BUTTONS_POLICY"] = "strict"
 
     try:
         requester = str(getattr(ctx, 'profile_name', ''))
@@ -1185,6 +1230,7 @@ def register(ctx) -> None:
     try:
         configured = ctx.get_config("learning", {})
         if not isinstance(configured, dict) or configured.get("enabled") is not True:
+            _register_opinion(ctx)
             return
         import importlib.util
         from functools import partial
@@ -1226,7 +1272,7 @@ def register(ctx) -> None:
         if location_enabled:
             location.register_privacy()
         if work.settings(home, learning):
-            ctx.register_hook("transform_llm_output", _work_output)
+            _WORK_OUTPUT = True
             ctx.register_tool(name="team_work", toolset="team-kit", schema=work.SCHEMA,
                               handler=partial(work.handle, home, learning=learning),
                               description="Handoff, checkpoint and resume the owner's work.", emoji="🧭")
@@ -1237,6 +1283,22 @@ def register(ctx) -> None:
             ctx.register_hook("post_llm_call", _work_ended)
     except Exception:
         logger.exception("team-kit learning registration failed")
+    _register_opinion(ctx)
+
+
+def _register_opinion(ctx):
+    """Last of all, after every report's own handler: the core keeps the first rewrite or skip, so
+    learning reports keep answering 의견 themselves and this words it for every other thread."""
+    try:
+        from functools import partial
+        from hermes_constants import get_hermes_home
+        import importlib.util
+        spec = importlib.util.spec_from_file_location('team_kit_opinion_reply', Path(__file__).with_name('opinion_reply.py'))
+        opinion = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(opinion)
+        ctx.register_hook("pre_gateway_dispatch", partial(opinion.dispatch, Path(get_hermes_home())))
+    except Exception:
+        logger.exception('team-kit opinion reply registration failed')
 
 
 

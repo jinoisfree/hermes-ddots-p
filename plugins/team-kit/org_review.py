@@ -731,9 +731,9 @@ def render(day, items, *, weekly=False, auto=False, notes='', full=False, paseo=
         if not full:
             lines.append('📎 전체 내용·근거는 이 스레드에 이어서')
         return '\n\n'.join(lines)
-    lines.append(('' if full else '📎 전체 내용·근거는 이 스레드에 이어서\n') + '답글 예: `1, 3 승인 2 거부` · `모두 승인` · `2 보류`')
+    lines.append(('' if full else '📎 전체 내용·근거는 이 스레드에 이어서\n') + '승인=전부 승인 · 거절=전부 거부 · 보류와 항목별 결정은 글로: `모두 보류` · `1, 3 승인 2 거부` · `2 보류`')
     # Owner decision 2026-10-23: a question to the owner always carries buttons.
-    return '\n\n'.join(lines) + '\n[[버튼: 모두 승인 | 모두 거부 | 모두 보류]]'
+    return '\n\n'.join(lines) + '\n[[버튼: 승인 | 거절]]'
 
 
 def details(items):
@@ -947,8 +947,15 @@ def plain(text):
     return MARKUP.sub('', text or '').strip()
 
 
+# Owner decision 2026-10-31: the whole-report buttons are the common 승인 · 거절. In this report's own thread
+# (the only place poll reads) they mean every item approved or rejected, as 모두 승인/모두 거부 did. 확인 is not
+# mapped: in this thread it already answers an autofix result (push approval, autofix_thread_reply).
+WHOLE = {'승인': '모두 승인', '거절': '모두 거부'}
+
+
 def parse(text, count):
     text = plain(text)
+    text = WHOLE.get(text.strip(), text)
     pattern = re.compile(r'\s*(전부|모두|[0-9]+(?:\s*(?:,\s*|\s+)[0-9]+)*)\s*(승인|거부|보류)\s*')
     pos, decisions = 0, {}
     while pos < len(text):

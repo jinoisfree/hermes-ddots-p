@@ -46,8 +46,23 @@ extension ChatView {
                 .environment(\.openURL, OpenURLAction { url in model.onOpenLink?(url); return .handled })) }
         }
         var nativeShown = Set<String>()
+        var splitShown = Set<String>()
         func pieces(for message: ChatMessage) -> [NativeThreadCard.Piece] {
             var result: [NativeThreadCard.Piece] = []
+            // A report asking for an answer: what to do, its buttons, then the details (owner, 2026-10-31).
+            if pending == message.id, !vaultLayout.hidden.contains(message.id), !message.fromUser,
+               let parts = ReplyButtonPolicy.split(message.body) {
+                var head = message; head.body = parts.head
+                var detail = message; detail.id = message.id + ":detail"; detail.body = parts.detail; detail.marks = []
+                if var first = nativePost(head, inputs: inputs, edge: edge), var rest = nativePost(detail, inputs: inputs, edge: edge) {
+                    first.conversational = false; rest.conversational = false; rest.continuation = true
+                    result.append(.post(first))
+                    result.append(host("approval:" + message.id) { slackApproval(thread) })
+                    result.append(.post(rest))
+                    nativeShown.insert(message.id); splitShown.insert(message.id)
+                    return result
+                }
+            }
             if !vaultLayout.hidden.contains(message.id) {
                 if var post = nativePost(message, inputs: inputs, edge: edge) {
                     post.conversational = !message.streaming && message.id != displayed.root.id && !message.fromUser && message.marks.isEmpty && ThreadAppearance.isConversational(message.body)
@@ -59,7 +74,7 @@ extension ChatView {
         }
         func extras(for message: ChatMessage) -> [NativeThreadCard.Piece] {
             var result: [NativeThreadCard.Piece] = []
-            if pending == message.id { result.append(host("approval:" + message.id) { slackApproval(thread) }) }
+            if pending == message.id && !splitShown.contains(message.id) { result.append(host("approval:" + message.id) { slackApproval(thread) }) }
             if let selection = vaultLayout.anchors[message.id] { result.append(host("vault:" + message.id) { vaultButtons(thread, selection: selection) }) }
             if !slack.driveItems(message).isEmpty { result.append(host("drive:" + message.id) { driveButtons(thread, message: message) }) }
             // A post drawn natively keeps its calendar buttons underneath, as the SwiftUI line has them.
@@ -71,12 +86,8 @@ extension ChatView {
         }
 
         var top: [NativeThreadCard.Piece] = []
-        top.append(host("digest:" + thread.id) { ThreadDigestView(thread: original) { slack.onLoadSummary?(original) } })
-        if slack.isDdots, let project = slack.project(thread) {
+        if slack.isDdots, let project = slack.project(thread), (project.approvals ?? []).contains(where: \.pending) {
             top.append(host("project:" + thread.id) { nativeProject(thread, project: project) })
-        }
-        if mine, slack.isDdots, let who = slack.ddotsOwner(thread) {
-            top.append(.owner(name: who.name, avatar: Ddots.avatar(model.avatars[who.profile], name: who.name) ?? ProfileAvatar()))
         }
         top += pieces(for: displayed.root)
         top += extras(for: displayed.root)
@@ -92,7 +103,7 @@ extension ChatView {
                 list.append(.stack(faces: Array(faces), title: title, toggle: { slack.toggle(thread) }, identifier: "stack-" + thread.id))
             }
             for reply in shown.replies { list += pieces(for: reply) + extras(for: reply) }
-            for indicator in writing { list.append(host("typing:" + indicator.id) { typingBubble(indicator) }) }
+            for indicator in writing { list.append(host("typing:" + indicator.id) { typingBubble(indicator, compact: true) }) }
             if let control = AgentStop.control(working: AgentStop.working(thread, typing: writing), stopped: slack.stopped.contains(thread.id)) {
                 list.append(host("stop:" + thread.id) { stopControl(original, control: control) })
             }
@@ -115,9 +126,6 @@ extension ChatView {
             actions.append(.init(title: "분기", symbol: asked ? "checkmark" : "arrow.triangle.branch", label: "새 스레드로 이어가기",
                                  identifier: "branch-" + thread.id, enabled: !asked, color: asked ? accent : long ? .systemOrange : quiet, invoke: { slack.branch(thread) }))
         }
-        actions.append(.init(title: "답글 \(thread.replyCount)개", symbol: "bubble.left", label: "답글 \(thread.replyCount)개, 이 스레드에 답글 쓰기",
-                             identifier: "reply-" + thread.id, enabled: !thread.ts.isEmpty, color: quiet, alwaysLabel: true,
-                             invoke: { slack.reply(thread) }))
         var deleting: String?
         if let going = slack.removing[thread.id] {
             deleting = going.total > 0 ? "삭제 중 \(going.done)/\(going.total)" : "삭제 중…"
@@ -126,8 +134,9 @@ extension ChatView {
             actions.append(.init(title: sure ? "정말 삭제" : "삭제", symbol: "trash", label: sure ? "스레드 삭제 확인" : "스레드 삭제",
                                  identifier: "delete-" + thread.id, color: sure ? .systemRed : quiet, alwaysLabel: sure, invoke: { slack.delete(thread) }))
         }
-        if foldable {
-            actions.append(.init(title: expanded ? "접기" : "펼치기", symbol: expanded ? "chevron.up" : "chevron.down", label: expanded ? "접기" : "펼치기", identifier: "fold-" + thread.id, color: quiet, alwaysLabel: true,
+        // A folded card opens from a click on it; only an opened one offers 접기.
+        if foldable && expanded {
+            actions.append(.init(title: "접기", symbol: "chevron.up", label: "접기", identifier: "fold-" + thread.id, color: quiet, alwaysLabel: true,
                                  invoke: { slack.toggle(thread) }))
         }
 
@@ -142,33 +151,13 @@ extension ChatView {
         let rail: NSColor? = nil
         return NativeThreadCard.Content(id: thread.id, top: top, replies: replies, rail: rail, actions: actions, deleting: deleting,
                                         style: style, bell: slack.bells[thread.id], onBell: { slack.onBell?(thread) },
-                                        clickCard: pick, textClick: textClick, bubbleWidth: model.bubbleWidth, quiet: quiet, expanded: expanded, summary: threadSummary(thread, target: target),
-                                        statusTitle: state.map { SlackNotice.displayStatus($0.text) } ?? "", replyTarget: target)
+                                        clickCard: pick, textClick: textClick, bubbleWidth: model.bubbleWidth, quiet: quiet, expanded: expanded,
+                                        statusTitle: state.map { SlackNotice.badgeStatus($0.text) } ?? "", replyTarget: target)
     }
 
     /// The project record above a thread in ddots, as the SwiftUI card shows it.
     @ViewBuilder func nativeProject(_ thread: SlackThread, project: ThreadProject) -> some View {
         VStack(alignment: .leading, spacing: 4) {
-            Text(project.title).font(.system(size: ChatMetrics.auxiliaryFont, weight: .semibold))
-            Text(project.statusText).font(.system(size: ChatMetrics.auxiliaryFont)).foregroundColor(quiet)
-            DisclosureGroup("공동 기록") {
-                VStack(alignment: .leading, spacing: 5) {
-                    Text("목표 · " + project.goal)
-                    ForEach(Array((project.facts ?? []).enumerated()), id: \.offset) { _, fact in Text("공통 사실 · " + fact.text) }
-                    ForEach(Array((project.decisions ?? []).enumerated()), id: \.offset) { _, decision in Text("확정 · " + decision.text) }
-                    ForEach(project.tasks) { task in
-                        let owner = slack.ddotsMembers.first { $0.profile == task.profile }?.name ?? "담당자"
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(task.title + " · " + owner + " · " + task.statusText).fontWeight(.medium)
-                            if !task.summary.isEmpty { Text(task.summary) }
-                            if let next = task.nextStep, !next.isEmpty { Text("다음 · " + next) }
-                            ForEach(task.references ?? [], id: \.self) { reference in
-                                if let url = URL(string: reference), ["https", "http"].contains(url.scheme) { Link("원본 보기", destination: url) }
-                            }
-                        }
-                    }
-                }.frame(maxWidth: .infinity, alignment: .leading).textSelection(.enabled)
-            }.font(.system(size: ChatMetrics.auxiliaryFont))
             ForEach((project.approvals ?? []).filter(\.pending)) { approval in
                 VStack(alignment: .leading, spacing: 4) {
                     Text("승인 대기 · " + (slack.ddotsMembers.first { $0.profile == approval.profile }?.name ?? "담당자"))
@@ -242,7 +231,7 @@ extension ChatView {
             id: message.id, mine: message.fromUser, text: entry.text, speaker: message.speaker,
             time: message.pending ? (message.id.hasPrefix("slack") ? "보내는 중" : "보냄 · 기록 확인 중") : Self.time.string(from: message.date),
             avatar: Ddots.avatar(model.avatars[message.profile], name: message.speaker) ?? ProfileAvatar(),
-            nameColor: palette.name.nsColor, pending: message.pending, interrupted: message.fromUser && message.replyInterrupted,
+            nameColor: palette.name.nsColor, pending: message.pending, streaming: message.streaming, interrupted: message.fromUser && message.replyInterrupted,
             marks: marks, foldTitle: foldable ? (folded ? "더 보기" : "접기") : nil, fold: { model.toggleReply(message.id) },
             flash: slack.flash == message.id,
             openLink: { url in
@@ -260,8 +249,8 @@ extension ChatView {
     private func nativeBody(_ body: String, message: ChatMessage, palette: CharacterPalette, term: String?, key: String,
                             cacheKey: NativeBodyCache.Key, dark: Bool, bar: NSColor?) -> NativeBodyCache.Entry {
         // A character's post is laid out as Slack lays out its blocks; my own bubble stays plain.
-        let layout = message.fromUser || message.streaming ? nil : SlackLayout.strip(body)
-        let native = message.streaming ? NSMutableAttributedString(string: body, attributes: [.font: NSFont.systemFont(ofSize: ChatMetrics.bodyFont), .foregroundColor: NSColor.labelColor]) : NSMutableAttributedString(attributedString: ChatText.linkifiedNative(MessageFormat.renderNative(layout?.source ?? body)))
+        let layout = message.fromUser ? nil : SlackLayout.strip(body)
+        let native = NSMutableAttributedString(attributedString: ChatText.linkifiedNative(MessageFormat.renderNative(layout?.source ?? body)))
         // Synology links read as the file's name, as the SwiftUI line titles them.
         if !message.fromUser {
             native.enumerateAttribute(.link, in: NSRange(location: 0, length: native.length), options: .reverse) { value, range, _ in
@@ -292,6 +281,7 @@ extension ChatView {
             }
         }
         if let layout { SlackLayout.apply(to: native, lines: layout.lines, bar: bar, statuses: SlackLayout.statuses(for: message.body, colors: message.quoteColors), lineSpacing: 2) }
+        if message.streaming { MessageFormat.uniformSize(native, size: ChatMetrics.bodyFont) }
         if let term, !term.isEmpty {
             let highlighted = SlackSearch.highlighted(AttributedString(native.string), query: term)
             var offset = 0

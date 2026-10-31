@@ -122,6 +122,7 @@ struct TypingIndicator: Identifiable, Equatable {
     var id: String
     var speaker: String
     var profile = ""
+    var activity: String? = nil
 }
 
 enum ChatTimeline {

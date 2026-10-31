@@ -1,7 +1,7 @@
 """Bounded morning summaries and readable Slack detail pages (no network I/O)."""
 import re
 
-REVIEW_GUIDE = "모두 승인=이 보고의 학습·스킬 전부 유지 · 모두 거절=전부 변경 전 복구 · 의견=일부만 고칠 때 번호와 내용을 글로 · 확인=읽음, 적용은 그대로 두고 나중에 결정"
+REVIEW_GUIDE = "승인=이 보고의 학습·스킬 전부 유지 · 거절=전부 변경 전 복구 · 의견=일부만 고칠 때 번호와 내용을 글로 · 확인=읽음, 적용은 그대로 두고 나중에 결정"
 
 
 def escape(text):

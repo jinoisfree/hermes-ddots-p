@@ -72,7 +72,7 @@ def conflict_of(home, cid):
 
 def ask(home, items, *, send=None):
     """Post one question per conflicted work. Returns the items that could not be asked (warn plainly)."""
-    send = send or (lambda channel, text, **kw: slack_report.post_thread(home, channel, text, **kw))
+    send = send or (lambda channel, text, **kw: slack_report.post_thread(home, channel, text, script='conflict_decisions', **kw))
     channel = slack_report.report_room(home)
     if not channel:
         return list(items)
@@ -126,7 +126,7 @@ def handle(home, channel, thread, text, button=None):
 
 def close(home, cid, resolved, *, send=None):
     """Turn the question green with what the sync actually did (3-color rule)."""
-    send = send or (lambda channel, text, **kw: slack_report.post_thread(home, channel, text, **kw))
+    send = send or (lambda channel, text, **kw: slack_report.post_thread(home, channel, text, script='conflict_decisions', **kw))
     with locked(home) as (state, save):
         row = state['asks'].get(cid)
         if not row or row['status'] not in {'waiting', 'chosen'} or not row.get('message_ts'):

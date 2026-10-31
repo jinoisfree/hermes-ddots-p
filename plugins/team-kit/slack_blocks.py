@@ -310,9 +310,44 @@ def _actions(labels):
         for i, label in enumerate(labels)]}
 
 
+def _place(reply_buttons, blocks, controls):
+    """Buttons after the what-to-do section, before the details (the gateway's own rule), else last."""
+    place = getattr(reply_buttons, 'place_controls', None)
+    return place(blocks, controls) if place else list(blocks) + controls
+
+
+def _guarded(text, owner=None):
+    """Only fixed sets stay buttons. Without the policy file only the common four do (never a wider set)."""
+    try:
+        return _button_policy().guard(text, script=owner)
+    except Exception as exc:
+        logging.getLogger(__name__).warning('button policy unavailable (%s); only the common set stays buttons', type(exc).__name__)
+        match = _BUTTONS.search(text)
+        if not match:
+            return text
+        labels = [label.strip() for label in match.group(1).split('|')]
+        if labels and all(label in ('승인', '거절', '의견', '확인') for label in labels) and len(set(labels)) == len(labels):
+            return text
+        return text[:match.start()].rstrip() + '\n_버튼으로 만들지 않은 선택지: ' + ' · '.join(l for l in labels if l) + ' — 필요하면 이 스레드에 글로 답해 줘_'
+
+
+def _button_policy():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location('team_kit_button_policy', Path(__file__).with_name('button_policy.py'))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 def apply(body, *, plain=None, update=False):
-    """Text body -> Block Kit, plus reply buttons from a trailing ``[[버튼: …]]`` line."""
+    """Text body -> Block Kit, plus reply buttons from a trailing ``[[버튼: …]]`` line.
+
+    Only the fixed button sets become buttons (``button_policy``, owner decision 2026-10-31); any other
+    marker goes out as its words, never as a different set."""
     if isinstance(body, dict) and isinstance(body.get('text'), str):
+        owner = body.get('_script_buttons')
+        body = {key: value for key, value in body.items() if key != '_script_buttons'}
+        body = {**body, 'text': _guarded(body['text'], owner)}
         from plugins.platforms.slack import reply_buttons
         text,checks=reply_buttons.extract_checklist(body['text'])
         if checks:
@@ -329,12 +364,12 @@ def apply(body, *, plain=None, update=False):
             if attachments and isinstance(attachments[-1], dict) and isinstance(attachments[-1].get('blocks'), list) \
                     and len(attachments[-1]['blocks']) < 50:
                 bars = [{**a, 'color': COLORS['fail']} if not update else a for a in attachments]
-                bars[-1] = {**bars[-1], 'blocks': bars[-1]['blocks'] + [_actions(labels)]}
+                bars[-1] = {**bars[-1], 'blocks': _place(reply_buttons, bars[-1]['blocks'], [_actions(labels)])}
                 return {**out, 'attachments': bars}
             base = list(out.get('blocks') or []) or [{'type': 'section', 'text': {'type': 'mrkdwn', 'text': text[:3000]}}]
             if len(base) < 50:
                 # Slack prints ``text`` when there are no top-level blocks, so one block stays above the bar.
-                out = {**out, 'blocks': base[:1], 'attachments': [{'color': COLORS['warn' if update else 'fail'], 'blocks': base[1:] + [_actions(labels)]}]}
+                out = {**out, 'blocks': base[:1], 'attachments': [{'color': COLORS['warn' if update else 'fail'], 'blocks': _place(reply_buttons, base[1:], [_actions(labels)])}]}
             return out
     return _apply(body, plain=plain, update=update)
 

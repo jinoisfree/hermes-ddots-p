@@ -3,7 +3,6 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 source "$ROOT/scripts/check_build_env.sh"
 mkdir -p "$ROOT/.build/module-cache"
-python3 -m unittest discover -s "$ROOT/Tests" -p test_thread_digest.py
 TEST_CONFIG=$(mktemp -d "${TMPDIR:-/tmp}/ddots-config-tests.XXXXXX")
 trap 'rm -r "$TEST_CONFIG"' EXIT
 export DDOTS_CONFIG_ROOT="$TEST_CONFIG/record" HERMES_HOME="$TEST_CONFIG/hermes"

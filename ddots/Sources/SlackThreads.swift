@@ -93,7 +93,7 @@ struct SlackMessage: Equatable, Codable {
         if quoted.isEmpty, title != nil, own.count > 1 { quoted = [Array(own.dropFirst())]; own = [own[0]] }
         let laid = talkBody.isEmpty ? SlackBlockText.mrkdwn(own, attachments: quoted) : (text: "", kept: [])
         let laidOut = laid.text
-        let text = !talkBody.isEmpty ? talkBody : laidOut.isEmpty ? fallback : laidOut
+        let text = SlackBlockText.fittedRules(!talkBody.isEmpty ? talkBody : laidOut.isEmpty ? fallback : laidOut)
         // Preserve explicit tombstones so the conversation has a readable placeholder.
         files = (json["files"] as? [[String: Any]] ?? []).compactMap { file in
             guard let id = file["id"] as? String else { return nil }
@@ -152,12 +152,27 @@ enum SlackBlockText {
     /// `kept` lists the attachments that had words, in the order their quotes appear.
     static func mrkdwn(_ blocks: [[String: Any]], attachments: [[[String: Any]]] = []) -> (text: String, kept: [Int]) {
         let laidOut: Set<String> = ["header", "rich_text", "divider", "table"]
-        guard (blocks + attachments.joined()).contains(where: { laidOut.contains($0["type"] as? String ?? "") }) else { return ("", []) }
+        // A section with line breaks (the reply's usage footer) loses them in Slack's fallback too.
+        guard (blocks + attachments.joined()).contains(where: {
+            laidOut.contains($0["type"] as? String ?? "")
+                || ($0["type"] as? String == "section" && (($0["text"] as? [String: Any])?["text"] as? String ?? "").contains("\n"))
+        }) else { return ("", []) }
         let bodies = attachments.map { text($0) }
         let kept = bodies.indices.filter { !bodies[$0].isEmpty }
         let quoted = kept.map { bodies[$0].components(separatedBy: "\n").map { $0.isEmpty ? ">" : "> " + $0 }.joined(separator: "\n") }
         // Under a bar the colour tells the status, so the title's own status mark is left off.
         return (([text(blocks, bareTitle: !quoted.isEmpty)] + quoted).filter { !$0.isEmpty }.joined(separator: "\n\n"), kept)
+    }
+
+    /// Longest rule line that stays one line in the default chat window (216pt of 14pt text; ─ is 14pt).
+    static let ruleLimit = 15
+    /// A line made only of ─ (the usage footer's 20) is cut to fit; Slack's own copy keeps its length.
+    static func fittedRules(_ text: String) -> String {
+        guard text.contains(String(repeating: "─", count: ruleLimit + 1)) else { return text }
+        return text.components(separatedBy: "\n").map { line in
+            let bare = line.trimmingCharacters(in: .whitespaces)
+            return bare.count > ruleLimit && bare.allSatisfy({ $0 == "─" }) ? String(repeating: "─", count: ruleLimit) : line
+        }.joined(separator: "\n")
     }
 
     /// A title without the status mark it starts with, such as "🔵 " or ":warning: ".
@@ -184,6 +199,8 @@ enum SlackBlockText {
                     parts.append(body["type"] as? String == "plain_text" ? escape(text) : text)
                 }
             case "context":
+                // The router's "who should answer" note sits beside its own buttons, not in the reply.
+                if (block["block_id"] as? String ?? "").hasPrefix("hermes_route_switch") { continue }
                 let notes = (block["elements"] as? [[String: Any]] ?? []).compactMap { $0["text"] as? String }
                 if !notes.isEmpty { parts.append(notes.joined(separator: " · ")) }
             case "divider":
@@ -366,9 +383,14 @@ enum SlackNotice {
     static var settledText: String { rules.text("settledText") }
     /// Only presentation and clipboard text use this spelling; source marks keep their original words.
     static func displayStatus(_ text: String) -> String { isSettled(text) ? settledText : text }
+    /// The status badge beside the bell already carries the colour, so its words go without a leading emoji such as ✅.
+    static func badgeStatus(_ text: String) -> String {
+        let words = statusWords(displayStatus(text))
+        return words.isEmpty ? displayStatus(text) : words
+    }
     private static let leadingEmoji = try? NSRegularExpression(pattern: #"^:[a-zA-Z0-9_+\-]+:"#)
-    /// Slack shortcodes and displayed emoji can decorate a status, but the remaining words must match exactly.
-    static func isSettled(_ text: String) -> Bool {
+    /// A status without the Slack shortcodes and displayed emoji in front of it.
+    static func statusWords(_ text: String) -> String {
         var words = text.trimmingCharacters(in: .whitespacesAndNewlines)
         while !words.isEmpty {
             if let match = leadingEmoji?.firstMatch(in: words, range: NSRange(words.startIndex..., in: words)),
@@ -379,8 +401,10 @@ enum SlackNotice {
             } else { break }
             words = words.trimmingCharacters(in: .whitespacesAndNewlines)
         }
-        return settled.contains(words)
+        return words
     }
+    /// Slack shortcodes and displayed emoji can decorate a status, but the remaining words must match exactly.
+    static func isSettled(_ text: String) -> Bool { settled.contains(statusWords(text)) }
     /// A later approval request reopens a thread; finishing the request itself or a later post settles it.
     static func isSettled(_ thread: SlackThread, confirmed: Set<String> = []) -> Bool {
         if let state = hermesState(thread) { return state == .closed || (state == .asking && pendingApproval(thread).map { confirmed.contains($0.id) } == true) }
@@ -402,6 +426,8 @@ enum SlackNotice {
     /// The words the buttons send. Hermes reads "승인" as yes and "거부" as no; "거절" is not on its list.
     static var approveText: String { rules.text("approveText") }
     static var denyText: String { rules.text("denyText") }
+    /// What 의견 sends: the same word as the Slack button, so every path asks what to do and waits.
+    static let reviseText = "의견"
     /// Hermes's own command: it opens a new thread that carries this conversation on, with everything said so far.
     static var branchText: String { rules.text("branchText") }
     /// From this many replies on, a thread's button for carrying it on stands out.
@@ -1232,5 +1258,75 @@ struct SlackNoticeMemo {
         let upper = boundaries.filter { $0 > stamp }.min() ?? .infinity
         interval = lower..<upper; previous = threads; self.dismissed = dismissed; self.confirmed = confirmed; value = result
         return result
+    }
+}
+
+/// Which reply buttons ddots draws as buttons (owner decision 2026-10-31), the same rule as team-kit `button_policy.py`.
+/// General and learning: 승인 · 거절 · 의견 · 확인. Mail work registration: 메모 · 메모+노션 · 확인, only under the mail legend.
+/// Slack shows the words alone; ddots puts each word's picture beside it. A click still sends the button's own value.
+enum ReplyButtonPolicy {
+    static let standard = ["승인", "거절", "의견", "확인"]
+    static let mail = ["메모", "메모+노션", "확인"]
+    static let mailLegend = "메모 = 개인(Obsidian 메모→미리알림), 메모+노션 = 공용(노션+Obsidian 메모→미리알림), 확인 = 만들지 않음"
+    /// When the rule took effect: commit 2930e23e (2026-10-31 KST), the first one enforcing it. Not a future date:
+    /// buttons posted after it are judged by the rule alone.
+    static let since: TimeInterval = 1793376226
+    /// What a button could say before then: the gateway let only the standard words and this list
+    /// (reply-buttons.json `retired_labels`) become buttons, so an earlier set outside them was never posted by it.
+    static let retired: Set<String> = [":hp-check: 확인", ":hp-memo: 메모", ":hp-notion: 메모+노션", "건너뛰기", "공개", "그만", "나중에", "다운", "답할게", "롤백", "만들 곳 고르기", "모두 거부", "모두 거절", "모두 보류", "모두 승인", "못했어", "반영해", "발송 승인", "비공개", "새 업무로 만들기", "수정", "수정 요청", "수정할게", "완료했어", "이 업무에 반영", "이런 질문 그만", "이번엔 넘어가", "이어 진행", "제작해", "종결", "취소", "확인했어"]
+    /// The word a button shows: the mail buttons of earlier reports carried a Slack emoji code in front.
+    static func word(_ label: String) -> String {
+        guard label.hasPrefix(":"), let end = label.dropFirst().firstIndex(of: ":") else { return label }
+        return label[label.index(after: end)...].trimmingCharacters(in: .whitespaces)
+    }
+    static func symbol(_ label: String) -> String? {
+        switch word(label) {
+        case "승인": return "circle"
+        case "거절": return "xmark"
+        case "의견": return "pencil"
+        case "확인": return "checkmark"
+        case "메모": return "note.text"
+        case "메모+노션": return "square.stack"
+        default: return nil
+        }
+    }
+    static func allowed(_ labels: [String], body: String) -> Bool {
+        guard !labels.isEmpty, Set(labels).count == labels.count else { return false }
+        if labels.allSatisfy(standard.contains) { return true }
+        return labels.allSatisfy(mail.contains) && labels.contains { $0 != "확인" } && body.contains(mailLegend)
+    }
+    /// Sets only plugin scripts post, awaiting an owner decision on their words (team-kit `button_policy.SCRIPT_PENDING`).
+    /// The gateway refuses them from staff and tools, and team-kit lets only the owning script post them.
+    static let scriptPending = [
+        #"확인 \| 롤백"#, #"오늘 계속 고쳐 \| 이것만 고쳐 \| 내일로"#, #"완료했어 \| 못했어 \| 수정할게 \| 확인했어"#, #"공개 \| 비공개 \| 나중에"#,
+        #"(?:노션|메모|일정) 기준(?: \| (?:노션|메모|일정) 기준)* \| 그대로 두기"#, #"\d+번 연결(?: \| \d+번 연결)* \| 연결 안 함"#,
+        #"연결 \| 연결 안 함"#, #"확실한 \d+건 모두 연결 \| 하나씩 볼게"#,
+    ]
+    static func script(_ labels: [String]) -> Bool {
+        let joined = labels.joined(separator: " | ")
+        return scriptPending.contains { joined.range(of: "^(?:" + $0 + ")$", options: .regularExpression) != nil }
+    }
+    /// Whether these buttons may be pressed: an allowed set, a script's pending set, or an earlier report's set
+    /// made only of words the gateway allowed back then.
+    static func pressable(_ labels: [String], message: ChatMessage) -> Bool {
+        if allowed(labels, body: message.body) || script(labels) { return true }
+        return message.date.timeIntervalSince1970 < since && !labels.isEmpty && Set(labels).count == labels.count
+            && labels.allSatisfy { standard.contains($0) || retired.contains($0) }
+    }
+    /// Where the buttons go in a report: after its what-to-do section (할 일 · 검토할 일 · 결정 필요), before the next
+    /// bold heading, as the gateway places them in Slack. The words are split at a line, never cut; nil keeps them whole.
+    static func split(_ body: String) -> (head: String, detail: String)? {
+        let lines = body.components(separatedBy: "\n")
+        func heading(_ line: String) -> String? {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            guard trimmed.range(of: #"^\*{1,2}[^*\n]+\*{1,2}$"#, options: .regularExpression) != nil else { return nil }
+            return trimmed.trimmingCharacters(in: CharacterSet(charactersIn: "*")).trimmingCharacters(in: .whitespaces)
+        }
+        guard let action = lines.firstIndex(where: { line in
+            heading(line).map { $0.range(of: #"^(?:소유자가\s*)?(?:할\s*일|검토할\s*일|결정\s*필요)"#, options: .regularExpression) != nil } ?? false
+        }), let next = lines.indices.dropFirst(action + 1).first(where: { heading(lines[$0]) != nil }) else { return nil }
+        let head = lines[..<next].joined(separator: "\n").trimmingCharacters(in: .newlines)
+        let detail = lines[next...].joined(separator: "\n").trimmingCharacters(in: .newlines)
+        return head.isEmpty || detail.isEmpty ? nil : (head, detail)
     }
 }

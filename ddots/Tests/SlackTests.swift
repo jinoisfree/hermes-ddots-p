@@ -1173,6 +1173,18 @@ final class FakeSlack {
         check(struck?.text == "~~취소~~\n```\nx\n```", "struck words and code keep Slack's marks in a form ddots draws: \(struck?.text ?? "")")
         check(SlackMessage(json: ["ts": "1.0", "text": "그냥 글", "blocks": [["type": "section", "text": ["type": "mrkdwn", "text": "그냥 글"]]]])?.text == "그냥 글",
               "a post without layout blocks keeps its text")
+        let rule = String(repeating: "─", count: 20), shortRule = String(repeating: "─", count: SlackBlockText.ruleLimit)
+        let footer = "\(rule)\n:stopwatch: 8.1초 · 모델 2회 · 도구 0회\n:inbox_tray: 입력 1K = 비캐시 1K + 캐시 0(0%)\n:outbox_tray: 출력 78 · 총 1.1K"
+        let footed = SlackMessage(json: ["ts": "1.0", "text": "본문.  \(rule) :stopwatch: 8.1초 · 모델 2회 · 도구 0회", "blocks": [
+            ["type": "section", "text": ["type": "mrkdwn", "text": "본문."]],
+            ["type": "section", "text": ["type": "mrkdwn", "text": footer]],
+            ["type": "context", "block_id": "hermes_route_switch_context", "elements": [["type": "plain_text", "text": "내용 보고 배정했어요"]]],
+            ["type": "actions", "block_id": "hermes_route_switch_actions", "elements": [["type": "button", "text": ["type": "plain_text", "text": "업무비서에게"], "value": "work-assistant"]]],
+        ]])
+        check(footed?.text == "본문.\n\n" + footer.replacingOccurrences(of: rule, with: shortRule),
+              "a reply's usage footer keeps its own lines and a one-line rule, without the router's note: \(footed?.text ?? "")")
+        check(SlackBlockText.fittedRules("a\n────────\nb ─────────────────────") == "a\n────────\nb ─────────────────────",
+              "short rules and dashes inside a sentence stay as written")
         let painted = SlackMessage(json: ["ts": "1.0", "text": "문의", "attachments": [["color": "2eb67d", "text": "*답변 완료*"], ["color": "danger", "fallback": "급함"], ["text": "색 없는 메모"], ["color": "nonsense"]]])
         check(painted?.marks == [ChatMark(color: "#2EB67D", text: "*답변 완료*"), ChatMark(color: "#E01E5A", text: "급함"), ChatMark(color: "", text: "색 없는 메모")], "attachments keep their colour and note: \(String(describing: painted?.marks))")
         check(SlackMessage(json: ["ts": "1.0", "text": "", "attachments": [["color": "#ECB22E", "text": "목록"]]])?.marks.count == 1 && painted != SlackMessage(json: ["ts": "1.0", "text": "문의"]), "a post that is only attachments still shows, and a repaint counts as a change")
@@ -1794,6 +1806,43 @@ final class FakeSlack {
         }
         let ordinaryStatus = SlackText.display(":white_check_mark: `guest`에게 보냈어", users: [:])
         check(SlackNotice.displayStatus(ordinaryStatus) == ordinaryStatus, "Other marks retain their displayed text")
+        for raw in ["답변 완료", ":white_check_mark: 답변 완료", "✅ 종결"] {
+            check(SlackNotice.badgeStatus(raw) == "답변 완료", "The status badge drops the check mark: \(raw)")
+        }
+        check(SlackNotice.badgeStatus("🟡 처리 중") == "처리 중" && SlackNotice.badgeStatus("✅") == "✅", "The badge keeps words, and an emoji alone stays")
+        // Reply buttons (owner decision 2026-10-31): the fixed sets only, mail words only under the mail legend.
+        check(ReplyButtonPolicy.allowed(["승인", "거절", "의견", "확인"], body: "질문"), "The common four are buttons")
+        check(ReplyButtonPolicy.allowed(["메모", "메모+노션", "확인"], body: "제안\n" + ReplyButtonPolicy.mailLegend), "Mail words under the legend are buttons")
+        check(!ReplyButtonPolicy.allowed(["메모", "메모+노션", "확인"], body: "제안"), "Mail words without the legend are not")
+        check(!ReplyButtonPolicy.allowed(["승인", "롤백"], body: "x") && !ReplyButtonPolicy.allowed(["✅ 승인"], body: "x") && !ReplyButtonPolicy.allowed(["승인", "승인"], body: "x"),
+              "Made-up, decorated or repeated words are not buttons")
+        check(ReplyButtonPolicy.symbol("승인") == "circle" && ReplyButtonPolicy.symbol("거절") == "xmark" && ReplyButtonPolicy.symbol("의견") == "pencil"
+              && ReplyButtonPolicy.symbol("확인") == "checkmark" && ReplyButtonPolicy.symbol("롤백") == nil, "Each common word has its picture")
+        check(ReplyButtonPolicy.word(":hp-memo: 메모") == "메모" && ReplyButtonPolicy.symbol(":hp-notion: 메모+노션") == "square.stack", "Earlier mail buttons show their word")
+        var posted = ChatMessage(id: "old", fromUser: false, speaker: "진단담당", body: "결과", date: Date(timeIntervalSince1970: ReplyButtonPolicy.since - 60), profile: "system-doctor")
+        // The rule's moment is in the past, so a new message is judged by the rule alone.
+        check(ReplyButtonPolicy.since < Date().timeIntervalSince1970, "The rule already applies; no future grace period")
+        check(ReplyButtonPolicy.pressable(["모두 승인", "모두 거절", "의견", "확인"], message: posted) && ReplyButtonPolicy.pressable(["반영해", "건너뛰기"], message: posted),
+              "Earlier reports' buttons that the gateway allowed then still answer")
+        check(!ReplyButtonPolicy.pressable(["진행해", "보류"], message: posted) && !ReplyButtonPolicy.pressable(["반영해", "반영해"], message: posted),
+              "Earlier, a set the gateway never allowed is not pressable either")
+        posted.date = Date()
+        check(!ReplyButtonPolicy.pressable(["반영해", "건너뛰기"], message: posted) && !ReplyButtonPolicy.pressable(["진행해", "보류"], message: posted)
+              && ReplyButtonPolicy.pressable(["승인"], message: posted), "A new message: only the fixed sets are pressable")
+        check(ReplyButtonPolicy.pressable(["확인", "롤백"], message: posted) && ReplyButtonPolicy.pressable(["1번 연결", "2번 연결", "연결 안 함"], message: posted)
+              && !ReplyButtonPolicy.pressable(["롤백", "확인"], message: posted), "A script's pending set keeps working in its exact form only")
+        // Buttons go after the what-to-do section; the words are split at a line and never cut.
+        let deadlines: String = "*🔴 마감 3건*\n요약이에요.\n\n*할 일*\n1. 직인 받을 사람을 알려줘.\n\n*마감 현황*\n• 항목 1\n• 항목 2"
+        let parts = ReplyButtonPolicy.split(deadlines)
+        let wantHead: String = "*🔴 마감 3건*\n요약이에요.\n\n*할 일*\n1. 직인 받을 사람을 알려줘."
+        let wantDetail: String = "*마감 현황*\n• 항목 1\n• 항목 2"
+        let rejoined: String? = parts.map { $0.head + "\n\n" + $0.detail }
+        check(parts?.head == wantHead && parts?.detail == wantDetail, "A report splits between what to do and the details")
+        check(rejoined == deadlines, "The split loses no words")
+        check(ReplyButtonPolicy.split("요약\n\n*근거*\n• 하나") == nil && ReplyButtonPolicy.split("요약\n\n*할 일*\n1. 끝") == nil,
+              "Without a what-to-do section, or with nothing after it, the buttons stay after the whole message")
+        check(ReplyButtonPolicy.split("요약\n\n**결정 필요**\n1. 고르기\n\n**근거**\n• 하나")?.detail == "**근거**\n• 하나", "Markdown bold headings split too")
+        check(SlackNotice.reviseText == "의견", "의견 sends the same word as its Slack button")
         var finishedStatus = SlackState(); finishedStatus.me = "UME"
         finishedStatus.history["F"] = [
             SlackMessage(ts: "1.0", user: "UCOWBOT", name: "SNS담당", text: "승인하면 보낼게", marks: [ChatMark(color: "#2EB67D", text: ":white_check_mark: 답변 완료")]),

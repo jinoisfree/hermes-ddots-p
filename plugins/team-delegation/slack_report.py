@@ -113,9 +113,13 @@ def post_dm(home, reports):
     return missed
 
 
-def post_thread(home, channel, text, *, thread_ts=None, message_ts=None):
-    """Decision reports use the same rich-block sender and return their exact Slack receipt."""
+def post_thread(home, channel, text, *, thread_ts=None, message_ts=None, script=None):
+    """Decision reports use the same rich-block sender and return their exact Slack receipt.
+
+    ``script`` names the decision module whose own fixed buttons this text carries (team-kit button_policy)."""
     body = {'channel':channel, 'text':text, 'unfurl_links':False}
+    if script:
+        body['_script_buttons'] = script
     if message_ts:
         body['ts'] = message_ts
     elif thread_ts:

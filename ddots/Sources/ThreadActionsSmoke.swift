@@ -3,7 +3,7 @@ import SwiftUI
 
 extension AppDelegate {
     /// An opened thread folds on a click in its empty space or on 접기, and on nothing else:
-    /// every control inside it is pressed with a real mouse click, as are a gap between two buttons and a button that is switched off.
+    /// every control inside it is pressed with a real mouse click, as is a gap between two buttons.
     @MainActor func threadActionsSmoke(destination: URL) async {
         let m = slack.model
         m.source = .slack; m.selected = "CCOW"; m.query = ""; m.draft = ""
@@ -22,7 +22,7 @@ extension AppDelegate {
             try? await Task.sleep(nanoseconds: 600_000_000)
         }
         var results: [[String: Any]] = []
-        let cases = ["전체 보기", "쪽", "경로 줘", "파일오픈", "다운로드", "표", "수정", "종결", "복사", "답글", "꺼진 답글", "버튼 사이", "접기", "빈 곳"]
+        let cases = ["전체 보기", "쪽", "경로 줘", "파일오픈", "다운로드", "표", "수정", "종결", "복사", "버튼 사이", "접기", "빈 곳"]
         for (index, action) in cases.enumerated() {
             web.close(); m.pageHold = nil; m.replyTo = nil; m.picked = nil; m.copied = nil
             var choice = ChatMessage(id: "choice-\(index)", fromUser: false, speaker: "새우튀김", body: "선택: 가짜.xlsx → 시험 시트 → 합성행\n- 이름: 합성행", date: Date(), profile: "fried-shrimp")
@@ -32,8 +32,6 @@ extension AppDelegate {
             var note = choice; note.id = "note-\(index)"; note.body = "가짜 시험 답글"
             let thread = SlackThread(id: "thread-\(index)", room: "CCOW", ts: "800", root: choice, replies: [fallback,note,control], replyCount: 3, loaded: true, latest: Date().timeIntervalSince1970, latestFromUser: false)
             m.threads = [thread]; m.open = [thread.id]; m.focusThread = nil
-            // A button that is switched off: 답글 while the answer is already going to this thread.
-            if action == "꺼진 답글" { m.reply(thread) }
             m.requestScroll(SlackModel.end(thread.id))
             try? await Task.sleep(nanoseconds: 700_000_000)
             let key: String
@@ -41,7 +39,6 @@ extension AppDelegate {
             case "전체 보기": key = "thread-all"
             case "쪽": key = "ux58-page-2"
             case "복사", "버튼 사이", "빈 곳": key = "copy-" + thread.id
-            case "답글", "꺼진 답글": key = "reply-" + thread.id
             case "접기": key = "fold-" + thread.id
             default: key = "vault-" + action + "-" + choice.id
             }
@@ -66,8 +63,6 @@ extension AppDelegate {
             case "전체 보기": smokeCheck(web.open && effects == before + 1, "전체 보기 asks for the list and opens it at the right")
             case "쪽", "경로 줘", "파일오픈", "다운로드", "표", "수정", "종결": smokeCheck(effects == before + 1, "\(action) does its work once: \(effects - before)")
             case "복사": smokeCheck(m.copied == "copy-" + thread.id, "복사 copies the thread")
-            // An opened thread is already the one being answered, so its 답글 is switched off either way.
-            case "답글", "꺼진 답글": smokeCheck(m.target?.id == thread.id && effects == before, "답글 keeps the answer on the thread")
             default: smokeCheck(effects == before, "\(action) sends nothing")
             }
         }

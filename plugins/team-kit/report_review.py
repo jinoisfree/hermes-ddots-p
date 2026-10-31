@@ -9,7 +9,7 @@ import re
 import time
 from types import SimpleNamespace
 
-NOTE = '''학습·스킬 보고 검토: 전체 버튼 모두 승인(예전 모두 배우기)=이 보고의 학습+스킬 전체 keep, 모두 거절(예전 롤백)=전체 reject,
+NOTE = '''학습·스킬 보고 검토: 전체 버튼 승인(예전 모두 승인·모두 배우기)=이 보고의 학습+스킬 전체 keep, 거절(예전 모두 거절·롤백)=전체 reject,
 의견(예전 일부만 배우기)=항목별 버튼 안내만(변경 없음), 확인=전체 defer(읽음·적용 유지·나중에 결정). 학습 N번만 승인/거절(그 항목 하나만)=team_learn_review keep/reject items=[N],
 스킬 N번만 승인/거절(그 항목 하나만)=team_skill_review keep/reject items=[N]. 예전 N번 승인/거절도 같은 뜻이다. 수정 버튼은 무엇을 고칠지 먼저 묻는다.
 후속 수정 지시를 받으면 학습은 team_learn_review correct items=[N](rule/operations),
@@ -17,7 +17,9 @@ NOTE = '''학습·스킬 보고 검토: 전체 버튼 모두 승인(예전 모�
 학습승인/학습거절/보류와 번호별 글 답장은 유지한다. 결정만 기록된 경우와 파일까지 바꾼 결과를 구분한다.
 '''
 LABEL = re.compile(r'^(학습|스킬) (\d+)번(?:만)? (승인|거절|수정)$')
-GLOBAL = {'모두 승인': 'keep', '모두 거절': 'reject', '의견': 'choose', '확인': 'defer',  # 2026-10-29 사용자 결정
+# 2026-10-31 사용자 결정: 공통 네 버튼. 승인·거절은 이 보고 전체이며 find()가 원래 학습 보고 스레드일 때만 받는다.
+GLOBAL = {'승인': 'keep', '거절': 'reject', '의견': 'choose', '확인': 'defer',
+          '모두 승인': 'keep', '모두 거절': 'reject',  # 2026-10-29 reports' buttons
           '모두 배우기': 'keep', '롤백': 'reject', '일부만 배우기': 'choose',  # earlier reports' buttons
           '학습승인': 'keep', '학습거절': 'reject', '보류': 'defer'}
 
@@ -214,7 +216,7 @@ def decide(home, args, src, base):
     store, loader, key, report = find(home, src, base)
     action, scope, numbers = args['action'], args.get('scope', 'all'), args.get('items')
     if action == 'choose':
-        return {'ok': True, 'message': '고칠 항목 번호와 내용을 이 스레드에 적어 줘. 예: `학습 2번을 …로 수정`, `스킬 3번 거절`. 아직 바꾼 내용은 없어.'}
+        return {'ok': True, 'message': '어떤 항목을 어떻게 할까? 항목 번호와 바꿀 내용을 이 스레드에 답해 줘. 예: `학습 2번을 …로 수정`, `스킬 3번 거절`. 답을 받을 때까지 아무것도 바꾸지 않아.'}
     if action == 'ask':
         items = report.get('items', []) if scope == 'learning' else report.get('skills', {}).get('items', [])
         if not numbers or len(numbers) != 1 or not 1 <= numbers[0] <= len(items):

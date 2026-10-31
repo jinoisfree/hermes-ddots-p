@@ -216,11 +216,12 @@ def perform(home, args, *, mode="morning", now=None, opener=None, session_id="",
             display_due = escape(item.get('deadline_at') or item['due'])
             body = {"channel": CHANNEL, "text": f"*{title_prefix}마감 점검 · {escape(item['title'])}*\n\n*마감: {display_due}* · {label}\n\n{escape(text.strip())}\n\n출처: {escape(item['source'])}{escape(source_note)}\n[[버튼: 완료했어 | 못했어 | 수정할게 | 확인했어]]",
                     "mrkdwn": True, "parse": "none", "link_names": False,
-                    "unfurl_links": False, "unfurl_media": False}
+                    "unfurl_links": False, "unfurl_media": False, "_script_buttons": "deadline_watch"}
             try:
                 body = extension("slack_blocks").apply(body)
             except Exception:
                 pass  # Formatting never blocks a deadline notice.
+            body.pop("_script_buttons", None)
             req = urllib.request.Request("https://slack.com/api/chat.postMessage", data=json.dumps(body).encode(),
                 headers={"Authorization": "Bearer " + secret, "Content-Type": "application/json; charset=utf-8"})
             receipt = {"at": at, "status": "pending", "ts": None}

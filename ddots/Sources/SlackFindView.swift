@@ -95,6 +95,12 @@ extension SlackSearch {
 
 extension ChatView {
     func slackHighlight(_ text: AttributedString, message: ChatMessage) -> AttributedString {
+        var text = text
+        if message.streaming {
+            let native = NSMutableAttributedString(attributedString: NSAttributedString(text))
+            MessageFormat.uniformSize(native, size: ChatMetrics.bodyFont)
+            text = AttributedString(native)
+        }
         guard let term = slack.findTerm(message) else { return text }
         return SlackSearch.highlighted(text, query: term)
     }

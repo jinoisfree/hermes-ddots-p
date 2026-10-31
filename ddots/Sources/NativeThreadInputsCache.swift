@@ -36,7 +36,8 @@ final class NativeThreadInputsCache {
         value.open = key.open.contains(id) ? [id] : []
         value.stopped = key.stopped.contains(id) ? [id] : []
         value.confirmed = key.confirmed.intersection(messages)
-        value.expandedReplies = key.expandedReplies.intersection(messages)
+        // A report's details shown after its buttons fold on their own ("<id>:detail").
+        value.expandedReplies = key.expandedReplies.filter { messages.contains($0) || ($0.hasSuffix(":detail") && messages.contains(String($0.dropLast(7)))) }
         value.bells = key.bells[id].map { [id: $0] } ?? [:]
         value.typing = key.typing[id].map { [id: $0] } ?? [:]
         value.removing = key.removing[id].map { [id: $0] } ?? [:]

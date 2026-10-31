@@ -9,7 +9,7 @@ import uuid
 import deadline_time as dates
 import work_content as content
 
-MARKER='[[버튼: :hp-memo: 메모 | :hp-notion: 메모+노션 | :hp-check: 확인]]'
+MARKER='[[버튼: 메모 | 메모+노션 | 확인]]'
 LEGEND='메모 = 개인(Obsidian 메모→미리알림), 메모+노션 = 공용(노션+Obsidian 메모→미리알림), 확인 = 만들지 않음'
 
 

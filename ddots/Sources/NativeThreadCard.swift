@@ -27,7 +27,10 @@ final class NativeThreadCard: NSTableCellView, NSTextViewDelegate {
         var avatar: ProfileAvatar
         var nameColor: NSColor
         var conversational = false
+        /// The rest of a post shown after its buttons: words only, no face or name above them.
+        var continuation = false
         var pending = false
+        var streaming = false
         var interrupted = false
         var marks: [Mark] = []
         var foldTitle: String?
@@ -37,7 +40,6 @@ final class NativeThreadCard: NSTableCellView, NSTextViewDelegate {
         var reportHeight: ((CGFloat) -> Void)?
     }
     enum Piece {
-        case owner(name: String, avatar: ProfileAvatar)
         case post(Post)
         /// What the thread waits on, under its first line.
         case note(Mark, mine: Bool)
@@ -69,10 +71,18 @@ final class NativeThreadCard: NSTableCellView, NSTextViewDelegate {
         var bubbleWidth: CGFloat
         var quiet: NSColor
         var expanded: Bool
-        var summary: String = ""
         var statusTitle: String = ""
         var replyTarget = false
-        var workspaceFooter: Bool { !summary.isEmpty }
+    }
+    /// The row at the card's top right: the bell at the end, the "답글 작성 중" and status badges to its left,
+    /// all on one centre line. Drawing and the bell button both take their places from here.
+    struct Header {
+        struct Badge { var title: String; var replyTarget: Bool; var frame: NSRect }
+        var bell: NSRect?
+        var badges: [Badge]
+        /// Height kept above the first post when the row cannot share the author's line.
+        var reserve: CGFloat
+        var all: [NSRect] { badges.map(\.frame) + (bell.map { [$0] } ?? []) }
     }
     struct Placed {
         var piece: Piece
@@ -92,7 +102,7 @@ final class NativeThreadCard: NSTableCellView, NSTextViewDelegate {
         var placed: [Placed]
         var rail: NSRect?
         var foot: NSRect
-        var summary: NSRect
+        var header: Header
         var compact: Bool
         /// Where each message sits in the card, for scrolling to it.
         var anchors: [String: NSRect]
@@ -144,30 +154,66 @@ final class NativeThreadCard: NSTableCellView, NSTextViewDelegate {
     static let stackFont = NSFont.systemFont(ofSize: ChatMetrics.auxiliaryFont, weight: .medium)
     static let noteFont = NSFont.systemFont(ofSize: ChatMetrics.auxiliaryFont, weight: .medium)
     static let stackLine: CGFloat = 14
+    static let bellPoint: CGFloat = 12
+    static let bellBox: CGFloat = 26
+    static let badgeHeight: CGFloat = 24
+    /// Between the bell and the badge next to it; badges keep 8pt between them.
+    static let bellGap: CGFloat = 10
+    static var bellIconWidth: CGFloat {
+        ceil(NSImage(systemSymbolName: "bell.fill", accessibilityDescription: nil)?
+            .withSymbolConfiguration(.init(pointSize: bellPoint, weight: .semibold))?.size.width ?? 14)
+    }
 
+    /// The top row on its own: where its centre is and whether it shares the author's line.
+    /// Its centre is the author's name line, so the row sits at the same height wherever it goes.
+    static func header(_ content: Content, width: CGFloat) -> Header {
+        let inset = content.style.inset
+        let usable = max(1, width - 2 * inset)
+        let midY = inset + 8
+        var right = width - inset
+        var bell: NSRect?
+        if content.bell != nil {
+            let icon = bellIconWidth
+            // The bell's picture ends at the card's inset; its pressable box reaches past it evenly.
+            bell = NSRect(x: right - icon - (bellBox - icon) / 2, y: midY - bellBox / 2, width: bellBox, height: bellBox)
+            right -= icon + bellGap
+        }
+        var titles: [(String, Bool)] = []
+        if content.replyTarget { titles.append(("답글 작성 중", true)) }
+        if !content.statusTitle.isEmpty { titles.append((content.statusTitle, false)) }
+        var badges: [Header.Badge] = []
+        for (title, target) in titles {
+            let room = right - inset
+            guard room > 24 else { break }
+            let w = min(room, ceil(Self.width(title, font: footFont)) + 22)
+            badges.append(.init(title: title, replyTarget: target, frame: NSRect(x: right - w, y: midY - badgeHeight / 2, width: w, height: badgeHeight)))
+            right -= w + 8
+        }
+        guard bell != nil || !badges.isEmpty else { return Header(bell: nil, badges: [], reserve: 0) }
+        let rowWidth = width - inset - (badges.last?.frame.minX ?? bell!.minX + (bellBox - bellIconWidth) / 2)
+        var inline = false
+        if case .post(let post)? = content.top.first, !post.mine {
+            let speakerWidth = ChatMetrics.avatar + 9 + Self.width(post.speaker, font: .systemFont(ofSize: ChatMetrics.nameFont, weight: .bold))
+                + 6 + Self.width(post.time, font: .systemFont(ofSize: 10)) + 12
+            inline = usable >= speakerWidth + rowWidth
+        }
+        // Otherwise the row gets a line of its own above the first post: half a badge under the centre and a gap.
+        return Header(bell: bell, badges: badges, reserve: inline ? 0 : badgeHeight / 2 + 12)
+    }
+
+    private static var streamHeights: [String: (width: CGFloat, height: CGFloat)] = [:]
     static func layout(_ content: Content, width: CGFloat) -> Layout {
         let inset = content.style.inset
         let usable = max(1, width - 2 * inset)
         var placed: [Placed] = []
         var anchors: [String: NSRect] = [:]
-        let badgeWidth = (content.statusTitle.isEmpty ? 0 : Self.width(content.statusTitle, font: footFont) + 30)
-            + (content.replyTarget ? Self.width("답글 작성 중", font: footFont) + 30 : 0)
-        let inlineBadge: Bool
-        if case .post(let post)? = content.top.first, !post.mine {
-            let speakerWidth = ChatMetrics.avatar + 9 + Self.width(post.speaker, font: .systemFont(ofSize: ChatMetrics.nameFont, weight: .bold))
-                + Self.width(post.time, font: .systemFont(ofSize: 10)) + 22
-            inlineBadge = usable > speakerWidth + badgeWidth
-        } else { inlineBadge = false }
-        var y = inset + (badgeWidth == 0 || inlineBadge ? 0 : 30)
+        let header = Self.header(content, width: width)
+        var y = inset + (header.reserve > 0 ? 8 + header.reserve : 0)
         var first = true
         func gap() { if !first { y += 10 }; first = false }
         func place(_ piece: Piece, x: CGFloat, width: CGFloat) {
             gap()
             switch piece {
-            case .owner:
-                placed.append(Placed(piece: piece, frame: NSRect(x: x, y: y, width: width, height: 14)))
-                // The legacy label pulls the next line two points closer.
-                y += 12
             case .post(let post):
                 var item = Placed(piece: piece, frame: .zero)
                 if post.mine {
@@ -188,10 +234,21 @@ final class NativeThreadCard: NSTableCellView, NSTextViewDelegate {
                     let bubble = post.conversational
                     let limit = bubble ? max(1, min(textWidth, content.bubbleWidth) - 24) : textWidth
                     let size = textSize(post.text, width: limit)
-                    item.aside = NSRect(x: x, y: y, width: ChatMetrics.avatar, height: ChatMetrics.avatar)
-                    item.time = NSRect(x: textX, y: y, width: textWidth, height: 16)
-                    item.text = NSRect(x: textX + (bubble ? 12 : 0), y: y + 21 + (bubble ? 8 : 0),
-                                       width: bubble ? size.width : textWidth, height: size.height)
+                    let heightKey = content.id + ":" + post.id
+                    var bodyHeight = size.height
+                    if post.streaming || (streamHeights[heightKey] != nil && post.foldTitle != "더 보기") {
+                        if let old = streamHeights[heightKey], abs(old.width - limit) < 0.5 {
+                            bodyHeight = max(bodyHeight, old.height)
+                        }
+                        if streamHeights.count > 512, let oldest = streamHeights.keys.first { streamHeights.removeValue(forKey: oldest) }
+                        streamHeights[heightKey] = (limit, bodyHeight)
+                    } else { streamHeights.removeValue(forKey: heightKey) }
+                    if !post.continuation {
+                        item.aside = NSRect(x: x, y: y, width: ChatMetrics.avatar, height: ChatMetrics.avatar)
+                        item.time = NSRect(x: textX, y: y, width: textWidth, height: 16)
+                    }
+                    item.text = NSRect(x: textX + (bubble ? 12 : 0), y: y + (post.continuation ? 0 : 21) + (bubble ? 8 : 0),
+                                       width: bubble ? size.width : textWidth, height: bodyHeight)
                     if bubble { item.bubble = item.text.insetBy(dx: -12, dy: -8) }
                     var bottom = bubble ? item.bubble.maxY : item.text.maxY
                     for mark in post.marks {
@@ -202,7 +259,7 @@ final class NativeThreadCard: NSTableCellView, NSTextViewDelegate {
                     if post.foldTitle != nil {
                         item.fold = NSRect(x: textX, y: bottom + 5, width: 70, height: 14); bottom = item.fold.maxY
                     }
-                    item.frame = NSRect(x: x, y: y, width: width, height: max(ChatMetrics.avatar, bottom - y))
+                    item.frame = NSRect(x: x, y: y, width: width, height: post.continuation ? bottom - y : max(ChatMetrics.avatar, bottom - y))
                 }
                 anchors[post.id] = item.frame; anchors["message:" + post.id] = item.frame
                 placed.append(item); y = item.frame.maxY
@@ -216,7 +273,9 @@ final class NativeThreadCard: NSTableCellView, NSTextViewDelegate {
             case .stack(let faces, let title, _, _):
                 let facesWidth: CGFloat = faces.isEmpty ? 0 : 16 + CGFloat(faces.count - 1) * 11 + 7
                 let w = (faces.isEmpty ? 12 : 8) + facesWidth + ceil(Self.width(title, font: stackFont)) + 7 + 9 + 11
-                let frame = NSRect(x: x, y: y, width: min(width, w), height: 7 + stackLine + 7)
+                // The pile starts where the posts' words and their 더 보기 start, right of the faces.
+                let lead = min(ChatMetrics.avatar + 9, max(0, width - w))
+                let frame = NSRect(x: x + lead, y: y, width: min(width - lead, w), height: 7 + stackLine + 7)
                 placed.append(Placed(piece: piece, frame: frame))
                 y = frame.maxY + 9
             case .hosted(let id, let view):
@@ -238,11 +297,6 @@ final class NativeThreadCard: NSTableCellView, NSTextViewDelegate {
             first = false
         }
         gap()
-        let summaryHeight: CGFloat = content.summary.isEmpty ? 0 : 28
-        let replyWidth = content.workspaceFooter ? content.actions.first(where: { $0.identifier.hasPrefix("reply-") }).map { actionWidth($0, compact: false) + 12 } ?? 0 : 0
-        let foldWidth = content.workspaceFooter ? content.actions.first(where: { $0.identifier.hasPrefix("fold-") }).map { actionWidth($0, compact: false) + 12 } ?? 0 : 0
-        let summary = NSRect(x: inset + replyWidth, y: y + 4, width: max(0, usable - replyWidth - foldWidth), height: summaryHeight)
-        y += summaryHeight
         let spacing: CGFloat = 14
         var full: CGFloat = CGFloat(max(0, content.actions.count - 1)) * spacing
         for action in content.actions { full += actionWidth(action, compact: false) }
@@ -250,7 +304,7 @@ final class NativeThreadCard: NSTableCellView, NSTextViewDelegate {
         let compact = full > usable - 6
         let foot = NSRect(x: inset, y: y, width: usable - 6, height: 16)
         y = foot.maxY
-        return Layout(content: content, width: width, height: ceil(y + inset), placed: placed, rail: rail, foot: foot, summary: summary, compact: compact, anchors: anchors)
+        return Layout(content: content, width: width, height: ceil(y + inset), placed: placed, rail: rail, foot: foot, header: header, compact: compact, anchors: anchors)
     }
 
     // MARK: Views
@@ -261,6 +315,51 @@ final class NativeThreadCard: NSTableCellView, NSTextViewDelegate {
         fileprivate var linkOpened = false
         private var pendingClick: DispatchWorkItem?
         func cancelPendingClick() { pendingClick?.cancel(); pendingClick = nil }
+        private struct Ink { var range: NSRange; var color: NSColor; var since: TimeInterval }
+        private var freshInk: [Ink] = []
+        private var inkTick: DispatchWorkItem?
+        func softenAppend(previous: String, streaming: Bool, reset: Bool) {
+            let count = (string as NSString).length
+            let append = string.hasPrefix(previous)
+            if reset || !streaming || !append || NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
+                inkTick?.cancel(); inkTick = nil
+                layoutManager?.removeTemporaryAttribute(.foregroundColor, forCharacterRange: NSRange(location: 0, length: count))
+                freshInk.removeAll()
+                return
+            }
+            let oldCount = (previous as NSString).length
+            if count > oldCount, let storage = textStorage {
+                let now = ProcessInfo.processInfo.systemUptime
+                storage.enumerateAttribute(.foregroundColor, in: NSRange(location: oldCount, length: count - oldCount)) { color, range, _ in
+                    self.freshInk.append(Ink(range: range, color: color as? NSColor ?? .labelColor, since: now))
+                }
+            }
+            fadeInk()
+        }
+        private func fadeInk() {
+            inkTick?.cancel(); inkTick = nil
+            let now = ProcessInfo.processInfo.systemUptime
+            let count = (string as NSString).length
+            freshInk = freshInk.filter { ink in
+                guard NSMaxRange(ink.range) <= count else { return false }
+                let t = min(1, max(0, (now - ink.since) / 0.22))
+                if t >= 1 || isHidden || NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
+                    layoutManager?.removeTemporaryAttribute(.foregroundColor, forCharacterRange: ink.range)
+                    return false
+                }
+                let eased = t * t * (3 - 2 * t)
+                layoutManager?.addTemporaryAttribute(.foregroundColor,
+                    value: ink.color.withAlphaComponent(ink.color.alphaComponent * CGFloat(0.45 + 0.55 * eased)),
+                    forCharacterRange: ink.range)
+                return true
+            }
+            needsDisplay = true
+            if !freshInk.isEmpty {
+                let tick = DispatchWorkItem { [weak self] in self?.fadeInk() }
+                inkTick = tick
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.0 / 60.0, execute: tick)
+            }
+        }
         // The panel is often behind another app; the first click acts, as it does on the SwiftUI card.
         override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
         /// Quote bars and code boxes of a laid-out Slack post go behind its words.
@@ -421,7 +520,7 @@ final class NativeThreadCard: NSTableCellView, NSTextViewDelegate {
         super.init(frame: frame)
         wantsLayer = true
         layerContentsRedrawPolicy = .onSetNeedsDisplay
-        bell.symbolPoint = 12; bell.symbolWeight = .semibold
+        bell.symbolPoint = Self.bellPoint; bell.symbolWeight = .semibold
         addSubview(area); addSubview(bell)
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
@@ -449,11 +548,20 @@ final class NativeThreadCard: NSTableCellView, NSTextViewDelegate {
         var textIndex = 0, stackIndex = 0
         var usedHosts = Set<String>()
         textLinks.removeAll(keepingCapacity: true)
-        func setText(_ string: NSAttributedString, link: @escaping (URL) -> Void) {
+        func setText(_ string: NSAttributedString, streaming: Bool = false, link: @escaping (URL) -> Void) {
             let view = textView(textIndex); textIndex += 1
             view.isHidden = false
             let selection = view.selectedRange()
-            if !view.attributedString().isEqual(to: string) { view.textStorage?.setAttributedString(string) }
+            let previous = sameThread ? view.string : ""
+            if let storage = view.textStorage, !storage.isEqual(to: string) {
+                storage.beginEditing()
+                if string.length >= storage.length,
+                   string.attributedSubstring(from: NSRange(location: 0, length: storage.length)).isEqual(to: storage) {
+                    storage.append(string.attributedSubstring(from: NSRange(location: storage.length, length: string.length - storage.length)))
+                } else { storage.setAttributedString(string) }
+                storage.endEditing()
+            }
+            view.softenAppend(previous: previous, streaming: streaming, reset: !sameThread)
             if sameThread, NSMaxRange(selection) <= string.length { view.setSelectedRange(selection) }
             else { view.setSelectedRange(NSRange(location: 0, length: 0)) }
             view.cancelPendingClick()
@@ -464,7 +572,7 @@ final class NativeThreadCard: NSTableCellView, NSTextViewDelegate {
         for item in layout.placed {
             switch item.piece {
             case .post(let post):
-                setText(post.text, link: post.openLink)
+                setText(post.text, streaming: post.streaming, link: post.openLink)
                 register?("message:" + post.id, texts[textIndex - 1])
                 for mark in post.marks { setText(mark.text, link: post.openLink) }
             case .note(let mark, _):
@@ -486,7 +594,6 @@ final class NativeThreadCard: NSTableCellView, NSTextViewDelegate {
                 host.rootView = AnyView(view().frame(maxWidth: .infinity, alignment: .topLeading))
                 host.isHidden = false
                 register?(id, host)
-            case .owner: break
             }
         }
         for index in textIndex..<texts.count { texts[index].isHidden = true }
@@ -540,12 +647,11 @@ final class NativeThreadCard: NSTableCellView, NSTextViewDelegate {
             case .note: putText(item.text)
             case .stack: put(stacks[stackIndex], NSRect(x: item.frame.minX, y: item.frame.minY, width: item.frame.width, height: item.frame.height + 9)); stackIndex += 1
             case .hosted(let id, _): if let host = hosts[id] { put(host, item.frame) }
-            case .owner: break
             }
         }
         let spacing: CGFloat = value.compact ? 12 : 14
         let c = value.content
-        let footerIndices = c.actions.indices.filter { !c.workspaceFooter || (!c.actions[$0].identifier.hasPrefix("reply-") && !c.actions[$0].identifier.hasPrefix("fold-")) }
+        let footerIndices = Array(c.actions.indices)
         let widths = footerIndices.map { Self.actionWidth(c.actions[$0], compact: value.compact) }
         let deleting = c.deleting.map { ceil(Self.width($0, font: Self.footFont)) + 22 + spacing } ?? 0
         var x = value.foot.maxX - widths.reduce(0, +) - CGFloat(max(0, widths.count - 1)) * spacing - deleting
@@ -554,18 +660,7 @@ final class NativeThreadCard: NSTableCellView, NSTextViewDelegate {
             put(buttons[index], NSRect(x: x, y: value.foot.midY - height / 2, width: widths[offset], height: height))
             x += widths[offset] + spacing
         }
-        if c.workspaceFooter {
-            for index in c.actions.indices {
-                let action = c.actions[index]
-                let width = Self.actionWidth(action, compact: false)
-                if action.identifier.hasPrefix("reply-") {
-                    put(buttons[index], NSRect(x: c.style.inset, y: value.summary.minY, width: width, height: 20))
-                } else if action.identifier.hasPrefix("fold-") {
-                    put(buttons[index], NSRect(x: value.width - c.style.inset - width, y: value.summary.minY, width: width, height: 20))
-                }
-            }
-        }
-        if !bell.isHidden { put(bell, NSRect(x: value.width - 26, y: 0, width: 26, height: 26)) }
+        if !bell.isHidden, let frame = value.header.bell { put(bell, frame) }
         put(area, NSRect(x: 0, y: 0, width: value.width, height: value.height))
     }
     override func draw(_ dirtyRect: NSRect) {
@@ -593,35 +688,18 @@ final class NativeThreadCard: NSTableCellView, NSTextViewDelegate {
             let paragraph = NSMutableParagraphStyle(); paragraph.alignment = right ? .right : .left
             (string as NSString).draw(in: frame.offsetBy(dx: dx, dy: 0), withAttributes: [.font: font, .foregroundColor: color, .paragraphStyle: paragraph])
         }
-        var badgeRight = value.width - c.style.inset
-        func badge(_ title: String, color: NSColor) {
-            let w = min(value.width - 2 * c.style.inset, Self.width(title, font: Self.footFont) + 22)
-            let rect = NSRect(x: badgeRight - w, y: 12, width: w, height: 24)
+        for badge in value.header.badges {
+            let color = badge.replyTarget ? NSColor.systemBlue : c.style.status ?? c.quiet
+            let rect = badge.frame
             color.withAlphaComponent(0.12).setFill()
-            let pill = NSBezierPath(roundedRect: rect.offsetBy(dx: dx, dy: 0), xRadius: 12, yRadius: 12)
+            let pill = NSBezierPath(roundedRect: rect.offsetBy(dx: dx, dy: 0), xRadius: rect.height / 2, yRadius: rect.height / 2)
             pill.fill(); color.withAlphaComponent(0.65).setStroke(); pill.lineWidth = 0.7; pill.stroke()
-            label(title, frame: rect.insetBy(dx: 11, dy: 5), font: Self.footFont, color: color)
-            badgeRight -= w + 8
-        }
-        if c.replyTarget { badge("답글 작성 중", color: .systemBlue) }
-        if !c.statusTitle.isEmpty { badge(c.statusTitle, color: c.style.status ?? c.quiet) }
-        if !c.summary.isEmpty {
-            c.quiet.withAlphaComponent(0.14).setFill()
-            NSRect(x: dx + c.style.inset, y: value.summary.minY - 4, width: value.width - 2 * c.style.inset, height: 0.5).fill()
-            let detail = c.summary.components(separatedBy: " · ").dropFirst().filter { $0 != "답글 작성 중" }.joined(separator: " · ")
-            if value.summary.width > Self.width(detail, font: Self.footFont) {
-                label(detail, frame: value.summary, font: Self.footFont, color: c.quiet)
-            }
+            let text = ceil(Self.footFont.ascender - Self.footFont.descender)
+            label(badge.title, frame: NSRect(x: rect.minX + 11, y: rect.midY - text / 2, width: max(1, rect.width - 22), height: text), font: Self.footFont, color: color)
         }
         let nameFont = NSFont.systemFont(ofSize: ChatMetrics.nameFont, weight: .bold)
         for item in value.placed {
             switch item.piece {
-            case .owner(let name, let avatar):
-                let title = "처리: " + name
-                let width = Self.width(title, font: Self.noteFont)
-                let face = NSRect(x: dx + item.frame.maxX - 4 - width - 18, y: item.frame.minY, width: 14, height: 14)
-                avatar.draw(in: face, name: name, clipPath: ChatView.face(14).path(in: face).cgPath)
-                label(title, frame: NSRect(x: item.frame.minX, y: item.frame.minY, width: item.frame.width - 4, height: 14), font: Self.noteFont, color: c.quiet, right: true)
             case .post(let post):
                 if post.flash {
                     NSColor.controlAccentColor.withAlphaComponent(0.18).setFill()
@@ -637,14 +715,16 @@ final class NativeThreadCard: NSTableCellView, NSTextViewDelegate {
                         (c.style.replyBackground ?? NSColor.labelColor.withAlphaComponent(0.07)).setFill()
                         NSBezierPath(roundedRect: item.bubble.offsetBy(dx: dx, dy: 0), xRadius: 12, yRadius: 12).fill()
                     }
-                    let face = item.aside.offsetBy(dx: dx, dy: 0)
-                    post.avatar.draw(in: face, name: post.speaker, clipPath: ChatView.face(face.width).path(in: face).cgPath)
-                    label(post.speaker, frame: item.time, font: nameFont, color: post.nameColor)
-                    let nameWidth = Self.width(post.speaker, font: nameFont)
-                    // The time sits on the name's baseline, as SwiftUI's .firstTextBaseline places it.
-                    let timeFont = NSFont.systemFont(ofSize: 10)
-                    let timeTop = item.time.minY + nameFont.ascender - timeFont.ascender
-                    label(post.time, frame: NSRect(x: item.time.minX + nameWidth + 6, y: timeTop, width: max(1, item.time.width - nameWidth - 6), height: 14), font: timeFont, color: c.quiet)
+                    if !post.continuation {
+                        let face = item.aside.offsetBy(dx: dx, dy: 0)
+                        post.avatar.draw(in: face, name: post.speaker, clipPath: ChatView.face(face.width).path(in: face).cgPath)
+                        label(post.speaker, frame: item.time, font: nameFont, color: post.nameColor)
+                        let nameWidth = Self.width(post.speaker, font: nameFont)
+                        // The time sits on the name's baseline, as SwiftUI's .firstTextBaseline places it.
+                        let timeFont = NSFont.systemFont(ofSize: 10)
+                        let timeTop = item.time.minY + nameFont.ascender - timeFont.ascender
+                        label(post.time, frame: NSRect(x: item.time.minX + nameWidth + 6, y: timeTop, width: max(1, item.time.width - nameWidth - 6), height: 14), font: timeFont, color: c.quiet)
+                    }
                     for (index, frame) in item.marks.enumerated() where index < post.marks.count {
                         post.marks[index].color.setFill()
                         NSBezierPath(roundedRect: NSRect(x: dx + frame.minX, y: frame.minY, width: 3, height: frame.height), xRadius: 1.5, yRadius: 1.5).fill()

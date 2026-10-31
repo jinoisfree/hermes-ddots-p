@@ -375,31 +375,32 @@ struct ChatView: View {
                 .foregroundColor(Color(nsColor: model.palette(profile, dark: dark).name.nsColor))
         }.chatMeasure("name:" + key, model: model)
     }
-    func typingBubble(_ indicator: TypingIndicator) -> some View {
+    func typingBubble(_ indicator: TypingIndicator, compact: Bool = false) -> some View {
         let palette = model.palette(indicator.profile, dark: dark)
         return VStack(alignment: .leading,spacing: ChatMetrics.nameBodyGap) {
             if !indicator.speaker.isEmpty {
                 speakerLabel(indicator.speaker, profile: indicator.profile, key: "typing")
                     .padding(.leading, ChatMetrics.speakerInset)
             }
-            Group {
-                if shouldReduceMotion { Text("…").font(.title3) }
-                else {
-                    TimelineView(.animation(minimumInterval: 1.0 / 12, paused: !model.expanded)) { timeline in
-                        HStack(spacing: 5) {
-                            ForEach(0..<3) { index in
-                                Circle().frame(width:6,height:6)
-                                    .scaleEffect(0.8 + 0.35 * (1 + sin(timeline.date.timeIntervalSinceReferenceDate * 5 - Double(index) * 1.1)))
-                            }
-                        }.frame(height:16)
+            if !compact { HStack(spacing: 9) {
+                if shouldReduceMotion {
+                    Circle().stroke(lineWidth: 1.5).frame(width: 10, height: 10).opacity(0.5)
+                } else {
+                    TimelineView(.animation(minimumInterval: 1.0 / 24, paused: !model.expanded)) { timeline in
+                        Circle().trim(from: 0.1, to: 0.8).stroke(style: StrokeStyle(lineWidth: 1.5, lineCap: .round))
+                            .frame(width: 10, height: 10)
+                            .rotationEffect(.degrees(timeline.date.timeIntervalSinceReferenceDate * 150))
+                            .opacity(0.6)
                     }
                 }
+                Text(indicator.activity?.isEmpty == false ? indicator.activity! : "답변을 준비하고 있습니다")
+                    .font(.system(size: ChatMetrics.auxiliaryFont)).lineLimit(2).opacity(0.8)
             }.foregroundColor(Color(nsColor:palette.foreground.nsColor))
                 .padding(.horizontal,14).padding(.vertical,10)
                 .background(RoundedRectangle(cornerRadius:16).fill(Color(nsColor:palette.background.nsColor)))
-                .chatMeasure("bubble:typing", model: model)
+                .chatMeasure("bubble:typing", model: model) }
         }.padding(.leading, ChatMetrics.replyInset).frame(maxWidth:.infinity,alignment:.leading)
-            .accessibilityLabel("\(indicator.speaker) 작성 중")
+            .accessibilityLabel("\(indicator.speaker) \(indicator.activity ?? "답변을 준비하고 있습니다")")
     }
     private var searchResults: some View {
         VStack(alignment: .leading,spacing: 6) {

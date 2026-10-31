@@ -80,7 +80,7 @@ class Decisions:
         self.finder=Finder(store,inventory)
         self.answer_state='done'
         self.claimed=False
-        self.send=send or (lambda channel,text,**kw:slack_report.post_thread(self.home,channel,text,**kw))
+        self.send=send or (lambda channel,text,**kw:slack_report.post_thread(self.home,channel,text,script='link_decisions',**kw))
 
     def preview(self):
         with self.store._connect() as conn:

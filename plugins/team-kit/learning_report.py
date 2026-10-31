@@ -23,7 +23,8 @@ KST = ZoneInfo("Asia/Seoul")
 _spec = importlib.util.spec_from_file_location("team_report_layout", Path(__file__).with_name("report_layout.py"))
 layout = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(layout)
-# 2026-10-29 사용자 결정: 전체 버튼은 모두 승인 | 모두 거절 | 의견 | 확인. 스레드 끝에도 같은 버튼을 둔다.
+# 2026-10-31 사용자 결정: 전체 버튼은 공통 네 개 승인 | 거절 | 의견 | 확인(예전 모두 승인 | 모두 거절). 승인·거절은 이 보고 전체에 적용한다.
+# 스레드 끝에도 같은 버튼을 둔다.
 REVIEW_GUIDE = layout.REVIEW_GUIDE
 FINAL_KIND = "전체"
 
@@ -77,6 +78,7 @@ def slack(home, method, body):
     if method in {"chat.postMessage", "chat.update"}:
         body = learning.extension("jang_voice").prepare(home, body)
         body = with_blocks(body, update=method == "chat.update")
+    body = {key: value for key, value in body.items() if key != "_script_buttons"} if isinstance(body, dict) else body
     token = learning.env(home, "SLACK_BOT_TOKEN")
     if not token:
         raise ValueError("SLACK_BOT_TOKEN is missing.")
@@ -257,7 +259,7 @@ def routing_section(home, now):
 
 def review_buttons(after_apply):
     """Reply buttons (gateway reply_buttons): a click is the owner typing that word in this thread."""
-    return "\n[[버튼: 모두 승인 | 모두 거절 | 의견 | 확인]]"
+    return "\n[[버튼: 승인 | 거절 | 의견 | 확인]]"
 
 
 def final_part():

@@ -4,6 +4,14 @@ import SwiftUI
 /// Text-only formatting shared by the composer and received messages. No HTML/WebKit is executed.
 /// Markdown remains readable outside ddots; optional span/u tags carry size, colour and underline.
 enum MessageFormat {
+    static func uniformSize(_ text: NSMutableAttributedString, size: CGFloat) {
+        text.enumerateAttribute(.font, in: NSRange(location: 0, length: text.length)) { value, range, _ in
+            // A zero-width layout sentinel is not visible text.
+            if text.attributedSubstring(from: range).string == "\u{200B}" { return }
+            let font = value as? NSFont ?? .systemFont(ofSize: size)
+            text.addAttribute(.font, value: NSFontManager.shared.convert(font, toSize: size), range: range)
+        }
+    }
     static let baseSize: CGFloat = 13
     static let sizes: [CGFloat] = [11, 13, 16, 20, 24, 28]
     static let colors: [(String, String)] = [("빨강", "#E05252"), ("주황", "#CC7A29"), ("초록", "#309968"), ("파랑", "#4285E8"), ("보라", "#A16BDD")]

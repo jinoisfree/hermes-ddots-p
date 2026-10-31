@@ -390,7 +390,8 @@ def quiet(now=None):
 
 def post(home, job, text):
     return str(R.slack(home, 'chat.postMessage', {'channel': job['channel'], 'thread_ts': job['thread_ts'], 'text': text,
-                                                  'parse': 'none', 'link_names': False, 'unfurl_links': False})['ts'])
+                                                  'parse': 'none', 'link_names': False, 'unfurl_links': False,
+                                                  '_script_buttons': 'paseo_autofix'})['ts'])
 
 
 def say(home, job, text, role=None):

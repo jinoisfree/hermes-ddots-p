@@ -243,11 +243,6 @@ final class SlackController {
             if self.persists { UserDefaults.standard.set(source.rawValue, forKey: "chatSource") }
             self.publish(); self.enterConversation(); self.tick()
         }
-        // Reading a transcript for its summary must not mark unread messages as read.
-        model.onLoadSummary = { [weak self] thread in
-            guard let self, !thread.loaded else { return }
-            self.wanted.insert(thread.room + ":" + thread.ts); self.tick()
-        }
         model.onOpen = { [weak self] thread in
             guard let self else { return }
             self.markRead(thread)

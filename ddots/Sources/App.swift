@@ -583,6 +583,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
     func refreshStreams() {
         guard !isSmoke, !streamPolling else { return }
         guard !model.paused, hermesEnabled, slack.connected, slack.chatOpen else {
+            StreamPreviewDiagnostics.record("poll", ["state": "gated", "paused": String(model.paused),
+                "enabled": String(hermesEnabled), "connected": String(slack.connected), "open": String(slack.chatOpen)])
             slack.model.receiveStreams([]); return
         }
         let source = hermes, revision = hermesRevision
@@ -595,6 +597,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
                 guard let self else { return }
                 self.streamPolling = false
                 guard revision == self.hermesRevision, !self.model.paused, self.hermesEnabled, self.slack.chatOpen else { return }
+                StreamPreviewDiagnostics.record("poll", ["state": "read", "source": String(describing: type(of: source)),
+                    "previews": String(fresh.count), "characters": String(fresh.reduce(0) { $0 + $1.body.count }),
+                    "latest": String(fresh.map(\.updated).max() ?? 0)])
                 self.slack.model.receiveStreams(fresh)
             }
         }
@@ -1267,6 +1272,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         menu.addItem(.separator())
         addMenu("설정…", #selector(showOptions))
         menu.items.last?.keyEquivalent = ","
+        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "?"
+        let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "?"
+        let versionItem = NSMenuItem(title: "ddots \(version) (빌드 \(build))", action: nil, keyEquivalent: "")
+        versionItem.isEnabled = false
+        menu.addItem(versionItem)
         addMenu("업데이트 확인…", #selector(checkAppUpdate))
         menu.addItem(.separator())
         addMenu("ddots 종료", #selector(quit))
