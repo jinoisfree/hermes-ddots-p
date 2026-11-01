@@ -19,6 +19,51 @@ class SetupError(ValueError):
     """A static, user-facing setup explanation without credential values."""
 
 
+def runtime_python(home):
+    """Ask the installed core to select its environment; never install dependencies here."""
+    core = home / 'hermes-agent'
+    environment = {**os.environ, 'HERMES_HOME': str(home), 'HERMES_DISABLE_LAZY_INSTALLS': '1',
+                   'PYTHONDONTWRITEBYTECODE': '1'}
+    if (core / 'pm/environments.py').is_file():
+        try:
+            result = subprocess.run([sys.executable, '-I', '-c',
+                "import sys;from pathlib import Path;sys.path.insert(0,sys.argv[1]);"
+                "from pm.environments import project_python;print(project_python(Path(sys.argv[1])))", str(core)],
+                capture_output=True, text=True, env=environment, timeout=30)
+        except (OSError, subprocess.TimeoutExpired):
+            raise SetupError('Hermes의 관리 Python 환경을 확인하지 못했습니다. 공식 설치를 먼저 마치세요.') from None
+        if result.returncode:
+            raise SetupError('Hermes의 관리 Python 환경을 확인하지 못했습니다. 공식 설치를 먼저 마치세요.')
+        python = Path(result.stdout.strip())
+    else:
+        python = core / 'venv/bin/python'
+    if not python.is_file() or not os.access(python, os.X_OK):
+        raise SetupError('실행할 Hermes Python이 없습니다. bash install.sh --prepare-runtime --home <홈>으로 먼저 준비하세요.')
+    return python
+
+
+def check_runtime(home):
+    python = runtime_python(home)
+    launcher = home / 'hermes-agent/.hermes/bin/hermes'
+    if not launcher.is_file():
+        launcher = Path.home() / '.local/bin/hermes'
+    if not launcher.is_file() or not os.access(launcher, os.X_OK):
+        raise SetupError('Hermes CLI가 없습니다. 공식 설치기의 명령 등록을 먼저 마치세요.')
+    environment = {**os.environ, 'HERMES_HOME': str(home), 'HERMES_DISABLE_LAZY_INSTALLS': '1',
+                   'PYTHONDONTWRITEBYTECODE': '1'}
+    try:
+        dependencies = subprocess.run([str(python), '-I', '-c', 'import ruamel.yaml'],
+            capture_output=True, env=environment, timeout=30)
+        command = subprocess.run([str(launcher), '--version'],
+            capture_output=True, env=environment, timeout=30)
+    except (OSError, subprocess.TimeoutExpired):
+        raise SetupError('Hermes 실행 기반 점검에 실패했습니다. Python과 CLI 설치를 확인하세요.') from None
+    if dependencies.returncode or command.returncode:
+        raise SetupError('Hermes Python 의존성 또는 CLI 실행이 실패했습니다. 공식 설치를 먼저 마치세요.')
+    print('Hermes 본체·Python·CLI 실행 점검 통과. 모델·Slack 연결과 실제 응답은 별도 확인이 필요합니다.')
+    return 0
+
+
 def encoded(value):
     return (json.dumps(value, ensure_ascii=False, indent=2) + '\n').encode()
 
@@ -28,11 +73,11 @@ def mapping(path, home):
     text = path.read_text()
     try: value = json.loads(text)
     except ValueError:
-        python = home / 'hermes-agent/venv/bin/python'
-        if not python.is_file(): raise SetupError('YAML 설정을 읽을 Hermes Python이 없습니다. 먼저 Hermes를 설치하세요.')
+        python = runtime_python(home)
         result = subprocess.run([str(python), '-c',
             "import json,sys;from ruamel.yaml import YAML;print(json.dumps(YAML(typ='safe').load(open(sys.argv[1]))))", str(path)],
-            capture_output=True, text=True, env={**os.environ, 'HERMES_DISABLE_LAZY_INSTALLS': '1'})
+            capture_output=True, text=True, env={**os.environ, 'HERMES_HOME': str(home),
+                'HERMES_DISABLE_LAZY_INSTALLS': '1', 'PYTHONDONTWRITEBYTECODE': '1'}, timeout=30)
         if result.returncode: raise SetupError('기존 YAML 설정을 읽지 못했습니다.')
         value = json.loads(result.stdout)
     if not isinstance(value, dict): raise SetupError('설정은 객체 형식이어야 합니다.')
@@ -249,10 +294,13 @@ def modern_main(root, argv=None):
     parser.add_argument('--packs', default=None);parser.add_argument('--home', type=Path, default=Path(os.environ.get('HERMES_HOME', '~/.hermes')).expanduser())
     parser.add_argument('--label-prefix', default='com.example.hermes');parser.add_argument('--dry-run', action='store_true')
     parser.add_argument('--check', action='store_true');parser.add_argument('--update', action='store_true');parser.add_argument('--connect-slack', action='store_true')
+    parser.add_argument('--check-runtime', action='store_true', help='본체·Python·CLI를 설치 없이 점검합니다.')
     args = parser.parse_args(argv)
     if args.home.is_symlink(): raise SetupError('설치 홈 자체의 링크는 사용할 수 없습니다.')
     home = args.home.expanduser().resolve()
     if home == root or root in home.parents: raise SetupError('배포 폴더 밖에 설치하세요.')
+    if args.check_runtime:
+        return check_runtime(home)
     settings = json.loads((root / 'installation.json').read_text());available = settings['roles']
     if args.list:
         for i, (slug, row) in enumerate(available.items(), 1):print(f"{i}. {row['name']} ({slug}) — {row['description']}")
@@ -265,7 +313,7 @@ def modern_main(root, argv=None):
         if not previous['agents']: raise SetupError('설치 기록이 없습니다.')
         checks = {**previous.get('managed', {}), **{n: {'link': v} for n, v in previous.get('connections', {}).items()}}
         issues = [name for name, expected in checks.items() if signature(home / name) != expected]
-        print(json.dumps({'checked': len(checks), 'differences': issues}, ensure_ascii=False))
+        print(json.dumps({'scope': 'managed-code', 'checked': len(checks), 'differences': issues}, ensure_ascii=False))
         return int(bool(issues))
     if args.update:
         if not previous['agents']: raise SetupError('이 설치 도우미의 기존 설치 기록이 없습니다.')

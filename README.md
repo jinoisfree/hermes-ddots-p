@@ -11,7 +11,7 @@
 | system-doctor | 시스템 관리·진단 | 읽기 전용 점검으로 오류 원인을 좁힘 | Slack, 모델 제공자, 로컬 진단 도구(선택) |
 | work-assistant | 회사업무 담당 | 업무 자료·마감·회신 대기를 한데 정리 | Slack, 모델 제공자, 회사 메일·일정(선택), Notion(선택) |
 
-1. 공식 Hermes를 설치하고 `hermes setup`에서 사용할 모델을 연결합니다.
+1. 아래 실행 기반 준비·점검을 마치고 `hermes setup`에서 사용할 모델을 연결합니다.
 2. 이 폴더에서 `bash install.sh`를 실행합니다. 직원 번호와 필요한 도구 팩을 고르면 됩니다.
 3. 설치 도우미가 안내하는 Slack 앱을 직원별로 만듭니다. 각 직원 폴더의
    `slack-manifest.json`을 사용하고 Socket Mode 앱 토큰과 Bot User OAuth 토큰을 준비합니다.
@@ -22,6 +22,25 @@
    선택이 필요한 답변에는 승인·거절·의견·확인 버튼을 쓸 수 있습니다.
    의견을 누른 뒤 같은 스레드에 지시를 적고, 다른 직원은 멘션해서 부릅니다.
 
+처음 설치하는 홈에는 다음 명령으로 본체·Python·CLI를 먼저 준비합니다. Python이 아직 없어도
+시작할 수 있으며, [공식 Hermes 설치기](https://hermes-agent.nousresearch.com/docs/getting-started/installation)에
+실제 설치를 위임합니다. 이 명령은 모델 로그인이나 게이트웨이 시작을 하지 않습니다.
+
+```sh
+bash install.sh --prepare-runtime --home "$HOME/.hermes"
+export PATH="$HOME/.local/bin:$PATH"
+bash install.sh --check-runtime --home "$HOME/.hermes"
+```
+
+기존 본체가 있으면 준비 명령을 다시 실행하지 말고 `--check-runtime`으로 먼저 확인합니다.
+준비 명령은 기존 본체·홈 링크를 자동 교체하지 않습니다. 기존 홈을 옮기면 그 안의
+본체·Python·실행 경로도 영향을 받으므로, 이동이나 전환 전에 별도 홈에서 실행 기반과
+기존 기능 보존을 검증하세요. `--home`을 지정한 경우 뒤의 모든 명령에도 같은 값을 사용합니다.
+관리 Python을 찾을 수 없을 때는 `HERMES_STARTER_PYTHON`에 확인된 Python 실행 경로를 지정할 수 있습니다.
+공식 설치기는 계정의 공통 CLI도 등록하므로, 기존 `hermes`·`hermes-acp` 명령이 있으면
+준비 명령은 중단합니다. 기존 운영을 종료하고 새 본체로 CLI까지 전환하기로 정한 경우에만
+`--prepare-runtime --replace-cli`를 사용하세요. 기존 환경을 유지하는 별도 홈 시험에는 쓰지 않습니다.
+
 ```sh
 # 설치 전 미리 보기: 파일과 Slack을 바꾸지 않습니다.
 bash install.sh --agents work-assistant,personal-secretary --packs files-docs,notion --dry-run
@@ -29,8 +48,11 @@ bash install.sh --agents work-assistant,personal-secretary --packs files-docs,no
 # 설치 및 선택한 직원의 Slack 연결
 bash install.sh --agents work-assistant,personal-secretary --packs files-docs,notion --connect-slack
 
-# 코드·연결 확인
+# 설치 도우미가 관리하는 코드·파일 연결만 확인
 bash install.sh --check
+
+# 실제 본체·Python·CLI 실행 확인
+bash install.sh --check-runtime
 ```
 
 업무 비서를 고르면 멘션 없는 새 질문의 기본 담당이 됩니다. 다른 기본 직원을 원하면
@@ -60,6 +82,11 @@ hermes gateway start
 Slack·계정 연결은 사용자의 환경에서 확인해야 합니다. 본체 확장점이 달라져 버튼 연결이
 지원되지 않으면 선택지를 글로 보냅니다. 실제 첫 응답·버튼·업데이트 확인 전에는 설치가
 완료됐다고 보지 마세요. 공개 앱의 배포·업데이트는 별도 안내를 따릅니다.
+
+`quiet-logs`는 기존 로그 필터와 함께 Slack의 홈 채널 미설정 안내만 생략합니다.
+현재 언어의 `gateway.notify.no_home_channel` 번역에 `platform=Slack`,
+`sethome_cmd=/hermes sethome`을 넣은 결과와 전체 문구가 정확히 같을 때만 적용합니다.
+다른 안내·다른 플랫폼·추가 내용이 있는 글은 그대로 전달하며 홈 채널 설정은 바꾸지 않습니다.
 
 Google 계정 연결용 안내: [Hermes Gmail](gmail/index.html) · [개인정보처리방침](gmail/privacy.html).
 

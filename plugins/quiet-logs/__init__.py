@@ -6,6 +6,7 @@ process-wide, so enabling this for the default profile covers every profile the 
 from __future__ import annotations
 
 import logging
+from functools import wraps
 
 # logger name -> message fragment to drop
 SILENCED = {
@@ -27,8 +28,37 @@ class MessageFilter(logging.Filter):
         return self.fragment not in record.getMessage()
 
 
+def install_chat_notice_filter() -> None:
+    """Preserve the legacy Slack-only, translated full-message home-hint filter."""
+    try:
+        from agent.i18n import t
+        from gateway.config import Platform
+        from gateway.run_notifications import GatewayNotificationsMixin
+    except ImportError:
+        logging.getLogger(__name__).warning('Slack home-channel hint filter is unavailable in this Hermes version.')
+        return
+    original = getattr(GatewayNotificationsMixin, '_deliver_platform_notice', None)
+    if not callable(original):
+        logging.getLogger(__name__).warning('Slack home-channel hint delivery hook is unavailable in this Hermes version.')
+        return
+    if getattr(original, '_moyo_home_hint_filter', False):
+        return
+
+    @wraps(original)
+    async def deliver(self, source, content):
+        if getattr(source, 'platform', None) == Platform.SLACK and content == t(
+            'gateway.notify.no_home_channel', platform='Slack', sethome_cmd='/hermes sethome',
+        ):
+            return None
+        return await original(self, source, content)
+
+    deliver._moyo_home_hint_filter = True
+    GatewayNotificationsMixin._deliver_platform_notice = deliver
+
+
 def register(ctx) -> None:
     for name, fragment in SILENCED.items():
         target = logging.getLogger(name)
         if not any(getattr(existing, "fragment", None) == fragment for existing in target.filters):
             target.addFilter(MessageFilter(fragment))
+    install_chat_notice_filter()
