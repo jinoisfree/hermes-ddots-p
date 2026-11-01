@@ -21,7 +21,7 @@ import Foundation
         var changed=config;changed["members"]=[["profile":"helper","displayName":"Renamed","slackUserID":"B1"]]
         changed["routing"]=["base":["patterns":["broken":"(?P<invalid"]]]
         try write(changed,record.appendingPathComponent("ddots-config.json"));c.refresh()
-        precondition(c.matching("Renamed")=="helper" && c.matching("Doctor")==nil && c.status.contains("base.broken"))
+        precondition(c.matching("Renamed")=="helper" && c.matching("Doctor")==nil && c.status.isEmpty)
         if CommandLine.arguments.count > 1 {
             let installed=DdotsConfig(root:root.appendingPathComponent("absent-record"),hermes:URL(fileURLWithPath:CommandLine.arguments[1]),home:root)
             precondition(installed.members.count==3 && installed.recipient=="default")

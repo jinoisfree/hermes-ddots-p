@@ -382,25 +382,38 @@ struct ChatView: View {
                 speakerLabel(indicator.speaker, profile: indicator.profile, key: "typing")
                     .padding(.leading, ChatMetrics.speakerInset)
             }
-            if !compact { HStack(spacing: 9) {
-                if shouldReduceMotion {
-                    Circle().stroke(lineWidth: 1.5).frame(width: 10, height: 10).opacity(0.5)
-                } else {
-                    TimelineView(.animation(minimumInterval: 1.0 / 24, paused: !model.expanded)) { timeline in
-                        Circle().trim(from: 0.1, to: 0.8).stroke(style: StrokeStyle(lineWidth: 1.5, lineCap: .round))
-                            .frame(width: 10, height: 10)
-                            .rotationEffect(.degrees(timeline.date.timeIntervalSinceReferenceDate * 150))
-                            .opacity(0.6)
+            if !compact {
+                Group {
+                    if shouldReduceMotion {
+                        typingActivity(indicator, date: nil)
+                    } else {
+                        ChatActivityTimeline(model: model, interval: 1.0 / 24) { date in
+                            typingActivity(indicator, date: date)
+                        }
                     }
-                }
-                Text(indicator.activity?.isEmpty == false ? indicator.activity! : "답변을 준비하고 있습니다")
-                    .font(.system(size: ChatMetrics.auxiliaryFont)).lineLimit(2).opacity(0.8)
-            }.foregroundColor(Color(nsColor:palette.foreground.nsColor))
-                .padding(.horizontal,14).padding(.vertical,10)
-                .background(RoundedRectangle(cornerRadius:16).fill(Color(nsColor:palette.background.nsColor)))
-                .chatMeasure("bubble:typing", model: model) }
+                }.foregroundColor(Color(nsColor:palette.foreground.nsColor))
+                    .padding(.horizontal,14).padding(.vertical,10)
+                    .background(RoundedRectangle(cornerRadius:16).fill(Color(nsColor:palette.background.nsColor)))
+                    .chatMeasure("bubble:typing", model: model)
+            }
         }.padding(.leading, ChatMetrics.replyInset).frame(maxWidth:.infinity,alignment:.leading)
             .accessibilityLabel("\(indicator.speaker) \(indicator.activity ?? "답변을 준비하고 있습니다")")
+    }
+    private func typingActivity(_ indicator: TypingIndicator, date: Date?) -> some View {
+        HStack(spacing: 9) {
+            if let date {
+                Circle().trim(from: 0.1, to: 0.8).stroke(style: StrokeStyle(lineWidth: 1.5, lineCap: .round))
+                    .frame(width: 10, height: 10)
+                    .rotationEffect(.degrees(date.timeIntervalSinceReferenceDate * 150))
+                    .opacity(0.6)
+            } else {
+                Circle().stroke(lineWidth: 1.5).frame(width: 10, height: 10).opacity(0.5)
+            }
+            Text(indicator.activity?.isEmpty == false ? indicator.activity! : "답변을 준비하고 있습니다")
+                .font(.system(size: ChatMetrics.auxiliaryFont)).lineLimit(2).opacity(0.8)
+                .writingShimmer(at: date, reduceMotion: shouldReduceMotion,
+                                highlight: .primary.opacity(0.5))
+        }
     }
     private var searchResults: some View {
         VStack(alignment: .leading,spacing: 6) {
@@ -527,6 +540,24 @@ extension View {
 
     @ViewBuilder func selectableText(_ on: Bool) -> some View {
         if on { textSelection(.enabled) } else { textSelection(.disabled) }
+    }
+}
+
+/// Native cards retain their hosted content across parent updates. Observe visibility here so
+/// pausing reaches the timeline even when the card's layout inputs have not changed.
+struct ChatActivityTimeline<Content: View>: View {
+    @ObservedObject var model: ChatModel
+    let interval: TimeInterval
+    let content: (Date) -> Content
+
+    init(model: ChatModel, interval: TimeInterval, @ViewBuilder content: @escaping (Date) -> Content) {
+        self.model = model; self.interval = interval; self.content = content
+    }
+
+    var body: some View {
+        TimelineView(.animation(minimumInterval: interval, paused: !model.expanded)) { timeline in
+            content(timeline.date)
+        }
     }
 }
 

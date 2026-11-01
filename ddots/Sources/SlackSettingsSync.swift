@@ -32,6 +32,7 @@ extension SlackController {
         for room in model.unkept { state["unkept:" + room] = "1" }
         state["chatMuted"] = model.chatMuted ? "1" : "0"
         state["stackOpen"] = model.stackOpen ? "1" : "0"
+        state["preferredHub"] = model.preferredHub
         return state
     }
 
@@ -142,6 +143,7 @@ extension SlackController {
             else if key == "pins", let data = value?.data(using: .utf8), let pins = try? JSONDecoder().decode([String].self, from: data), pins.count == SlackRoomOrder.slots { model.pins = pins }
             else if key == "chatMuted" { model.chatMuted = value == "1" }
             else if key == "stackOpen" { model.stackOpen = value == "1" }
+            else if key == "preferredHub" { model.preferredHub = value ?? "" }
         }
         saveSynced()
         if retentionChanged { changeRetention() }
@@ -151,6 +153,7 @@ extension SlackController {
 
     /// The same keys each choice is saved under when it is made on this Mac.
     private func saveSynced() {
+        guard persists else { return }
         let defaults = UserDefaults.standard
         defaults.set(retention.filtered(lastRead), forKey: "slackLastRead")
         defaults.set(retention.filtered(confirmed), forKey: "slackConfirmed")
@@ -165,5 +168,6 @@ extension SlackController {
         defaults.set(Array(model.muted).sorted(), forKey: "slackMuted")
         defaults.set(model.chatMuted, forKey: "chatMuted")
         defaults.set(model.stackOpen, forKey: "slackStackOpen")
+        defaults.set(model.preferredHub, forKey: Ddots.preferredHubKey)
     }
 }

@@ -91,7 +91,7 @@ extension AppDelegate {
                               DdotsMember(profile: "sns-manager", name: "SNS담당", room: "DC"),
                               DdotsMember(profile: "work-assistant", name: "업무비서", room: "TH")]
         let usual = model.ddotsMembers.contains { $0.profile == Ddots.defaultTarget } ? Ddots.defaultTarget : model.ddotsMembers.first?.profile
-        let configured = !DdotsConfig.shared.members.isEmpty
+
         smokeCheck(model.litRecipientProfile == nil && model.recipient?.profile == usual, "Empty faces do not change the sending recipient")
         model.draft = " \n\t"
         smokeCheck(model.litRecipientProfile == nil, "Whitespace does not light a face")
@@ -102,31 +102,22 @@ extension AppDelegate {
         model.draft = "안녕"
         smokeCheck(changes == 1, "Empty to nonempty draft notifies the surrounding controls")
         smokeCheck(model.litRecipientProfile == nil && model.recipient?.profile == usual, "Words about no one light nobody and still go to the usual character")
-        if configured {
-            model.draft = "노션 정리해줘"
-            smokeCheck(model.litRecipientProfile == "work-assistant", "Notion goes to the work secretary under the hub decision")
-            model.draft = "위키에서 지난 회의록 찾아줘"
-            smokeCheck(model.litRecipientProfile == nil, "Wiki belongs to a character without a face here, so nobody lights")
-            model.draft = "내일 일정 확인해줘"
-            smokeCheck(model.litRecipientProfile == "work-assistant", "Schedule requests light work-assistant, matching Hermes base/hub routing (D1)")
-        } else {
-            for text in ["노션 정리해줘", "내일 일정 확인해줘", "SNS담당 안녕"] {
-                model.draft = text
-                smokeCheck(model.litRecipientProfile == nil && model.postProfile == usual,
-                           "Without a Hermes config, words alone light nobody and go to the first character")
-            }
+        model.ddotsHub = nil
+        for text in ["노션 정리해줘", "위키에서 지난 회의록 찾아줘", "내일 일정 확인해줘", "SNS담당 안녕"] {
+            model.draft = text
+            smokeCheck(model.litRecipientProfile == nil && model.postProfile == usual,
+                       "Unmentioned new posts use the default DM without content classification")
         }
+        model.draft = "@SNS담당 안녕"
+        smokeCheck(model.recipient?.profile == "sns-manager" && model.postRoom == "DC", "An explicit mention selects its recipient DM without a hub")
+        model.ddotsHub = "HUB"
         changes = 0; model.draft = "안녕"
         changes = 0; model.composer.text = "안녕하세요"
         smokeCheck(changes == 0 && model.draft == "안녕하세요", "Editor updates preserve the draft API without invalidating the parent")
         // Preview follows the draft without adding a synthetic mention to the outgoing post.
         model.draft = "SNS담당 안녕"
-        if configured {
-            smokeCheck(changes == 1 && model.postProfile == "sns-manager", "A named recipient updates the hub preview")
-        } else {
-            smokeCheck(model.litRecipientProfile == nil && model.postProfile == usual,
-                       "Without a Hermes config, words alone light nobody and go to the first character")
-        }
+        smokeCheck(model.litRecipientProfile == nil && model.postProfile == usual,
+                   "A plain name never selects a recipient")
         model.draft = "@SNS담당 안녕"
         smokeCheck(changes == 1 && model.postProfile == "sns-manager", "A routed profile change notifies the parent")
         smokeCheck(model.litRecipientProfile == "sns-manager", "A call lights only its recipient")

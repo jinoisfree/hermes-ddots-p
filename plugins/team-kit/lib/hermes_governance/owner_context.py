@@ -484,7 +484,7 @@ def _personal_direct_llm_request(services, request: dict[str, Any], **context: A
         if nudge := services.limit_report.nudge(request.get("messages"), services._card_tool_texts):
             rewritten = services._append_request_policy(rewritten, nudge) or rewritten
     if services.obsidian_notes.selected(services.host):
-        rewritten = services._append_request_policy(rewritten.NOTICE) or rewritten
+        rewritten = services._append_request_policy(rewritten, services.obsidian_notes.NOTICE) or rewritten
     if rollback_note := services._inbox_rollback_note():
         # The model kept answering "rollback is not connected" from stale history instead of calling
         # the tool, so an ㅁ 롤백 turn runs the rollback here and the model only reports the result.

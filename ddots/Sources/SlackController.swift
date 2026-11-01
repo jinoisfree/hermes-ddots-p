@@ -291,6 +291,14 @@ final class SlackController {
         model.onFile = { [weak self] file, message in self?.open(file, in: message) }
         model.onAttach = { [weak self] in self?.pickFiles() }
         model.onLayout = { [weak self] in self?.onChange?() }
+        model.onChooseHub = { [weak self] in
+            guard let self else { return }
+            if self.persists { UserDefaults.standard.set(self.model.preferredHub, forKey: Ddots.preferredHubKey) }
+            self.recordWindow.reset(); self.letGoOlderMonths()
+            self.publish()
+            self.model.select(Ddots.room)
+            self.tick()
+        }
         model.onMute = { [weak self] in
             guard let self else { return }
             if self.persists {
@@ -411,8 +419,9 @@ final class SlackController {
             if !model.unkept.isEmpty { URLCache.shared.removeAllCachedResponses() }
             UserDefaults.standard.set(Array(model.unkept).sorted(), forKey: SlackRetention.key)
             var through = UserDefaults.standard.dictionary(forKey: "ddotsThrough") as? [String: Double] ?? [:]
+            through[Ddots.room] = nil
             for member in model.ddotsMembers where retention.excludes(member.room) { through[member.profile] = nil }
-            if let hub = model.ddotsHub, retention.excludes(hub) { through[Ddots.room] = nil }
+            if let hub = model.ddotsHub, retention.excludes(hub) { through[Ddots.recordKey(hub)] = nil }
             UserDefaults.standard.set(through, forKey: "ddotsThrough")
             for key in ["slackLastRead", "slackOwnRead", "slackDismissed", "slackConfirmed", "slackDeletedThreads"] {
                 let values = UserDefaults.standard.dictionary(forKey: key) as? [String: Double] ?? [:]
@@ -481,6 +490,7 @@ final class SlackController {
         let defaults = UserDefaults.standard
         lastRead = defaults.dictionary(forKey: "slackLastRead") as? [String: Double] ?? [:]
         model.selected = defaults.string(forKey: "slackRoom")
+        model.preferredHub = defaults.string(forKey: Ddots.preferredHubKey) ?? ""
         model.hidden = Set(defaults.stringArray(forKey: "slackHidden") ?? [])
         model.unkept = Set(defaults.stringArray(forKey: SlackRetention.key) ?? [])
         retention.update(model.unkept, hidden: model.hidden)
@@ -1029,8 +1039,10 @@ final class SlackController {
         let ddots = Ddots.enabled ? Ddots.members(Ddots.rooms(snapshot.rooms, members: snapshot.members), characters: cast) : []
         if model.ddotsMembers != ddots { model.ddotsMembers = ddots }
         // The channel is part of ddots, not a room of its own in the list.
-        let hub = ddots.isEmpty ? nil : Ddots.hub(snapshot.rooms)
-        if model.ddotsHub != hub { model.ddotsHub = hub }
+        let candidates = snapshot.rooms.filter { !$0.direct }.sorted { ($0.name, $0.id) < ($1.name, $1.id) }
+        if model.hubCandidates != candidates { model.hubCandidates = candidates }
+        let hub = ddots.isEmpty ? nil : Ddots.hub(snapshot.rooms, preferred: model.preferredHub)
+        if model.ddotsHub != hub { model.changeHub(to: hub) }
         // The channel is no tab of its own, so a hiding or muting left on it from when it was could never be taken off again.
         if let hub, model.hidden.contains(hub) || model.muted.contains(hub) {
             model.hidden.remove(hub); model.muted.remove(hub)
@@ -1130,7 +1142,9 @@ final class SlackController {
         // Shown on the ddots tab; the pet's badge counts each character's room once and leaves this sum out.
         let waitingThere = together.reduce(0) { $0 + (unread[$1] ?? 0) }
         if waitingThere > 0 { unread[Ddots.room] = waitingThere }
-        unreadCache.retain(Set(snapshot.threads.values.flatMap { $0.map(\.id) }))
+        let activeThreads = Set(snapshot.threads.values.flatMap { $0.map(\.id) })
+        unreadCache.retain(activeThreads)
+        noticeMemo.retain(activeThreads)
         if model.unread != unread { model.unread = unread }
 
         section("unread")
@@ -1186,7 +1200,7 @@ final class SlackController {
                 let signature = hasher.finalize()
                 if let cached = roomNoticeCache[tab], cached.signature == signature { notice = cached.notice }
                 else {
-                    notice = roomNotice(SlackNotice.items(threads, dismissed: dismissed, confirmed: confirmed))
+                    notice = roomNotice(noticeMemo.items(threads, dismissed: dismissed, confirmed: confirmed))
                     roomNoticeCache[tab] = (signature, notice)
                 }
             }

@@ -84,13 +84,13 @@ extension SlackController {
         guard !closing, model.findOpen, find.session == session, self.archive?.root == archive.root else { return }
         showFindGaps()
         guard !find.pending.isEmpty else { find.loadingArchive = false; showFindGaps(); refreshFind(); return }
-        let batch = Array(find.pending.prefix(Self.findBatch)), members = model.ddotsMembers, hub = model.ddotsHub
+        let batch = Array(find.pending.prefix(Self.findBatch)), members = model.ddotsMembers
         find.pending.removeFirst(batch.count)
         fileQueue.async { [weak self] in
             if SlackFind.pause > 0 { Thread.sleep(forTimeInterval: SlackFind.pause) }
             let reads = batch.map { archive.scan(month: $0) }
             let lines = reads.flatMap(\.lines)
-            let recorded = SlackSearch.recorded(lines, members: members, hub: hub, archive: archive)
+            let recorded = SlackSearch.recorded(lines, members: members, archive: archive)
             DispatchQueue.main.async {
                 guard let self, !self.closing, self.model.findOpen, self.find.session == session, self.archive?.root == archive.root else { return }
                 self.find.lines += lines; self.find.months = (self.find.months + batch).sorted()

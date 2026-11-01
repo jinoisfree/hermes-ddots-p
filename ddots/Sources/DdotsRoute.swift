@@ -1,20 +1,28 @@
 import Foundation
 
-/// Local preview of the exported Hermes contract; the server still owns thread/approval routing.
+/// Local preview of the exported Hermes contract; the server owns approval routing.
 enum DdotsRoute {
     typealias Decision = HermesRouting.Decision
-    static func direct(_ text:String)->String { HermesRouting.direct(text) }
+    /// Only an explicit @alias is a call. Plain names never select a recipient.
     static func leadingCall(_ text:String)->(profile:String,call:String)? {
         var best:(profile:String,call:String)?
-        for (name,profile) in HermesRouting.aliases(DdotsConfig.shared.contract(hub:false)) where !name.hasPrefix("@") {
-            guard text.hasPrefix("@"+name),name.count>(best?.call.count ?? 1)-1 else{continue}
-            if let next=text.dropFirst(name.count+1).first,next.isLetter || next.isNumber{continue}
-            best=(profile,"@"+name)
-        };return best
+        for member in DdotsConfig.shared.members {
+            let profile = HermesRouting.str(member["profile"])
+            let names = [profile, HermesRouting.str(member["displayName"])] + HermesRouting.strings(member["aliases"])
+            for name in names where !name.isEmpty && !profile.isEmpty {
+                guard text.hasPrefix("@"+name), name.count > (best?.call.count ?? 1)-1 else { continue }
+                if let next=text.dropFirst(name.count+1).first, next.isLetter || next.isNumber { continue }
+                best=(profile,"@"+name)
+            }
+        }
+        return best
     }
-    static func preview(_ text:String)->Decision { HermesRouting.decide(text,contract:DdotsConfig.shared.contract(hub:true)) }
-    static func decide(_ text:String,fallback:String=Ddots.defaultTarget)->Decision {
-        let result=HermesRouting.decide(text,contract:DdotsConfig.shared.contract(hub:false))
-        return result.profile.isEmpty ? Decision(profile:fallback,reason:"fallback"):result
+    static func preview(_ text:String, explicitProfile:String? = nil, threadProfile:String? = nil)->Decision {
+        HermesRouting.decide(text, contract:DdotsConfig.shared.contract(hub:true), explicitProfile:explicitProfile,
+                             threadProfile:threadProfile, fallback:DdotsConfig.shared.recipient)
+    }
+    static func decide(_ text:String, fallback:String=Ddots.defaultTarget, explicitProfile:String? = nil, threadProfile:String? = nil)->Decision {
+        HermesRouting.decide(text, contract:DdotsConfig.shared.contract(hub:false), explicitProfile:explicitProfile,
+                             threadProfile:threadProfile, fallback:fallback)
     }
 }

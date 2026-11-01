@@ -4,6 +4,8 @@ struct SlackRoom: Identifiable, Equatable, Codable {
     var id: String
     var name: String
     var direct = false
+    /// Optional so room caches made before this field still decode. Only active rooms enter the list.
+    var isGeneral: Bool? = nil
 }
 
 /// One Slack message as the Web API returns it. Bodies are kept in memory, and in the cache on this Mac that a start is shown from.
@@ -597,36 +599,41 @@ enum SlackNotice {
     /// `dismissed` holds, per thread, how far it had got when the user marked it read with its bell;
     /// a notification or question stays off the count until something newer happens in that thread.
     static func items(_ threads: [SlackThread], now: Date = Date(), dismissed: [String: Double] = [:], confirmed: Set<String> = []) -> [SlackNoticeItem] {
-        var order: [String] = [], found: [String: SlackNoticeItem] = [:]
-        func add(_ id: String, title: String, color: String, thread: String) {
-            if found[id] == nil { order.append(id); found[id] = SlackNoticeItem(id: id, title: title, color: color, threads: []) }
-            found[id]?.threads.append(thread)
+        grouped(threads.sorted { $0.root.date < $1.root.date }.compactMap {
+            item($0, now: now, dismissed: dismissed[$0.id], confirmed: confirmed)
+        })
+    }
+
+    /// One thread contributes to at most one notice. The memo and one-shot calculation share this decision.
+    static func item(_ thread: SlackThread, now: Date, dismissed: Double?, confirmed: Set<String>) -> SlackNoticeItem? {
+        guard thread.loaded, !thread.latestFromUser, hermesState(thread) != .working, !isSettled(thread, confirmed: confirmed) else { return nil }
+        let read = (dismissed ?? -.infinity) >= thread.latest
+        if let request = pendingApproval(thread) {
+            return read ? nil : SlackNoticeItem(id: questionID + ":" + request.speaker, title: request.speaker + " 질문", color: questionColor, threads: [thread.id])
         }
-        // Replies that have not been read yet could hold the answer, so such a thread is not counted until they are.
-        for thread in threads.sorted(by: { $0.root.date < $1.root.date }) where thread.loaded && !thread.latestFromUser {
-            if hermesState(thread) == .working || isSettled(thread, confirmed: confirmed) { continue }
-            let read = (dismissed[thread.id] ?? -.infinity) >= thread.latest
-            if let request = pendingApproval(thread) {
-                if read { continue }
-                add(questionID + ":" + request.speaker, title: request.speaker + " 질문", color: questionColor, thread: thread.id)
-                continue
+        let spoken = thread.messages.filter { $0.fromUser || !SlackText.isThinking($0.body) }
+        let answered = spoken.lastIndex { $0.fromUser } ?? -1
+        guard let stated = spoken.lastIndex(where: { $0.marks.count == 1 && !$0.marks[0].color.isEmpty && !$0.marks[0].text.isEmpty }) else {
+            let root = thread.root
+            if !read, !root.fromUser, !SlackText.isThinking(root.body), answered < 0, now.timeIntervalSince(root.date) < alertWindow, now >= root.date {
+                return SlackNoticeItem(id: alertID, title: "알림", color: alertColor, threads: [thread.id])
             }
-            // A "생각 중" line is not a message yet.
-            let spoken = thread.messages.filter { $0.fromUser || !SlackText.isThinking($0.body) }
-            let answered = spoken.lastIndex { $0.fromUser } ?? -1
-            // The newest post that carries one status speaks for the thread. A digest with a bar per line is a summary, not a post to answer.
-            guard let stated = spoken.lastIndex(where: { $0.marks.count == 1 && !$0.marks[0].color.isEmpty && !$0.marks[0].text.isEmpty }) else {
-                // A character spoke first and the user has not answered: a notification, for a day.
-                let root = thread.root
-                if !read, !root.fromUser, !SlackText.isThinking(root.body), answered < 0, now.timeIntervalSince(root.date) < alertWindow, now >= root.date {
-                    add(alertID, title: "알림", color: alertColor, thread: thread.id)
-                }
-                continue
+            return nil
+        }
+        let status = spoken[stated].marks[0]
+        guard status.text != draft, !isSettled(status.text), answered < stated else { return nil }
+        return SlackNoticeItem(id: status.text, title: status.text == unanswered ? "답 안 한 DM" : status.text, color: status.color, threads: [thread.id])
+    }
+
+    /// Contributions arrive oldest first, preserving both category order and each category's thread order.
+    static func grouped(_ items: [SlackNoticeItem]) -> [SlackNoticeItem] {
+        var order: [String] = [], found: [String: SlackNoticeItem] = [:]
+        for item in items {
+            if found[item.id] == nil {
+                order.append(item.id)
+                found[item.id] = SlackNoticeItem(id: item.id, title: item.title, color: item.color, threads: [])
             }
-            let status = spoken[stated].marks[0]
-            if status.text != draft, !isSettled(status.text), answered < stated {
-                add(status.text, title: status.text == unanswered ? "답 안 한 DM" : status.text, color: status.color, thread: thread.id)
-            }
+            found[item.id]?.threads += item.threads
         }
         func rank(_ id: String) -> Int { id == unanswered ? 0 : id.hasPrefix(questionID + ":") ? 1 : id == alertID ? 2 : 3 }
         return order.enumerated().sorted { (rank($0.element), $0.offset) < (rank($1.element), $1.offset) }.compactMap { found[$0.element] }
@@ -677,9 +684,14 @@ enum Ddots {
             ?? (DdotsConfig.shared.appearance["roomLabels"] as? [String:String])?[place.name] { return ("", label) }
         return nil
     }
-    static func hub(_ rooms: [SlackRoom]) -> String? {
-        guard !channel.isEmpty else { return nil }
-        return rooms.first { !$0.direct && ($0.id == channel || $0.name == channel) }?.id
+    static let preferredHubKey = "slackPreferredHub"
+    static func recordKey(_ channel: String) -> String { room + ":" + channel }
+    /// Active channels only: SlackBridge keeps archived channels in its separate archived list.
+    static func hub(_ rooms: [SlackRoom], preferred: String = "", configured: String = channel) -> String? {
+        let channels = rooms.filter { !$0.direct && $0.id != room && !isTab($0.id) }
+        if !preferred.isEmpty, let chosen = channels.first(where: { $0.id == preferred }) { return chosen.id }
+        if !configured.isEmpty, let home = channels.first(where: { $0.id == configured || $0.name == configured }) { return home.id }
+        return channels.first { $0.isGeneral == true }?.id
     }
     /// Whose thread each one in the channel is, by the thread's stamp: the first character to speak in it.
     /// A thread nobody has answered yet is nobody's.
@@ -1215,7 +1227,7 @@ struct SlackNoticeMemo {
     private var rulesGeneration = -1
     private mutating func refreshRules() {
         let generation = DdotsConfig.shared.generation
-        if rulesGeneration != generation { entries.removeAll(); previous = []; interval = nil; petApprovalInput = nil; rulesGeneration = generation }
+        if rulesGeneration != generation { entries.removeAll(); contributions.removeAll(); previous = []; interval = nil; petApprovalInput = nil; rulesGeneration = generation }
     }
     private struct Entry {
         var thread: SlackThread; var confirmed: Set<String>
@@ -1223,6 +1235,33 @@ struct SlackNoticeMemo {
         var settled: Bool
     }
     private var entries: [String: Entry] = [:]
+    private struct Contribution {
+        var thread: SlackThread
+        var confirmed: Set<String>
+        var dismissed: Double?
+        var interval: Range<Double>
+        var item: SlackNoticeItem?
+    }
+    private var contributions: [String: Contribution] = [:]
+    private(set) var itemThreadEvaluations = 0
+    /// Keep room and combined-tab contributions together; pruning per queried room would evict the other tabs.
+    mutating func retain(_ ids: Set<String>) {
+        contributions = contributions.filter { ids.contains($0.key) }
+    }
+    private mutating func contribution(_ thread: SlackThread, now: Date, dismissed: Double?, confirmed: Set<String>) -> SlackNoticeItem? {
+        let stamp = now.timeIntervalSince1970
+        if let old = contributions[thread.id], old.thread == thread, old.confirmed == confirmed,
+           old.dismissed == dismissed, old.interval.contains(stamp) { return old.item }
+        let item = SlackNotice.item(thread, now: now, dismissed: dismissed, confirmed: confirmed)
+        let start = thread.root.date.timeIntervalSince1970, end = start + SlackNotice.alertWindow
+        let boundaries = [start, end]
+        let lower = boundaries.filter { $0 <= stamp }.max() ?? -.infinity
+        let upper = boundaries.filter { $0 > stamp }.min() ?? .infinity
+        if contributions.count >= 2048 && contributions[thread.id] == nil { contributions.removeAll(keepingCapacity: true) }
+        contributions[thread.id] = Contribution(thread: thread, confirmed: confirmed, dismissed: dismissed, interval: lower..<upper, item: item)
+        itemThreadEvaluations += 1
+        return item
+    }
     private var previous: [SlackThread] = []
     private var dismissed: [String: Double] = [:]
     private var confirmed: Set<String> = []
@@ -1267,7 +1306,9 @@ struct SlackNoticeMemo {
         refreshRules()
         let stamp = now.timeIntervalSince1970
         if let interval, interval.contains(stamp), previous == threads, self.dismissed == dismissed, self.confirmed == confirmed { return value }
-        let result = SlackNotice.items(threads, now: now, dismissed: dismissed, confirmed: confirmed)
+        let result = SlackNotice.grouped(threads.sorted { $0.root.date < $1.root.date }.compactMap {
+            contribution($0, now: now, dismissed: dismissed[$0.id], confirmed: confirmed)
+        })
         itemEvaluations += 1
         guard threads.count <= 2048 else { interval = nil; previous = []; value = []; return result }
         let boundaries = threads.flatMap { [$0.root.date.timeIntervalSince1970, $0.root.date.timeIntervalSince1970 + SlackNotice.alertWindow] }

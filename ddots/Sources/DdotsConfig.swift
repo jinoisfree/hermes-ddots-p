@@ -53,13 +53,6 @@ final class DdotsConfig {
         }
         problems["conversation"] = conversationRules.problems.isEmpty ? nil :
             "사용할 수 없는 대화 규칙(기본값 사용): " + conversationRules.problems.joined(separator: ", ")
-        var invalid:[String]=[]
-        for (room,raw) in HermesRouting.dict(config["routing"]) {
-            for (key,p) in HermesRouting.dict(HermesRouting.dict(raw)["patterns"]) {
-                if let pattern=p as? String,!pattern.isEmpty,HermesRouting.regex(pattern)==nil{invalid.append(room+"."+key)}
-            }
-        }
-        problems["regex"]=invalid.isEmpty ? nil:"사용할 수 없는 수신 규칙: "+invalid.sorted().joined(separator:", ")
         if conversationChanged || !beforeConfig.isEqual(to:config) || !beforeLocal.isEqual(to:local) {revision += 1}
     }
     enum ConfigError:Error {case invalid}
@@ -83,7 +76,7 @@ final class DdotsConfig {
             for path in roots {if let name=displayName(path){members.append(["profile":path==hermes ? "default":path.lastPathComponent,"displayName":name,"aliases":[]])}}
         }
         let fallback=members.first(where: { $0["profile"] as? String == "default" })?["profile"] as? String ?? members.first?["profile"] as? String ?? ""
-        let contract:[String:Any]=["profiles":["fallback":fallback],"aliases":[:],"patterns":[:]]
+        let contract:[String:Any]=["profiles":["fallback":fallback]]
         return ["schemaVersion":1,"members":members,"routing":["base":contract,"hub":contract],"defaults":["recipient":fallback]]
     }
     private func displayName(_ home:URL)->String? {

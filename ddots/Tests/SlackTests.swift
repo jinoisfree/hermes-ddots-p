@@ -1083,7 +1083,62 @@ final class FakeSlack {
         check(snapshot.threads["CCOW"]?.first?.root.hermesReplyState == .closed && snapshot.threads["CCOW"]?.first?.replies.first?.hermesReplyState == .closed, "chat.update without latest_reply change refreshes root and reply")
     }
 
+    /// T-13: the oracle is the unchanged whole calculation below, not the new per-thread implementation.
+    static func incrementalNotices() {
+        let date = Date(timeIntervalSince1970: 1000)
+        func thread(_ id: String, _ body: String, _ marks: [ChatMark] = []) -> SlackThread {
+            var root = ChatMessage(id: id, fromUser: false, speaker: "합성직원", body: body, date: date)
+            root.marks = marks
+            return SlackThread(id: id, room: id == "notice-other" ? "other" : "room", ts: id, root: root,
+                               replies: [], replyCount: 0, loaded: true, latest: 1000, latestFromUser: false)
+        }
+        var threads = [thread("notice-alert", "새 소식입니다"), thread("notice-question", "승인 부탁해 [[버튼: 승인 | 거절 | 의견 | 확인]]"),
+                       thread("notice-status", "진행 보고", [ChatMark(color: "#123456", text: "확인 대기")]), thread("notice-other", "다른 방 소식")]
+        var memo = SlackNoticeMemo(), dismissed: [String: Double] = [:], confirmed: Set<String> = []
+        func compare(_ now: Date, _ label: String) {
+            // Alternate room and combined views, the two callers that previously repeated all message parsing.
+            for view in [threads.filter { $0.room == "room" }, threads, Array(threads.reversed())] {
+                let expected = LegacyNoticeReference.items(view, now: now, dismissed: dismissed, confirmed: confirmed)
+                check(memo.items(view, now: now, dismissed: dismissed, confirmed: confirmed) == expected, "T-13 unchanged notice outputs: " + label)
+                check(SlackNotice.items(view, now: now, dismissed: dismissed, confirmed: confirmed) == expected, "T-13 one-shot notice outputs: " + label)
+            }
+        }
+        compare(date, "initial categories and order")
+        let initial = memo.itemThreadEvaluations
+        compare(date.addingTimeInterval(1), "same contents in both tabs")
+        check(memo.itemThreadEvaluations == initial, "Unchanged rooms share per-thread notice contributions")
+        threads[0].root.body += " 수정"
+        compare(date.addingTimeInterval(2), "one edited thread")
+        check(memo.itemThreadEvaluations == initial + 1, "One edited thread reevaluates only its own notice")
+        dismissed[threads[1].id] = threads[1].latest
+        compare(date.addingTimeInterval(3), "dismissed question")
+        threads[1].latest += 1
+        compare(date.addingTimeInterval(4), "new activity rings again")
+        confirmed.insert(threads[1].root.id)
+        compare(date.addingTimeInterval(5), "confirmed request")
+        threads[2].replies = [ChatMessage(id: "answer", fromUser: true, speaker: "", body: "확인했어", date: date.addingTimeInterval(6))]
+        threads[2].replyCount = 1; threads[2].latest = 1006
+        compare(date.addingTimeInterval(6), "answered status")
+        threads[0].root.hermesReplyState = .working
+        compare(date.addingTimeInterval(7), "working status")
+        threads[0].root.hermesReplyState = .closed
+        compare(date.addingTimeInterval(8), "completed status")
+        threads[0].root.hermesReplyState = nil
+        threads[0].loaded = false
+        compare(date.addingTimeInterval(9), "unloaded replies")
+        threads[0].loaded = true; threads[0].latestFromUser = true
+        compare(date.addingTimeInterval(10), "latest is own message")
+        threads[0].latestFromUser = false
+        for offset in [-1.0, 0, 86399, 86400, 86401, 5] {
+            compare(date.addingTimeInterval(offset), "start, expiry and backwards clock")
+        }
+        threads.removeLast(); memo.retain(Set(threads.map(\.id)))
+        compare(date, "removed thread")
+        print("PASS T-13: independent unchanged calculation and per-thread invalidation")
+    }
+
     static func main() {
+        incrementalNotices()
         let generatedStatusMark = ChatMark(color: "#2EB67D", text: "✅ 답변 완료")
         let attachment = ChatMark(color: "#2EB67D", text: "실제 첨부 내용 · 답변 완료 후 보관")
         precondition(SlackNotice.visibleMarks([generatedStatusMark, attachment]) == [attachment], "Hide exact generated status labels while preserving attachment prose")
@@ -1573,9 +1628,23 @@ final class FakeSlack {
 
         let searchShelf = DdotsArchive(root: FileManager.default.temporaryDirectory.appendingPathComponent("ddots-find-test-\(UUID().uuidString)"))
         let oldLine = DdotsLine(ts: "10.000000", thread: "10.000000", profile: "sns-manager", name: "SNS담당", mine: false, at: 10, text: "옛 기록")
-        var hubLine = oldLine; hubLine.ts = "11.000000"; hubLine.hub = true
-        let recordGroups = SlackSearch.recorded([oldLine, hubLine], members: [DdotsMember(profile: "sns-manager", name: "SNS담당", room: "DCOW")], hub: "CHUB", archive: searchShelf)
-        check(Set(recordGroups.map(\.room)) == ["DCOW", "CHUB"] && SlackSearch.recorded([hubLine], members: [], hub: nil, archive: searchShelf).isEmpty, "record lines map to character rooms, shared lines only to the hub")
+        var hubLine = oldLine; hubLine.ts = "11.000000"; hubLine.hub = true; hubLine.room = "CHUB"
+        let recordGroups = SlackSearch.recorded([oldLine, hubLine], members: [DdotsMember(profile: "sns-manager", name: "SNS담당", room: "DCOW")], archive: searchShelf)
+        check(Set(recordGroups.map(\.room)) == ["DCOW", "CHUB"] && SlackSearch.recorded([hubLine], members: [], archive: searchShelf).first?.room == "CHUB", "record lines map to character rooms; shared lines keep their source even without a current hub")
+        // AC-11..13: a C_OLD archive line can never become a C_NEW message or reply target.
+        let originalHubLine = DdotsLine(ts: "100.000001", thread: "100.000001", profile: "fixture-helper", name: "Helper", mine: false, at: 100, text: "old channel only", hub: true, room: "C_OLD")
+        var unknownHubLine = originalHubLine; unknownHubLine.ts = "101.000001"; unknownHubLine.room = nil
+        let wrongHub = DdotsLine.threads([originalHubLine, unknownHubLine], room: "C_NEW", archive: searchShelf)
+        check(wrongHub.isEmpty, "AC-11/12 C_OLD must not be reidentified as C_NEW; source-less hub records stay hidden")
+        let originalThreads = DdotsLine.threads([originalHubLine, unknownHubLine], room: "C_OLD", archive: searchShelf)
+        check(originalThreads.count == 1 && originalThreads.first?.id == "slack:C_OLD:100.000001" && originalThreads.first?.root.id == "slack:C_OLD:100.000001"
+              && originalThreads.first?.room == "C_OLD", "AC-11/12 original hub IDs and reply destination survive projection")
+        var nextHubLine = originalHubLine; nextHubLine.room = "C_NEW"; nextHubLine.text = "new channel only"
+        let sourceSearch = SlackSearch.recorded([originalHubLine, nextHubLine, unknownHubLine], members: [], archive: searchShelf)
+        check(sourceSearch.count == 2 && Set(sourceSearch.map(\.room)) == ["C_OLD", "C_NEW"]
+              && sourceSearch.first { $0.room == "C_OLD" }?.root.body == "old channel only"
+              && sourceSearch.first { $0.room == "C_NEW" }?.root.body == "new channel only", "AC-13 search groups by original channel even when thread stamps coincide")
+
         let placeholder = searchShelf.recordURL(name: "SNS담당", month: "2020-01").deletingLastPathComponent().appendingPathComponent(".2020-01.jsonl.icloud")
         try! FileManager.default.createDirectory(at: placeholder.deletingLastPathComponent(), withIntermediateDirectories: true)
         try! Data().write(to: placeholder)
@@ -1682,7 +1751,7 @@ final class FakeSlack {
         let store = SlackFileStore(root: folder)
         let sentAt = Date(timeIntervalSince1970: 1_790_000_000)
         let target = store.destination(room: "SNS담당/방", name: "../안내:문.pdf", date: sentAt)
-        check(target.deletingLastPathComponent().lastPathComponent == "SNS담당_방" && target.lastPathComponent.hasSuffix(" _._안내_문.pdf") && target.path.hasPrefix(folder.path + "/"), "names are made safe and stay inside the store: \(target.path)")
+        check(target.deletingLastPathComponent().path == folder.path && target.lastPathComponent.hasSuffix(" _._안내_문.pdf") && target.path.hasPrefix(folder.path + "/"), "names are made safe and stay inside the store: \(target.path)")
         let saved = try? store.save(Data("내용".utf8), room: "SNS담당방", name: "메모.txt", date: sentAt)
         check(saved.flatMap { try? String(contentsOf: $0, encoding: .utf8) } == "내용" && saved == store.destination(room: "SNS담당방", name: "메모.txt", date: sentAt), "a saved file lands where the same message's file is looked for")
         check((try? store.keep(copyOf: saved!, room: "다른방", date: sentAt)) == saved, "a file already in the store is not copied again")
@@ -1704,7 +1773,17 @@ final class FakeSlack {
               && one.flatMap { try? String(contentsOf: $0, encoding: .utf8) } == "하나" && two.flatMap { try? String(contentsOf: $0, encoding: .utf8) } == "둘",
               "two sent files of one name are both kept, and the same file is kept once: \(String(describing: two?.lastPathComponent))")
         check(SlackFileStore.sizeText(0) == "" && SlackFileStore.sizeText(900) == "900B" && SlackFileStore.sizeText(2048) == "2.0KB" && SlackFileStore.sizeText(48_213) == "47KB" && SlackFileStore.sizeText(1_240_000) == "1.2MB", "sizes read naturally")
-        check(SlackFileStore.standard(home: folder).path == folder.appendingPathComponent("Downloads/HermesWorkspace").path, "without iCloud Drive the folder goes under Downloads")
+        let downloads = folder.appendingPathComponent("Downloads")
+        check(SlackFileStore.standard(home: folder) == downloads, "AC-01: received files go directly into the user's Downloads")
+        check(first.deletingLastPathComponent().path == folder.path && store.destination(room: "다른 방", name: "image.png", date: sentAt, id: "F0AAA111") == first,
+              "AC-01: room names never add a subfolder or change a file's destination")
+        let cloud = folder.appendingPathComponent("Library/Mobile Documents/com~apple~CloudDocs")
+        try! FileManager.default.createDirectory(at: cloud, withIntermediateDirectories: true)
+        check(SlackFileStore.standard(home: folder) == downloads, "AC-02: enabling iCloud never changes the local Downloads destination")
+        check(SlackFileStore.standard() == FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first,
+              "AC-02: normal runs use FileManager's current user's Downloads directory")
+        check(DdotsArchive.standard(home: folder) == cloud.appendingPathComponent("HermesWorkspace/ddots"),
+              "changing received-file storage does not relocate shared conversation records")
 
         // Notice
         func status(_ ts: String, _ color: String, _ label: String) -> [String: Any] { var message = bot(ts, "DM \(ts)"); message["attachments"] = [["color": color, "text": label]]; return message }
@@ -2073,6 +2152,31 @@ final class FakeSlack {
               && SlackMention.outgoing(Ddots.addressed("이거 봐줘", to: "진단담당"), members: [SlackMember(profile: "system-doctor", name: "진단담당", user: "U9")]) == "<@U9> 이거 봐줘",
               "a pressed face is sent as a mention of that character")
 
+        // DDOTS-HOME-ROOM-SWITCH AC-01..05: resolution uses only the active list and never picks a DM.
+        let general = SlackRoom(id: "C_GEN", name: "renamed-default", isGeneral: true)
+        let homeA = SlackRoom(id: "C_A", name: "configured-home")
+        let chosenB = SlackRoom(id: "C_B", name: "private-choice")
+        let hubRooms = [general, homeA, chosenB, SlackRoom(id: "D_BAD", name: "direct", direct: true, isGeneral: true)]
+        check(Ddots.hub(hubRooms, configured: "") == "C_GEN", "AC-01: Slack's general marker is the initial hub, independent of its name")
+        check(Ddots.hub(hubRooms, configured: "C_A") == "C_A" && Ddots.hub(hubRooms, configured: "configured-home") == "C_A", "AC-02: configured ID or name takes precedence over general")
+        check(Ddots.hub(hubRooms, preferred: "C_B", configured: "C_A") == "C_B", "AC-03: the user's ID takes precedence over configuration and general")
+        check(Ddots.hub(hubRooms, preferred: "C_GONE", configured: "C_A") == "C_A"
+              && Ddots.hub(hubRooms, preferred: "D_BAD", configured: "C_GONE") == "C_GEN", "AC-04: missing or direct choices fall through")
+        check(Ddots.hub([chosenB], configured: "C_GONE") == nil && Ddots.hub([homeA], configured: "C_A") == "C_A", "AC-05: old unmarked rooms retain configured home or DM fallback")
+        let legacyRoomData = Data("{\"id\":\"C_OLD\",\"name\":\"old cache\",\"direct\":false}".utf8)
+        let legacyRoom = try! JSONDecoder().decode(SlackRoom.self, from: legacyRoomData)
+        check(legacyRoom.isGeneral == nil && Ddots.hub([legacyRoom], configured: "") == nil, "AC-05: old room cache decodes without is_general")
+        check(try! JSONDecoder().decode(SlackRoom.self, from: JSONEncoder().encode(general)) == general, "general marker survives cache serialization")
+        let marked = FakeSlack()
+        marked.nextPage = [["id": "C_GEN", "name": "renamed-default", "is_general": true],
+                           ["id": "C_B", "name": "private-choice", "is_private": true],
+                           ["id": "C_ARCHIVED", "name": "archived-choice", "is_archived": true, "is_general": true]]
+        let markedView = SlackBridge(api: marked.api).sync(SlackBridge.Request(active: "C_GEN", open: true, characters: characters), now: start)
+        check(markedView.rooms.first { $0.id == "C_GEN" }?.isGeneral == true && Ddots.hub(markedView.rooms, configured: "") == "C_GEN", "bridge preserves general on later pages")
+        check(markedView.archived.contains { $0.id == "C_ARCHIVED" } && !markedView.rooms.contains { $0.id == "C_ARCHIVED" }
+              && Ddots.hub(markedView.rooms, preferred: "C_ARCHIVED", configured: "") == "C_GEN", "AC-04: archived choice is excluded at the bridge boundary")
+        check(Ddots.hub(markedView.rooms, preferred: "C_B", configured: "") == "C_B", "AC-06b: private channels are valid choices")
+
         // Threads of the rooms on screen are read first, newest first
         let busy = FakeSlack()
         busy.history["CCOW"] = (1...6).map { ["ts": "10\($0).000001", "user": "UGUEST", "text": "채널 글 \($0)", "reply_count": 1, "thread_ts": "10\($0).000001", "latest_reply": "20\($0).000001"] }
@@ -2403,6 +2507,18 @@ final class FakeSlack {
             check(DdotsRoute.decide(text).profile == row["base"], "Base contract: " + text)
             check(DdotsRoute.preview(text).profile == row["hub"], "Hub contract: " + text)
         }
+
+        // Without a hub, ordinary new posts choose the configured default DM, never a content category.
+        let dmCast = [DdotsMember(profile: Ddots.defaultTarget, name: "Default", room: "D_DEFAULT"),
+                      DdotsMember(profile: "other", name: "Other", room: "D_OTHER")]
+        check(Ddots.hub([]) == nil, "No channel leaves the combined DM room without a hub")
+        for text in ["안녕", "위키 찾아줘", "일정 등록해줘", "ㅎ 메일 읽어줘", "개인비서 확인해줘"] {
+            let decision = DdotsRoute.decide(text)
+            check(dmCast.first { $0.profile == decision.profile }?.room == "D_DEFAULT", "No hub or mention chooses defaults.recipient DM: " + text)
+        }
+        check(DdotsRoute.decide("안녕", fallback: "", threadProfile: "other").profile == "other", "A reply keeps its thread owner")
+        check(DdotsRoute.decide("@Other 안녕", explicitProfile: "other", threadProfile: Ddots.defaultTarget).profile == "other", "A real mention overrides the thread owner")
+        check(!DdotsRoute.decide("안녕", fallback: "").profile.isEmpty, "Without a configured recipient the routing fallback remains available")
 
         // A single own post deletes only its ts, even if replies arrive after the UI snapshot.
         do {
@@ -2954,5 +3070,44 @@ final class FakeSlack {
             check(!memo.needsPetApproval([thread], rooms: ["TEST"], confirmed: []), "completed custom exchange clears pet")
         }
         print("SlackTests passed")
+    }
+}
+
+/// Unchanged pre-optimization calculation, retained only as the independent T-13 oracle.
+private enum LegacyNoticeReference {
+    static func items(_ threads: [SlackThread], now: Date = Date(), dismissed: [String: Double] = [:], confirmed: Set<String> = []) -> [SlackNoticeItem] {
+        var order: [String] = [], found: [String: SlackNoticeItem] = [:]
+        func add(_ id: String, title: String, color: String, thread: String) {
+            if found[id] == nil { order.append(id); found[id] = SlackNoticeItem(id: id, title: title, color: color, threads: []) }
+            found[id]?.threads.append(thread)
+        }
+        // Replies that have not been read yet could hold the answer, so such a thread is not counted until they are.
+        for thread in threads.sorted(by: { $0.root.date < $1.root.date }) where thread.loaded && !thread.latestFromUser {
+            if SlackNotice.hermesState(thread) == .working || SlackNotice.isSettled(thread, confirmed: confirmed) { continue }
+            let read = (dismissed[thread.id] ?? -.infinity) >= thread.latest
+            if let request = SlackNotice.pendingApproval(thread) {
+                if read { continue }
+                add(SlackNotice.questionID + ":" + request.speaker, title: request.speaker + " 질문", color: SlackNotice.questionColor, thread: thread.id)
+                continue
+            }
+            // A "생각 중" line is not a message yet.
+            let spoken = thread.messages.filter { $0.fromUser || !SlackText.isThinking($0.body) }
+            let answered = spoken.lastIndex { $0.fromUser } ?? -1
+            // The newest post that carries one status speaks for the thread. A digest with a bar per line is a summary, not a post to answer.
+            guard let stated = spoken.lastIndex(where: { $0.marks.count == 1 && !$0.marks[0].color.isEmpty && !$0.marks[0].text.isEmpty }) else {
+                // A character spoke first and the user has not answered: a notification, for a day.
+                let root = thread.root
+                if !read, !root.fromUser, !SlackText.isThinking(root.body), answered < 0, now.timeIntervalSince(root.date) < SlackNotice.alertWindow, now >= root.date {
+                    add(SlackNotice.alertID, title: "알림", color: SlackNotice.alertColor, thread: thread.id)
+                }
+                continue
+            }
+            let status = spoken[stated].marks[0]
+            if status.text != SlackNotice.draft, !SlackNotice.isSettled(status.text), answered < stated {
+                add(status.text, title: status.text == SlackNotice.unanswered ? "답 안 한 DM" : status.text, color: status.color, thread: thread.id)
+            }
+        }
+        func rank(_ id: String) -> Int { id == SlackNotice.unanswered ? 0 : id.hasPrefix(SlackNotice.questionID + ":") ? 1 : id == SlackNotice.alertID ? 2 : 3 }
+        return order.enumerated().sorted { (rank($0.element), $0.offset) < (rank($1.element), $1.offset) }.compactMap { found[$0.element] }
     }
 }

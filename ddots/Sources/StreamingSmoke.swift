@@ -1,5 +1,4 @@
 import AppKit
-
 extension AppDelegate {
     func verifyStreaming(destination: URL) {
         Task { @MainActor [self] in
@@ -9,6 +8,10 @@ extension AppDelegate {
                 print("PASS streaming: \(label)")
             }
             await ensureDdotsSmoke(destination: destination)
+            if let index = CommandLine.arguments.firstIndex(of: "--ui-smoke-publish-scale"), index + 1 < CommandLine.arguments.count {
+                await verifyScaledPublishStreaming(destination: destination, scaleURL: URL(fileURLWithPath: CommandLine.arguments[index + 1]))
+                return
+            }
             await settle()
             let chat = slack.model
             let now = Date().timeIntervalSince1970

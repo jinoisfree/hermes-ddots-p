@@ -22,6 +22,8 @@ extension SlackController {
         archive = DdotsArchive(root: root ?? DdotsArchive.standard(), retention: retention)
         keepsRecord = keeps ?? Self.recordKeptHere()
         if persists { recordThrough = UserDefaults.standard.dictionary(forKey: "ddotsThrough") as? [String: Double] ?? [:] }
+        // The old single-hub cursor identifies no channel; never inherit it for a new selection.
+        recordThrough[Ddots.room] = nil; recordScanned[Ddots.room] = nil
         loadKept(initial: true)
     }
 
@@ -76,10 +78,13 @@ extension SlackController {
     func keptThreads(for rooms: [String]) -> [SlackThread] {
         guard let archive, !kept.isEmpty else { return [] }
         var result: [SlackThread] = []
-        // What was said in the channel is shown with the channel, the rest with the character's own conversation.
-        let hub = model.ddotsHub.flatMap { rooms.contains($0) ? $0 : nil }
+        // DdotsLine.threads excludes shared lines whose source is another channel or unknown.
+        // Direct conversations retain the existing character-to-current-DM mapping.
+        let directRooms = Set(model.ddotsMembers.map(\.room))
+        let channels = rooms.filter { !directRooms.contains($0) }
         for member in model.ddotsMembers {
-            for (slot, room, shared) in [(member.profile, member.room, false), (member.profile + ":hub", hub ?? "", true)] where rooms.contains(room) {
+            let places = [(member.profile, member.room, false)] + channels.map { (member.profile + ":hub:" + $0, $0, true) }
+            for (slot, room, shared) in places where rooms.contains(room) {
                 if let ready = keptThreads[slot], ready.revision == keptRevision, ready.room == room { result += ready.threads; continue }
                 let threads = DdotsLine.threads((kept[member.profile] ?? []).filter { ($0.hub ?? false) == shared }, room: room, archive: archive)
                 keptThreads[slot] = (keptRevision, room, threads)
@@ -96,8 +101,8 @@ extension SlackController {
         for member in model.ddotsMembers where recordScanned[member.profile].map({ Date().timeIntervalSince($0) > Self.rescanAfter }) ?? true {
             due[member.room] = max(0, (recordThrough[member.profile] ?? 0) - Self.scanMargin)
         }
-        if let hub = model.ddotsHub, recordScanned[Ddots.room].map({ Date().timeIntervalSince($0) > Self.rescanAfter }) ?? true {
-            due[hub] = max(0, (recordThrough[Ddots.room] ?? 0) - Self.scanMargin)
+        if let hub = model.ddotsHub, recordScanned[Ddots.recordKey(hub)].map({ Date().timeIntervalSince($0) > Self.rescanAfter }) ?? true {
+            due[hub] = max(0, (recordThrough[Ddots.recordKey(hub)] ?? 0) - Self.scanMargin)
         }
         return due.filter { !retention.excludes($0.key) }
     }
@@ -108,7 +113,7 @@ extension SlackController {
         if !scanned.isEmpty { record(scanned: scanned) }
         guard !through.isEmpty else { return }
         for member in model.ddotsMembers { if !retention.excludes(member.room), let began = through[member.room] { recordThrough[member.profile] = began; recordScanned[member.profile] = Date() } }
-        if let hub = model.ddotsHub, !retention.excludes(hub), let began = through[hub] { recordThrough[Ddots.room] = began; recordScanned[Ddots.room] = Date() }
+        if let hub = model.ddotsHub, !retention.excludes(hub), let began = through[hub] { recordThrough[Ddots.recordKey(hub)] = began; recordScanned[Ddots.recordKey(hub)] = Date() }
         saveThrough()
     }
 
@@ -117,8 +122,9 @@ extension SlackController {
     private func saveThrough() {
         guard !closing, persists, recordBacklog.isEmpty, !recordWriting, recordWaiting.isEmpty else { return }
         var values = recordThrough
+        values[Ddots.room] = nil
         for member in model.ddotsMembers where retention.excludes(member.room) { values[member.profile] = nil }
-        if let hub = model.ddotsHub, retention.excludes(hub) { values[Ddots.room] = nil }
+        if let hub = model.ddotsHub, retention.excludes(hub) { values[Ddots.recordKey(hub)] = nil }
         if UserDefaults.standard.dictionary(forKey: "ddotsThrough") as? [String: Double] != values { UserDefaults.standard.set(values, forKey: "ddotsThrough") }
     }
 

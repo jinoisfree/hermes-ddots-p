@@ -1,18 +1,16 @@
 import Foundation
 
-/// Where files that pass through the Slack side are kept: one folder per room inside a folder in iCloud Drive,
-/// so they are on every device. Nothing is written until a file is opened or sent.
+/// Files opened or sent through Slack stay in this Mac's Downloads folder.
+/// Nothing is written until a file is opened or sent.
 struct SlackFileStore {
-    static let folderName = "HermesWorkspace"
     static let largest = 200 * 1024 * 1024
     var root: URL
 
-    /// The folder in this Mac's iCloud Drive, or the same name under Downloads when iCloud Drive is off.
-    static func standard(home: URL = FileManager.default.homeDirectoryForCurrentUser) -> URL {
-        let cloud = home.appendingPathComponent("Library/Mobile Documents/com~apple~CloudDocs")
-        var isFolder: ObjCBool = false
-        let base = FileManager.default.fileExists(atPath: cloud.path, isDirectory: &isFolder) && isFolder.boolValue ? cloud : home.appendingPathComponent("Downloads")
-        return base.appendingPathComponent(folderName)
+    /// `home` supplies an isolated user's Downloads folder for checks; normal runs use FileManager's user directory.
+    static func standard(home: URL? = nil) -> URL {
+        if let home { return home.appendingPathComponent("Downloads") }
+        return FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first
+            ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Downloads")
     }
 
     private static func cleaned(_ name: String) -> String {
@@ -47,7 +45,7 @@ struct SlackFileStore {
     /// The same message's file always lands on the same path, so opening it twice does not fetch it twice.
     /// `id` is Slack's ID for the file; a file saved before names carried it is still where `id: ""` says.
     func destination(room: String, name: String, date: Date, id: String = "") -> URL {
-        root.appendingPathComponent(Self.safe(room)).appendingPathComponent(Self.stamp.string(from: date) + " " + Self.named(name, id: id))
+        root.appendingPathComponent(Self.stamp.string(from: date) + " " + Self.named(name, id: id))
     }
 
     func save(_ data: Data, room: String, name: String, date: Date, id: String = "") throws -> URL {

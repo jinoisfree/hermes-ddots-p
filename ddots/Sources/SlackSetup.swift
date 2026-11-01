@@ -176,7 +176,7 @@ line(300, "내일 오전 일정 정리해서 알려줘", replies: 1, latest: 280
                 let rooms: [[String: Any]] = [["id": "CCOW", "name": "SNS담당방"], ["id": "CTRUTH", "name": "검토 채널"], ["id": "CTEAM", "name": "teamstarter_user"], ["id": "Dassistant", "is_im": true, "user": "Uassistant"]]
                 let direct: [[String: Any]] = [["id": "DDS", "is_im": true, "user": "UDS"], ["id": "DCOW", "is_im": true, "user": "UCOW"],
                                                ["id": "DJANG", "is_im": true, "user": "UJANG"], ["id": "DRACCOON", "is_im": true, "user": "URACCOON"]]
-                body["channels"] = (ddots ? rooms + direct : rooms) + (hub ? [["id": "CHUB", "name": "workspace"]] : [])
+                body["channels"] = (ddots ? rooms + direct : rooms) + (hub ? [["id": "CHUB", "name": "workspace", "is_general": true], ["id": "CHIDDEN", "name": "hidden-private", "is_private": true], ["id": "C_ARCHIVED", "name": "archived", "is_archived": true]] : [])
             case "conversations.history":
                 switch parameters["channel"] {
                 case "CCOW": body["messages"] = cow
@@ -754,13 +754,127 @@ extension AppDelegate {
                     verifyDdotsFind(destination: destination) { [self] in
                         try? FileManager.default.removeItem(at: shelf.root)
                         verifyDdotsActivity(destination: destination) {
-                            try? "ddots hub smoke passed\n".write(to: destination.appendingPathComponent("ddots-hub.txt"), atomically: true, encoding: .utf8)
-                            NSApp.terminate(nil)
+                            Task { @MainActor in
+                                verifyHubSwitch(destination: destination)
+                                try? "ddots hub smoke passed\n".write(to: destination.appendingPathComponent("ddots-hub.txt"), atomically: true, encoding: .utf8)
+                                NSApp.terminate(nil)
+                            }
                         }
                     }
                 }
             }
         }
+    }
+    /// Exercises both user entry points, fallback and relay on the real controller with a fake Slack transport.
+    @MainActor func verifyHubSwitch(destination: URL) {
+        let model = slack.model
+        func check(_ value: Bool, _ message: String) { smokeCheck(value, "home switch: " + message) }
+        let home = SlackRoom(id: Ddots.room, name: Ddots.roomName)
+        let beforeDefaults = UserDefaults.standard.string(forKey: Ddots.preferredHubKey)
+        check(model.preferredHub.isEmpty && model.hubActionTitle(for: home) == nil, "no reset without a user choice")
+        check(model.hubCandidates.contains { $0.id == "CHIDDEN" } && !model.hubCandidates.contains { $0.id == "C_ARCHIVED" || $0.direct }, "all active public/private channels, no archived rooms or DMs")
+        guard let hidden = model.hubCandidates.first(where: { $0.id == "CHIDDEN" }) else { smokeFailed("hidden fixture is listed") }
+        check(model.hubActionTitle(for: hidden) == "고정 채널로 지정", "AC-06 exact context menu label")
+        check(model.hubActionTitle(for: home) == nil && model.hubActionTitle(for: SlackRoom(id: Ddots.stack, name: "DM")) == nil
+              && model.hubActionTitle(for: SlackRoom(id: "Dassistant", name: "assistant", direct: true)) == nil
+              && model.hubActionTitle(for: SlackRoom(id: "CHUB", name: "workspace")) == nil, "DM, group, existing hub have no designation action")
+        model.draft = ""; model.writeNewPost(); model.draft = "old channel draft"
+        model.hide("CHIDDEN"); model.muted.insert("CHIDDEN")
+        showOptions()
+        settingsTabs?.selectTabViewItem(withIdentifier: "연결과 동기화")
+        refreshHomeRoomSettings()
+        guard let picker = homeRoomPicker else { smokeFailed("fixed channel picker is rendered") }
+        check(picker.accessibilityLabel() == "고정 채널" && picker.itemTitles.first == "기본(Slack 기본 채널)", "AC-06b exact picker label and default item")
+        check(picker.itemArray.dropFirst().map { $0.representedObject as? String ?? "" } == model.hubCandidates.map(\.id), "picker includes hidden/muted private channels in name order")
+        picker.selectItem(at: picker.itemArray.firstIndex { $0.representedObject as? String == "CHIDDEN" }!)
+        _ = picker.sendAction(picker.action, to: picker.target)
+        check(model.ddotsHub == "CHIDDEN" && model.postRoom == "CHIDDEN" && model.target == nil && model.draft.isEmpty, "picker changes display and new-post destination immediately and keeps old draft aside")
+        check(!model.hidden.contains("CHIDDEN") && !model.muted.contains("CHIDDEN") && model.hubActionTitle(for: home) == "기본 채널로 되돌리기", "selected hidden channel is unhidden/unmuted and reset becomes available")
+        check(!model.rooms.contains { $0.id == "CHIDDEN" } && model.groups.values.flatMap { $0 }.contains { $0.id == "CHUB" }, "new hub is excluded and previous hub returns to its section")
+        check(model.ddotsHubName == "hidden-private" && model.headerDescription(home) == "#hidden-private", "AC-09/10 use channel name while title stays unchanged")
+        capture(destination: destination.appendingPathComponent("fixed-channel-settings"))
+        model.draft = "private channel draft"
+        model.chooseHub("")
+        check(model.ddotsHub == "CHUB" && model.postRoom == "CHUB" && model.draft == "old channel draft", "reset follows configuration/general and restores that channel's unsent words")
+        model.draft = ""
+        model.chooseHub("CHIDDEN")
+        check(model.draft == "private channel draft", "reselecting a channel restores only its own draft")
+        model.draft = ""
+        let shared = slack.syncedState()
+        check(shared["preferredHub"] == "CHIDDEN", "AC-08 shared state includes channel ID")
+        let other = SlackController(); other.persists = false
+        other.applySynced(["preferredHub": SyncEntry(v: shared["preferredHub"], at: 10, by: "fixture")])
+        check(other.model.preferredHub == "CHIDDEN", "another Mac adopts the same selection")
+        slack.applySynced(["preferredHub": SyncEntry(v: "C_MISSING", at: 11, by: "fixture")])
+        check(model.preferredHub == "C_MISSING" && model.ddotsHub == "CHUB", "missing shared choice falls through without erasing the saved ID")
+        slack.applySynced(["preferredHub": SyncEntry(v: "Dassistant", at: 12, by: "fixture")])
+        check(model.preferredHub == "Dassistant" && model.ddotsHub == "CHUB", "DM shared choice falls through")
+        slack.applySynced(["preferredHub": SyncEntry(v: "C_ARCHIVED", at: 13, by: "fixture")])
+        check(model.ddotsHub == "CHUB" && model.preferredHub == "C_ARCHIVED", "archived shared choice falls through")
+        slack.applySynced(["preferredHub": SyncEntry(v: "CHIDDEN", at: 14, by: "fixture")])
+        check(model.ddotsHub == "CHIDDEN", "reappearing valid shared selection wins again")
+        model.chooseHub("")
+        check(slack.syncedState()["preferredHub"] == "", "reset is an explicit shared value so another Mac clears its selection")
+        other.applySynced(["preferredHub": SyncEntry(v: "", at: 15, by: "fixture")])
+        check(other.model.preferredHub.isEmpty, "shared reset clears another Mac")
+        check(UserDefaults.standard.string(forKey: Ddots.preferredHubKey) == beforeDefaults, "smoke choices never touch real preferences")
+        optionsWindow?.orderOut(nil)
+        verifyHubArchiveSwitch(destination: destination)
+        try? "PASS AC-01..10: fixed channel menu/picker, hidden/private choices, priority, fallback, names, drafts and shared selection/reset; no real writes.\n"
+            .write(to: destination.appendingPathComponent("home-room-switch.txt"), atomically: true, encoding: .utf8)
+    }
+    /// Actual controller projection and scan cursors, with a temporary synthetic record only.
+    func verifyHubArchiveSwitch(destination: URL) {
+        func check(_ value: Bool, _ message: String) { smokeCheck(value, "archive switch: " + message) }
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("ddots-hub-archive-" + UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let archive = DdotsArchive(root: root)
+        let first = DdotsLine(ts: "100.000001", thread: "100.000001", profile: "fixture-helper", name: "Helper", mine: false, at: 100, text: "channel A only", hub: true, room: "C_OLD")
+        var second = first; second.ts = "200.000001"; second.thread = second.ts; second.at = 200; second.room = "C_NEW"; second.text = "channel B only"
+        var unknown = first; unknown.ts = "300.000001"; unknown.thread = unknown.ts; unknown.at = 300; unknown.room = nil
+        try! archive.append([first, second, unknown], names: ["fixture-helper": "Helper"])
+        let month = DdotsArchive.month(Date(timeIntervalSince1970: 100))
+        let recordURL = archive.recordURL(name: "Helper", month: month)
+        let before = try! Data(contentsOf: recordURL)
+        let controller = SlackController(); controller.persists = false
+        controller.archive = archive; controller.keepsRecord = true; controller.recordWriter = DdotsWriter()
+        controller.model.ddotsMembers = [DdotsMember(profile: "fixture-helper", name: "Helper", room: "D_FIXTURE")]
+        controller.model.source = .slack; controller.model.selected = Ddots.room
+        controller.model.onOpen = nil; controller.model.onRead = nil
+        controller.kept = ["fixture-helper": archive.read(month: month)]
+        controller.model.changeHub(to: "C_OLD")
+        let a = controller.keptThreads(for: ["C_OLD"])
+        check(a.count == 1 && a.first?.root.body == "channel A only" && a.first?.id == "slack:C_OLD:100.000001", "AC-11/12 only A's identified record is shown in A")
+        controller.model.threads = a; controller.model.pick(a[0], foldable: false)
+        check(controller.model.target?.room == "C_OLD", "A reply remains addressed to the original channel")
+        controller.recordThrough[Ddots.room] = 9_000_000; controller.recordScanned[Ddots.room] = Date()
+        check(controller.roomsToScan()["C_OLD"] == 0, "AC-14 unidentified legacy cursor cannot skip A's first scan")
+        controller.absorb(scanned: [:], through: ["C_OLD": 800])
+        let aScan = controller.recordScanned["ddots:C_OLD"]
+        check(controller.recordThrough["ddots:C_OLD"] == 800 && aScan != nil && controller.roomsToScan()["C_OLD"] == nil, "A keeps its own completed scan and rescan timing")
+        controller.model.changeHub(to: "C_NEW")
+        let b = controller.keptThreads(for: ["C_NEW"])
+        check(b.count == 1 && b.first?.root.body == "channel B only" && b.first?.id == "slack:C_NEW:200.000001", "AC-15 switching to B cannot remap A's conversation")
+        controller.model.threads = b; controller.model.pick(b[0], foldable: false)
+        check(controller.model.target?.room == "C_NEW" && controller.roomsToScan()["C_NEW"] == 0, "B uses its own reply destination and starts its own scan")
+        let previousChannel = controller.keptThreads(for: ["C_OLD"])
+        check(previousChannel == a, "AC-13 a search can reopen A as an ordinary channel while B is fixed")
+        controller.model.selected = "C_OLD"; controller.model.threads = previousChannel
+        controller.model.pick(previousChannel[0], foldable: false)
+        check(controller.model.target?.room == "C_OLD", "a reopened search result still replies to A")
+        controller.model.selected = Ddots.room
+        controller.absorb(scanned: [:], through: ["C_NEW": 1_200])
+        check(controller.recordThrough["ddots:C_OLD"] == 800 && controller.recordThrough["ddots:C_NEW"] == 1_200
+              && controller.recordScanned["ddots:C_OLD"] == aScan, "B's progress cannot overwrite A's cursor or timestamp")
+        let found = SlackSearch.recorded(controller.kept["fixture-helper"]!, members: controller.model.ddotsMembers, archive: archive)
+        check(found.count == 2 && Set(found.map(\.room)) == ["C_OLD", "C_NEW"], "AC-12/13 whole search preserves source channels and excludes unidentified rows")
+        controller.model.changeHub(to: "C_OLD")
+        check(controller.keptThreads(for: ["C_OLD"]) == a && controller.roomsToScan()["C_OLD"] == nil, "returning to A restores A's records and recent scan state")
+        controller.recordScanned["ddots:C_OLD"] = .distantPast
+        check(controller.roomsToScan()["C_OLD"] == 680 && controller.recordThrough["ddots:C_NEW"] == 1_200, "A resumes its own cursor after the rescan interval")
+        check(try! Data(contentsOf: recordURL) == before, "unknown legacy rows and every record byte remain untouched")
+        try? "PASS AC-11..15: actual controller A→B→A records, source IDs/replies, isolated progress/timestamps, legacy cursor ignored, source-less rows hidden and record bytes preserved.\n"
+            .write(to: destination.appendingPathComponent("home-room-archive.txt"), atomically: true, encoding: .utf8)
     }
     func verifyDdotsFind(destination: URL, done: @escaping () -> Void) {
         verifyDdotsFindBatches(destination: destination) { [self] in verifyDdotsFindOld(destination: destination, done: done) }
@@ -1010,7 +1124,7 @@ extension AppDelegate {
             model.draft = "인스타 DM 온 거 있어?"
             if let jang = model.ddotsMembers.first(where: { $0.profile == "system-doctor" }) {
                 model.aim(jang); check(model.recipient?.profile == "system-doctor", "A pressed face wins over the words")
-                model.aim(jang); check(model.recipient?.profile == "sns-manager", "Pressing it again lets the words decide")
+                model.aim(jang); check(model.recipient?.profile == Ddots.defaultTarget, "Pressing it again restores the configured default")
             }
             if let cowFace = model.ddotsMembers.first(where: { $0.profile == "sns-manager" }) {
                 model.aim(cowFace); model.draft = "이거 확인해줘"

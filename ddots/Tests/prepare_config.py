@@ -19,11 +19,11 @@ value=translate(fixture)
 for row in value['routing_samples']:
     for old,new in profiles.items():row['text']=row['text'].replace('@'+old, '@'+new)
 
-for contract in value['routing'].values():
-    for profile,name in names.items():contract['aliases'].setdefault(profile,[]).append(name)
-    contract['aliases']['personal-secretary'] += ['개인비서','어둠의 개인비서']
-    contract['aliases']['sns-manager'].append('SNS담당야')
-value['members']=[{'profile':p,'displayName':n,'aliases':value['routing']['base']['aliases'].get(p,[])} for p,n in names.items()]
+aliases={profiles.get(m['profile'],m['profile']):list(m.get('aliases',[])) for m in fixture['members']}
+for profile,name in names.items():aliases.setdefault(profile,[]).append(name)
+aliases['personal-secretary'] += ['개인비서','어둠의 개인비서']
+aliases['sns-manager'].append('SNS담당야')
+value['members']=[{'profile':p,'displayName':n,'aliases':aliases.get(p,[])} for p,n in names.items()]
 value['features']={'homeRoom':'workspace'}
 value['rooms']={'SNS담당방':'sns-manager','업무비서방':'work-assistant','maintenance':'system-doctor','maintencance':'system-doctor','C_TEST_NOTICE':'system-doctor'}
 (root/'ddots-config.json').write_text(json.dumps(value,ensure_ascii=False))

@@ -47,7 +47,11 @@ struct DdotsArchive {
 
     /// Inside the shared folder in this Mac's iCloud Drive, beside what the Slack side keeps there.
     static func standard(home: URL = FileManager.default.homeDirectoryForCurrentUser) -> URL {
-        SlackFileStore.standard(home: home).appendingPathComponent(folder)
+        // Conversation records keep their shared location independently of per-Mac downloaded files.
+        let cloud = home.appendingPathComponent("Library/Mobile Documents/com~apple~CloudDocs")
+        var isFolder: ObjCBool = false
+        let base = FileManager.default.fileExists(atPath: cloud.path, isDirectory: &isFolder) && isFolder.boolValue ? cloud : home.appendingPathComponent("Downloads")
+        return base.appendingPathComponent("HermesWorkspace").appendingPathComponent(folder)
     }
 
     private static func formatter(_ format: String) -> DateFormatter {
@@ -379,7 +383,8 @@ extension DdotsLine {
     /// Lines of one character grouped into the threads they were said in, oldest first.
     static func threads(_ lines: [DdotsLine], room: String, archive: DdotsArchive) -> [SlackThread] {
         var groups: [String: [DdotsLine]] = [:], order: [String] = []
-        for line in lines {
+        // Shared-channel records keep their original destination. Unidentified legacy lines stay on disk only.
+        for line in lines where line.hub != true || line.room == room {
             if groups[line.thread] == nil { order.append(line.thread) }
             groups[line.thread, default: []].append(line)
         }

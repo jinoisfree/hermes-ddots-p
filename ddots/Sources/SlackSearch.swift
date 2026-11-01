@@ -82,10 +82,10 @@ extension SlackSearch {
             return ($0.latest, $0.id) > ($1.latest, $1.id)
         }
     }
-    static func recorded(_ lines: [DdotsLine], members: [DdotsMember], hub: String?, archive: DdotsArchive) -> [SlackThread] {
+    static func recorded(_ lines: [DdotsLine], members: [DdotsMember], archive: DdotsArchive) -> [SlackThread] {
         var rooms: [String: [DdotsLine]] = [:]
         for line in lines {
-            let room = line.hub == true ? hub : members.first { $0.profile == line.profile }?.room
+            let room = line.hub == true ? line.room : members.first { $0.profile == line.profile }?.room
             if let room { rooms[room, default: []].append(line) }
         }
         return rooms.flatMap { DdotsLine.threads($0.value, room: $0.key, archive: archive) }

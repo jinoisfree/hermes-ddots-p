@@ -49,6 +49,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
     var panel: PetPanel!
     var pet: PetView!
     var dashboard: NSWindow?
+    var homeRoomPicker: NSPopUpButton?
     var chatThemePicker: NSPopUpButton?
     var optionsWindow: NSWindow?
     var settingsTabs: NSTabView?
@@ -577,7 +578,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
                 else if CommandLine.arguments.contains("--ui-smoke-slack") { Task { @MainActor in await self.measureHeaderSlide(destination: destination); self.verifySlack(destination: destination) } }
                 else if CommandLine.arguments.contains("--ui-smoke-ddots") { self.verifyDdots(destination: destination) }
                 else if CommandLine.arguments.contains("--ui-smoke-approval-bubble") { self.verifyApprovalBubble(destination: destination) }
-                else if CommandLine.arguments.contains("--ui-smoke-chat") { self.verifyChatInteraction(destination: destination) }
+                else if CommandLine.arguments.contains("--ui-smoke-chat") {
+                    Task { @MainActor in
+                        await self.verifyWritingShimmer(destination: destination)
+                        self.verifyChatInteraction(destination: destination)
+                    }
+                }
                 else if CommandLine.arguments.contains("--ui-smoke-bubble-hidden") { self.verifyBubbleReveal(destination: destination) }
                 else { NSApp.terminate(nil) }
             }
@@ -749,6 +755,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
     }
     private var genieSlackConnected = false
     func slackChanged() {
+        refreshHomeRoomSettings()
         let workStart = StallTrace.now
         defer { StallTrace.shared.record("slack.changed", since: workStart) }
         if genieSlackConnected && !slack.connected { pet.invalidateGeniePicture() }
@@ -1840,7 +1847,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
                 [resetChat], [nameLabel, nameField, saveName, nameHint],
                 [title, value, slider, hint, reset] + endpoints,
                 [bubble], [tap], [action("펫 위치 초기화", #selector(resetPosition))]])
+            let homeTitle = NSTextField(labelWithString: "고정 채널")
+            homeTitle.font = .systemFont(ofSize: 14, weight: .semibold)
+            homeTitle.frame = NSRect(x:24,y:38,width:312,height:22)
+            let homePicker = NSPopUpButton(frame: NSRect(x:24,y:0,width:312,height:30), pullsDown: false)
+            homePicker.setAccessibilityLabel("고정 채널")
+            homePicker.identifier = NSUserInterfaceItemIdentifier(Ddots.preferredHubKey)
+            homePicker.target = self; homePicker.action = #selector(changeHomeRoom(_:))
+            homeRoomPicker = homePicker
             page("연결과 동기화", [
+                [homeTitle, homePicker],
                 [action("Slack 연결…", #selector(configureSlack))],
                 [action("Hermes 연결…", #selector(configureHermes))],
                 [action("다른 Mac과 캐릭터 공유…", #selector(configureRelay))],
@@ -1861,6 +1877,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
 
         }
         fitOptionsToScreen()
+        refreshHomeRoomSettings()
         bubbleCheckbox?.state = pet.bubbleAlwaysShown ? .on : .off
         vaultDeleteCheckbox?.state = (UserDefaults.standard.object(forKey: ShrimpReceipts.setting) == nil || UserDefaults.standard.bool(forKey: ShrimpReceipts.setting)) ? .on : .off
         refreshThreeTapSettings()
@@ -1876,6 +1893,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         petNameHint?.stringValue = "1~20자 · 저장하면 모든 화면에 적용됩니다."
         petNameHint?.textColor = .secondaryLabelColor
         NSApp.activate(ignoringOtherApps: true); optionsWindow?.makeKeyAndOrderFront(nil)
+    }
+    func refreshHomeRoomSettings() {
+        guard let picker = homeRoomPicker else { return }
+        let model = slack.model
+        let choices = [("기본(Slack 기본 채널)", "")] + model.hubCandidates.map { ("#" + $0.name, $0.id) }
+        if picker.itemTitles != choices.map(\.0) || picker.itemArray.map({ $0.representedObject as? String ?? "" }) != choices.map(\.1) {
+            picker.removeAllItems()
+            for (title, id) in choices { picker.addItem(withTitle: title); picker.lastItem?.representedObject = id }
+        }
+        // An unavailable saved choice remains saved; the popup shows the fallback until it reappears.
+        picker.selectItem(at: choices.firstIndex { $0.1 == model.preferredHub } ?? 0)
+    }
+    @objc func changeHomeRoom(_ sender: NSPopUpButton) {
+        guard let id = sender.selectedItem?.representedObject as? String else { return }
+        slack.model.chooseHub(id)
     }
     private func fitOptionsToScreen() {
         guard let window = optionsWindow,

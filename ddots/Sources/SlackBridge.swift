@@ -1046,7 +1046,7 @@ final class SlackBridge {
                 if deletedUsers.contains(user) { continue }
                 rooms.append(SlackRoom(id: id, name: state.users[user] ?? "개인 대화", direct: true))
             } else {
-                rooms.append(SlackRoom(id: id, name: channel["name"] as? String ?? id))
+                rooms.append(SlackRoom(id: id, name: channel["name"] as? String ?? id, isGeneral: channel["is_general"] as? Bool))
             }
         }
         snapshot.rooms = rooms.filter { !$0.direct }.sorted { $0.name < $1.name } + rooms.filter(\.direct).sorted { $0.name < $1.name }

@@ -3,6 +3,8 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 source "$ROOT/scripts/check_build_env.sh"
 mkdir -p "$ROOT/.build/module-cache"
+xcrun swiftc -swift-version 5 "$ROOT/Sources/WritingShimmer.swift" "$ROOT/Tests/WritingShimmerTests.swift" -o "$ROOT/.build/WritingShimmerTests"
+"$ROOT/.build/WritingShimmerTests"
 xcrun swiftc -swift-version 5 "$ROOT/Sources/AppIdentity.swift" "$ROOT/Tests/PreviousInstallationTests.swift" -o "$ROOT/.build/PreviousInstallationTests"
 "$ROOT/.build/PreviousInstallationTests"
 TEST_CONFIG=$(mktemp -d "${TMPDIR:-/tmp}/ddots-config-tests.XXXXXX")

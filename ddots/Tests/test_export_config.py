@@ -43,17 +43,28 @@ class ConfigExportTests(unittest.TestCase):
         def read(path):
             calls.append(path.name)
             return config if path.name=='config.yaml' else {'display_name':'Guide','secret':'sk-not-exported'}
-        with tempfile.TemporaryDirectory() as d, patch.object(E,'yaml_load',side_effect=read), patch.object(E.importlib,'import_module',side_effect=lambda n:router if n.endswith('common_router') else project):
+        with tempfile.TemporaryDirectory() as d, patch.object(E,'yaml_load',side_effect=read), patch.object(E.importlib,'import_module',side_effect=lambda n:router if n.endswith('common_router') else project) as load:
             first=E.export(Path(d));second=E.export(Path(d))
             self.assertEqual(first,second)
             self.assertGreaterEqual(len(first['routing_samples']),30)
             self.assertNotIn('not-exported',json.dumps(first))
             self.assertEqual(set(calls),{'config.yaml','profile.yaml'})
+            self.assertEqual([call.args[0] for call in load.call_args_list],
+                             ['hermes_router.common_router', 'hermes_router.project_threads'] * 2)
 
-    def test_numeric_error_does_not_echo_input(self):
-        secret='sk-do-not-echo'
-        with self.assertRaises(ValueError) as caught:E.contract({'typo_correction':{'max_distance':secret}})
-        self.assertNotIn(secret,str(caught.exception))
+    def test_missing_router_reports_team_kit_lib(self):
+        config = {'gateway': {'common_router': {'profiles': {'fallback': 'guide'}}}}
+        with tempfile.TemporaryDirectory() as d, patch.object(E, 'yaml_load', return_value=config), \
+             patch.object(E.importlib, 'import_module', side_effect=ModuleNotFoundError('missing')):
+            with self.assertRaisesRegex(RuntimeError, 'team-kit.*lib.*PYTHONPATH.*--team-kit-lib'):
+                E.export(Path(d))
+
+    def test_classification_metadata_is_not_exported(self):
+        result = E.contract({'profiles': {'fallback': 'helper', 'wiki': 'guide'},
+                             'patterns': {'wiki': 'wiki'}, 'aliases': {'guide': ['Guide']},
+                             'alias_order': ['guide'], 'address_prefixes': {'enabled': True},
+                             'typo_correction': {'max_distance': 'unused'}})
+        self.assertEqual(result, {'profiles': {'fallback': 'helper'}, 'cross_owner': {}})
 
     def test_yaml_error_does_not_echo_source(self):
         from types import SimpleNamespace

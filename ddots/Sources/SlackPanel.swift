@@ -476,15 +476,41 @@ final class SlackModel: ObservableObject {
     var isDdots: Bool { source == .slack && selected == Ddots.room }
     /// The Slack channel new posts in ddots are written to, when there is one.
     @Published var ddotsHub: String?
+    @Published var preferredHub = ""
+    /// All active channels, including ones hidden from the sidebar or muted.
+    @Published var hubCandidates: [SlackRoom] = []
+    var ddotsHubName: String? { hubCandidates.first { $0.id == ddotsHub }?.name }
+    var onChooseHub: (() -> Void)?
+    /// A changed hub is a different destination even though the visible tab keeps its internal ID.
+    /// Keep unsent words with their old channel and drop any reply aimed into that channel.
+    func changeHub(to hub: String?) {
+        guard hub != ddotsHub else { return }
+        if isDdots {
+            drafts.put(currentDraft, at: writing ?? draftPlace)
+            cancelFollowup(); replyTo = nil; picked = nil; newPost = true
+        }
+        lastAim[Self.roomKey(SlackDraftPlace(workspace: workspace, shown: Ddots.room, aim: ""))] = nil
+        ddotsHub = hub
+        if isDdots { writing = draftPlace; show(drafts.take(at: draftPlace)) }
+    }
+    func chooseHub(_ id: String) {
+        guard id.isEmpty || hubCandidates.contains(where: { $0.id == id }), id != preferredHub else { return }
+        preferredHub = id
+        onChooseHub?()
+    }
+    func hubActionTitle(for room: SlackRoom) -> String? {
+        if room.id == Ddots.room { return preferredHub.isEmpty ? nil : "기본 채널로 되돌리기" }
+        guard room.id != ddotsHub, !room.direct, !Ddots.isTab(room.id), hubCandidates.contains(where: { $0.id == room.id }) else { return nil }
+        return "고정 채널로 지정"
+    }
     /// What ddots shows: the channel alone when there is one, so the room is the same conversation Slack shows there;
     /// else every character's own conversation together.
     var ddotsShown: [String] { ddotsHub.map { [$0] } ?? ddotsMembers.map(\.room) }
     /// Every conversation the ddots record is kept from, shown in the room or not.
     var ddotsRooms: Set<String> { Set(ddotsMembers.map(\.room) + (ddotsHub.map { [$0] } ?? [])) }
-    /// True once a face was pressed for the next message. Without it the words themselves say who the message is for,
-    /// by the rules the shared room goes by.
+    /// True once a face was pressed for the next message. Otherwise the server default handles new posts.
     @Published var ddotsPicked = false
-    /// Who a new post goes to: the pressed face, else whoever the words are for, else the usual character.
+    /// A pressed face or real mention wins; ordinary new posts use the configured default.
     var postProfile: String { postProfile(for: draft) }
     private func postProfile(for text: String) -> String {
         if ddotsPicked { return ddotsTarget }
@@ -501,12 +527,16 @@ final class SlackModel: ObservableObject {
         if isDdots && callable.isEmpty {
             callable = ddotsMembers.map { SlackMember(profile: $0.profile, name: $0.name, user: "preview-" + $0.profile) }
         }
-        let mentioned = SlackMention.profiles(in: text, members: callable)
-        if !mentioned.isEmpty {
-            let profile = mentioned.count == 1 ? mentioned.first! : HermesRouting.str(HermesRouting.dict(DdotsConfig.shared.contract(hub: ddotsHub != nil)["cross_owner"])["profile"])
-            if !profile.isEmpty { return DdotsRoute.Decision(profile: profile, reason: "mention") }
-        }
-        return ddotsHub != nil ? DdotsRoute.preview(text) : DdotsRoute.decide(text)
+        let shown: String
+        if isDdots, let first = ddotsMembers.first {
+            shown = Ddots.post(text, to: first, cast: ddotsMembers, users: ddotsUsers, members: callable, prependCall: false).shown
+        } else { shown = text }
+        let mentioned = SlackMention.profiles(in: shown, members: callable)
+        let explicit = mentioned.count == 1 ? mentioned.first :
+            (mentioned.isEmpty ? nil : HermesRouting.str(HermesRouting.dict(DdotsConfig.shared.contract(hub: ddotsHub != nil)["cross_owner"])["profile"]))
+        let owner = target(for: text).flatMap { ddotsOwner($0)?.profile }
+        return ddotsHub != nil ? DdotsRoute.preview(text, explicitProfile: explicit, threadProfile: owner)
+            : DdotsRoute.decide(text, explicitProfile: explicit, threadProfile: owner)
     }
     /// The room a new post lands in. ddots is not a room in Slack: it is the channel when there is one,
     /// else that character's own conversation.
@@ -519,7 +549,11 @@ final class SlackModel: ObservableObject {
     }
     /// Who the next message in ddots reaches: the thread's own character when answering, else whoever a new post is for.
     var recipient: DdotsMember? {
-        if let thread = target { return ddotsOwner(thread) }
+        if let thread = target {
+            let decision = route(draft)
+            if decision.reason == "mention" { return ddotsMembers.first { $0.profile == decision.profile } }
+            return ddotsOwner(thread)
+        }
         return ddotsMembers.first { $0.profile == postProfile }
     }
     /// Empty automatic drafts light nobody; explicit selections and replies retain their recipient.
@@ -813,7 +847,7 @@ final class SlackModel: ObservableObject {
     func answer(_ thread: SlackThread, approve: Bool) {
         if approve, let relay = mailRelay(thread, ask: "그대로 발송해줘. 수신자·제목·본문은 초안과 같게.") {
             if let missing = absent(from: relay.post) {
-                onRefuse?("\(missing.name)\(Ddots.particle(missing.name)) #\(Ddots.channel) 채널에 없어요. 슬랙에서 채널에 초대한 뒤 다시 보내 주세요.")
+                onRefuse?("\(missing.name)\(Ddots.particle(missing.name)) #\(ddotsHubName ?? "") 채널에 없어요. 슬랙에서 채널에 초대한 뒤 다시 보내 주세요.")
                 return
             }
             relayed = (relay.text, relay.post)
@@ -1249,7 +1283,8 @@ final class SlackModel: ObservableObject {
     var onEditHeader: ((String) -> Void)?
     func headerTitle(_ room: SlackRoom) -> String { headerTitles[room.id] ?? room.name }
     func headerDescription(_ room: SlackRoom) -> String {
-        headerDescriptions[room.id] ?? (room.direct ? "함께 나누는 대화" : "조직원들의 소식과 대화")
+        if room.id == Ddots.room, let name = ddotsHubName { return "#" + name }
+        return headerDescriptions[room.id] ?? (room.direct ? "함께 나누는 대화" : "조직원들의 소식과 대화")
     }
     /// The zone a dragged room is held over, to be marked.
     @Published var dropZone: Int?
@@ -1812,7 +1847,7 @@ final class SlackModel: ObservableObject {
     /// The room a thread is in, as it is written: "#SNS담당방", or "@SNS담당" for a direct conversation.
     func place(of thread: SlackThread) -> String {
         // The channel behind ddots is in no list of rooms.
-        if thread.room == ddotsHub { return "#" + Ddots.channel }
+        if thread.room == ddotsHub { return ddotsHubName.map { "#" + $0 } ?? "" }
         return (rooms + stacked + grouped + hiddenRooms).first { $0.id == thread.room }.map { ($0.direct ? "@" : "#") + $0.name } ?? ""
     }
     func link(to thread: SlackThread) -> String? { SlackCopy.link(workspace: workspace, room: thread.room, ts: thread.ts) }
@@ -1848,7 +1883,7 @@ final class SlackModel: ObservableObject {
         guard !text.isEmpty || !attachments.isEmpty, let room = target?.room ?? postRoom else { return }
         // A character who is not in the channel would never hear the call. The words stay where they were typed.
         if let post = hubPost(text), let missing = absent(from: post) {
-            onRefuse?("\(missing.name)\(Ddots.particle(missing.name)) #\(Ddots.channel) 채널에 없어요. 슬랙에서 채널에 초대한 뒤 다시 보내 주세요.")
+            onRefuse?("\(missing.name)\(Ddots.particle(missing.name)) #\(ddotsHubName ?? "") 채널에 없어요. 슬랙에서 채널에 초대한 뒤 다시 보내 주세요.")
             return
         }
         // A pressed face is for the one message; the next goes by its own words again.
@@ -1946,6 +1981,10 @@ extension ChatView {
                                 }
                             }
                             .contextMenu {
+                                if let title = slack.hubActionTitle(for: room) {
+                                    Button(title) { slack.chooseHub(room.id == Ddots.room ? "" : room.id) }
+                                    Divider()
+                                }
                                 if !Ddots.isTab(room.id), let retentionRoom = room.id == Ddots.room ? slack.ddotsHub : room.id {
                                     Toggle("이 방은 보관하지 않기", isOn: Binding(get: { slack.unkept.contains(retentionRoom) }, set: { _ in slack.toggleUnkept(retentionRoom) }))
                                     Divider()
@@ -2689,17 +2728,21 @@ extension ChatView {
                     .body.components(separatedBy: "\n").dropFirst().first
                     ?? (displayed.messages.contains(where: \.streaming) ? "답변을 작성하고 있습니다" : "답변을 준비하고 있습니다")
                 let started = thread.messages.last(where: { $0.fromUser })?.date ?? thread.root.date
-                TimelineView(.animation(minimumInterval: 1.0 / 12, paused: !model.expanded)) { timeline in
+                ChatActivityTimeline(model: model, interval: shouldReduceMotion ? 1 : 1.0 / 24) { date in
                     HStack(spacing: 9) {
                         Canvas { context, size in
-                            let phase = Int(timeline.date.timeIntervalSinceReferenceDate * 5) % 6
-                            for index in 0..<6 {
-                                let rect = CGRect(x: CGFloat(index % 2) * 5, y: CGFloat(index / 2) * 5, width: 2.5, height: 2.5)
-                                context.fill(Path(roundedRect: rect, cornerRadius: 0.6), with: .color(quiet.opacity(shouldReduceMotion || phase == index ? 0.9 : 0.3)))
+                            let levels = WritingSpinner.levels(at: date.timeIntervalSinceReferenceDate, reduceMotion: shouldReduceMotion)
+                            for (index, point) in WritingSpinner.positions.enumerated() where levels[index] > 0 {
+                                let rect = CGRect(x: CGFloat(point.column) * 5, y: CGFloat(point.row) * 5, width: 2.5, height: 2.5)
+                                context.fill(Path(roundedRect: rect, cornerRadius: 0.6), with: .color((dark ? Color.primary : quiet).opacity(levels[index])))
                             }
                         }.frame(width: 8, height: 13).accessibilityHidden(true)
+                            .writingSmokeMeasure("spinner:" + thread.id)
                         Text(activity).foregroundColor(quiet).lineLimit(2).fixedSize(horizontal: false, vertical: true)
-                        Text("\(max(0, Int(timeline.date.timeIntervalSince(started))))초")
+                            .writingShimmer(at: date, reduceMotion: shouldReduceMotion,
+                                            highlight: .primary.opacity(0.5))
+                            .writingSmokeMeasure("stop:" + thread.id)
+                        Text("\(max(0, Int(date.timeIntervalSince(started))))초")
                             .monospacedDigit().foregroundColor(quiet)
                     }
                 }
@@ -3011,7 +3054,7 @@ extension ChatView {
             if let thread = slack.target {
                 return (slack.project(thread)?.title ?? String(MessageFormat.plain(thread.root.body).prefix(36))) + " · 이어서 말하기"
             }
-            if !slack.ddotsPicked { return "workspace에 새 요청" }
+            if !slack.ddotsPicked, let name = slack.ddotsHubName { return name + "에 새 요청" }
             guard let who = slack.recipient else { return slack.target == nil ? Ddots.roomName : "스레드에 답글" }
             return slack.target == nil ? who.name + "에게 새 글" : who.name + " 스레드에 답글"
         }
