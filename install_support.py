@@ -1,4 +1,4 @@
-"""Korean setup and code-only updates. Owner files are never update payloads."""
+"""Korean setup and code updates that only supplement plugin opt-ins in owner config."""
 from __future__ import annotations
 import argparse
 from copy import deepcopy
@@ -90,6 +90,28 @@ def missing_merge(current, defaults):
         if key not in result: result[key] = deepcopy(value)
         elif isinstance(result[key], dict) and isinstance(value, dict): result[key] = missing_merge(result[key], value)
     return result
+
+
+def plugin_activation(config):
+    section = config.get('plugins', {})
+    if not isinstance(section, dict): raise SetupError('plugins 설정은 객체 형식이어야 합니다.')
+    enabled = section.get('enabled', [])
+    disabled = section.get('disabled', [])
+    if any(not isinstance(values, list) or any(not isinstance(name, str) for name in values)
+           for values in (enabled, disabled)):
+        raise SetupError('plugins.enabled와 plugins.disabled는 플러그인 이름 목록이어야 합니다.')
+    return enabled, disabled
+
+
+def enable_managed_plugins(config, plugins, slug):
+    enabled, disabled = plugin_activation(config)
+    enabled = list(enabled)
+    for plugin in plugins:
+        if plugin in disabled:
+            print(f'{slug}: {plugin}은 plugins.disabled에 있어 활성 목록에 추가하지 않았습니다. 사용하려면 disabled에서 해제하세요.')
+        elif plugin not in enabled:
+            enabled.append(plugin)
+    config.setdefault('plugins', {})['enabled'] = enabled
 
 
 def safe_path(home, relative):
@@ -309,12 +331,25 @@ def modern_main(root, argv=None):
     previous = json.loads(records[-1].read_text()) if records else {'agents': [], 'default': None, 'destinations': {}, 'managed': {}}
     if records and previous.get('version') != 2:
         raise SetupError('이전 구조의 설치 기록입니다. 기존 플러그인과 설정을 보존하는 전환 점검이 먼저 필요합니다. 파일은 변경하지 않았습니다.')
+    plugins = ('quiet-logs', 'team-kit', 'team-delegation')
     if args.check:
         if not previous['agents']: raise SetupError('설치 기록이 없습니다.')
         checks = {**previous.get('managed', {}), **{n: {'link': v} for n, v in previous.get('connections', {}).items()}}
         issues = [name for name, expected in checks.items() if signature(home / name) != expected]
         print(json.dumps({'scope': 'managed-code', 'checked': len(checks), 'differences': issues}, ensure_ascii=False))
-        return int(bool(issues))
+        activation_issues = []
+        for slug in previous['agents']:
+            config_path = safe_path(home, Path(previous['destinations'][slug]) / 'config.yaml')
+            enabled, disabled = plugin_activation(mapping(config_path, home))
+            for plugin in plugins:
+                if plugin in disabled:
+                    activation_issues.append({'agent': slug, 'plugin': plugin, 'reason': 'disabled',
+                        'remedy': '사용하려면 config의 plugins.disabled에서 해제한 뒤 --update를 실행하세요.'})
+                elif plugin not in enabled:
+                    activation_issues.append({'agent': slug, 'plugin': plugin, 'reason': 'missing-enabled',
+                        'remedy': '--update를 실행해 plugins.enabled를 보충하세요.'})
+        print(json.dumps({'scope': 'plugin-activation', 'differences': activation_issues}, ensure_ascii=False))
+        return int(bool(issues or activation_issues))
     if args.update:
         if not previous['agents']: raise SetupError('이 설치 도우미의 기존 설치 기록이 없습니다.')
         selected = previous['agents'];default = previous['default'];destinations = previous['destinations'];packs = previous.get('packs', [])
@@ -348,7 +383,6 @@ def modern_main(root, argv=None):
             packs = [name for name in packs if name not in removed]
             if removed: print('이 운영체제에서 사용할 수 없어 제외: ' + ', '.join(removed))
     validate_distribution(root)
-    plugins = {'quiet-logs', 'team-kit', 'team-delegation'}
     files, links = code_payload(root, plugins)
     managed = {name: {'sha256': hashlib.sha256(body).hexdigest()} for name, body in files.items()}
     managed.update({name: {'link': target} for name, target in links.items()})
@@ -373,6 +407,7 @@ def modern_main(root, argv=None):
                 'team-delegation': {'enabled': True, 'settings': {'packs': {'enabled': packs}}}})
             config_path = destination / 'config.yaml'
             merged = missing_merge(mapping(config_path, home), config)
+            enable_managed_plugins(merged, plugins, slug)
             # These lists describe the explicit installation choice, not private account data.
             for plugin in ('team-kit', 'team-delegation'):
                 chosen = merged['plugins']['entries'][plugin]['settings']['packs']
@@ -399,6 +434,13 @@ def modern_main(root, argv=None):
         if not (home / 'memories/USER.md').exists(): files['memories/USER.md'] = b''
         for name in ('shared/reply-buttons.json', 'schemas/shared-ledgers.json'):
             if not (home / name).exists(): files[name] = (root / name).read_bytes()
+    else:
+        for slug in selected:
+            relative = Path(destinations[slug]) / 'config.yaml'
+            config = mapping(safe_path(home, relative), home)
+            updated = deepcopy(config)
+            enable_managed_plugins(updated, plugins, slug)
+            if updated != config: files[str(relative)] = encoded(updated)
     receipt = {'version': 2, 'agents': selected, 'default': default, 'destinations': destinations, 'packs': packs, 'managed': managed, 'connections': previous.get('connections', {}) if args.update else {name: target for name, target in links.items() if not name.startswith('plugin-store/')}}
     sequence = f'{len(records)+1:06d}'
     files['.starter/receipts/' + sequence + '.json'] = encoded(receipt)
