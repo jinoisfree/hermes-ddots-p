@@ -14,6 +14,8 @@ class UpdateTests(unittest.TestCase):
     def transition(self, previous=True):
         from update_channel import policy, PUBLIC_BUNDLE
         _, previous_bundle, _ = policy('private')
+        if previous_bundle == PUBLIC_BUNDLE:
+            self.skipTest('생성된 공개 트리에는 별도 비공개 설치 식별자가 없어 전환 시험을 적용하지 않습니다.')
         for app, bundle in [(self.dest, previous_bundle), (self.source, PUBLIC_BUNDLE)]:
             (app / 'Contents').mkdir()
             info = dict(CFBundleIdentifier=bundle)
@@ -23,7 +25,8 @@ class UpdateTests(unittest.TestCase):
 
     def test_public_transition_requires_declared_previous_identity_before_stopping(self):
         self.transition(previous=False)
-        with patch.object(m, 'verify'), patch.object(m, 'stop') as stop:
+        with patch.object(m, 'verify'), patch.object(m, 'stop') as stop, \
+                patch.object(m, 'launch'), patch.object(m, 'run'):
             with self.assertRaisesRegex(RuntimeError, '이전 설치'):
                 m.update(self.source, self.dest, channel='public', migrate_private=True)
             stop.assert_not_called()
@@ -47,10 +50,13 @@ class UpdateTests(unittest.TestCase):
 
     def test_public_update_cannot_silently_replace_private_installation(self):
         self.transition()
-        with patch.object(m, 'verify'), patch.object(m, 'stop') as stop:
+        with patch.object(m, 'verify'), patch.object(m, 'stop') as stop, \
+                patch.object(m, 'launch') as launch, patch.object(m, 'run') as run:
             with self.assertRaisesRegex(RuntimeError, 'migrate-private'):
                 m.update(self.source, self.dest, channel='public')
             stop.assert_not_called()
+            launch.assert_not_called()
+            run.assert_not_called()
 
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()

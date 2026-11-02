@@ -254,7 +254,7 @@
   "ddots/Tests/test_install.py": "11e2a486365bf133a64a6d7dd8e0bd7bb3904b50af910ad5df9d8c48f2a4f50c",
   "ddots/Tests/test_release_update.py": "f2778a7a78db8c7092e5e39f09f56b59973283a7787a7c50605757ca31dd9f54",
   "ddots/Tests/test_update_channel.py": "680826535901d8064bae1875458a9653be1edd2bacb01091449adb4904fdf7ee",
-  "ddots/Tests/test_update_installed.py": "c81cec8e3464868a7df3831a8b7acc229f0cf1a31af7a0765d064d4e0a8b4c74",
+  "ddots/Tests/test_update_installed.py": "fe215e4fafbea282ea15d10b3866ef46b7ff36a51b8b042b4d726ed435ca6e0c",
   "ddots/docs/slack-app-manifest.json": "6a212104c40156e8bcff5f34e4ff732bf8f85ce870f9d74bca9dcf761dc41d55",
   "ddots/docs/\uc124\uc815.md": "ede18e0598d78564db472552d8eba419deefc294b41bda4882005af59b9ca76b",
   "ddots/requirements-build.txt": "570c9387510a35edf1e287600993944ebc8ee5af602c809cf00cd57e2b723779",
