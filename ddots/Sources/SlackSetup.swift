@@ -739,26 +739,41 @@ extension AppDelegate {
         check(written.map(\.profile) == ["system-doctor", "system-doctor"] && written.contains { $0.mine } && !shelf.read(month: DdotsArchive.month(Date())).contains { $0.text == "아무나 대답해줘" },
               "A thread of the channel is written with the character who answered it, an unanswered one not yet: \(written.map(\.text))")
         model.select("DJANG")
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.7) { [self] in
+        Task { @MainActor [self] in
+            // Selecting a room requests history through Slack's pacing gate. A fixed delay can
+            // inspect only the archived thread, especially with the public fixture's room order.
+            func waitForThreads(_ room: String, ready: () -> Bool) async {
+                let began = ProcessInfo.processInfo.systemUptime
+                let deadline = began + 10
+                let initial = model.threads.map { $0.root.body }
+                while !ready() && ProcessInfo.processInfo.systemUptime < deadline {
+                    slack.tick()
+                    try? await Task.sleep(nanoseconds: 100_000_000)
+                }
+                let report = "\(room): waited \(ProcessInfo.processInfo.systemUptime - began)s; initial=\(initial); final=\(model.threads.map { $0.root.body })\n"
+                let file = destination.appendingPathComponent("ddots-hub-readiness.txt")
+                let previous = (try? String(contentsOf: file, encoding: .utf8)) ?? ""
+                try? (previous + report).write(to: file, atomically: true, encoding: .utf8)
+            }
+            await waitForThreads("DJANG") { model.threads.count == 2 && model.threads.allSatisfy { $0.room == "DJANG" } }
             check(model.threads.count == 2 && model.threads.allSatisfy { $0.room == "DJANG" }, "A character's own room keeps its own lines, the record's too, and leaves the channel out: \(model.threads.map(\.room))")
             model.select(Ddots.room)
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.7) { [self] in
-                check(model.threads.map(\.room) == ["CHUB", "CHUB"], "Back in ddots each of its threads is there once")
-                capture(destination: destination.appendingPathComponent("ddots-hub"))
-                // What the room says when the character a post calls is not in the channel.
-                model.members["CHUB"] = (model.members["CHUB"] ?? []).filter { $0.user != "UJANG" }
-                model.draft = "@진단담당 오늘 토큰 얼마나 썼어?"; model.send()
-                check(model.notice?.hasPrefix("진단담당이 #workspace 채널에 없어요.") == true && model.draft == "@진단담당 오늘 토큰 얼마나 썼어?", "The room says why the post was not sent: \(String(describing: model.notice))")
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [self] in
-                    capture(destination: destination.appendingPathComponent("ddots-hub-absent"))
-                    verifyDdotsFind(destination: destination) { [self] in
-                        try? FileManager.default.removeItem(at: shelf.root)
-                        verifyDdotsActivity(destination: destination) {
-                            Task { @MainActor in
-                                verifyHubSwitch(destination: destination)
-                                try? "ddots hub smoke passed\n".write(to: destination.appendingPathComponent("ddots-hub.txt"), atomically: true, encoding: .utf8)
-                                NSApp.terminate(nil)
-                            }
+            await waitForThreads(Ddots.room) { model.threads.map(\.room) == ["CHUB", "CHUB"] }
+            check(model.threads.map(\.room) == ["CHUB", "CHUB"], "Back in ddots each of its threads is there once")
+            capture(destination: destination.appendingPathComponent("ddots-hub"))
+            // What the room says when the character a post calls is not in the channel.
+            model.members["CHUB"] = (model.members["CHUB"] ?? []).filter { $0.user != "UJANG" }
+            model.draft = "@진단담당 오늘 토큰 얼마나 썼어?"; model.send()
+            check(model.notice?.hasPrefix("진단담당이 #workspace 채널에 없어요.") == true && model.draft == "@진단담당 오늘 토큰 얼마나 썼어?", "The room says why the post was not sent: \(String(describing: model.notice))")
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [self] in
+                capture(destination: destination.appendingPathComponent("ddots-hub-absent"))
+                verifyDdotsFind(destination: destination) { [self] in
+                    try? FileManager.default.removeItem(at: shelf.root)
+                    verifyDdotsActivity(destination: destination) {
+                        Task { @MainActor in
+                            verifyHubSwitch(destination: destination)
+                            try? "ddots hub smoke passed\n".write(to: destination.appendingPathComponent("ddots-hub.txt"), atomically: true, encoding: .utf8)
+                            NSApp.terminate(nil)
                         }
                     }
                 }
