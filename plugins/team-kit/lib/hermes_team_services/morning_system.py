@@ -1,7 +1,7 @@
 """One owner DM for Doctor changes, new error kinds, queued night maintenance and the 03:00 새벽 작업.
 
 2026-10-28 사용자 결정: 평일 08:30(휴일 11:00) private-service-27. 새벽 작업(night_batch)의 진단 판정·자동 수정을
-싣고, 이 글이 새벽 Paseo 작업의 스레드가 된다(결과·확인·롤백 버튼은 스레드에). 보낸 뒤 새벽에 보류한
+싣고, 이 글이 새벽 Paseo 작업의 스레드가 된다(결과·확인·되돌리기 버튼은 스레드에). 보낸 뒤 새벽에 보류한
 글(기억 정리 학습 채널 보고·공개판 플러그인 질문)을 원래 채널에 올린다.
 """
 
@@ -101,9 +101,12 @@ def render_nights(nights):
         if night.get('job'):
             bad = True
             lines.append('*새벽 자동 수정*\n' + '\n'.join(f'  • {R.layout.excerpt(t, 90)}' for t in night.get('items') or [])
-                         + f"\n  ↳ Paseo `{night['job']}` — 결과와 확인·롤백 버튼은 이 글의 스레드에 올린다. 푸시는 확인 뒤다.")
+                         + f"\n  ↳ Paseo `{night['job']}` — 결과와 확인·되돌리기 버튼은 이 글의 스레드에 올린다. 푸시는 확인 뒤다.")
         if night.get('check_error'):
             lines.append(f"  • 새벽 점검 읽기 실패: `{night['check_error']}`")
+        if night.get('enqueue_error'):
+            bad = True
+            lines.append(f"  • 새벽 자동 수정 넘기기 실패: `{night['enqueue_error']}` — 확정 결함이 Paseo에 가지 않았다")
         retention = night.get('retention')
         if retention:
             if retention.get('error'):
@@ -128,7 +131,7 @@ def render(doctor, errors, notices, nights=()):
     if owner_rows:
         lines.append('*소유자가 할 일*\n' + '\n'.join('  • ' + R.layout.excerpt(row.get('short', ''), 400) for row in owner_rows))
     elif any(n.get('job') for n in nights):
-        lines.append('*처리 상태*\n자동 수정 결과는 이 스레드에 이어진다. 완료 보고의 확인·롤백 버튼에서 결정해 줘.')
+        lines.append('*처리 상태*\n자동 수정 결과는 이 스레드에 이어진다. 완료 보고의 확인·되돌리기 버튼에서 결정해 줘.')
     lines.extend(night_lines)
     if broken or recovered:
         lines.append('*매일 점검*')

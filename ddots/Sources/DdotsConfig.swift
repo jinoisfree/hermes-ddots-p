@@ -20,7 +20,8 @@ final class DdotsConfig {
         var folder:ObjCBool=false
         let base=FileManager.default.fileExists(atPath:cloud.path,isDirectory:&folder) && folder.boolValue ? cloud:home.appendingPathComponent("Downloads")
         self.root=root ?? env["DDOTS_CONFIG_ROOT"].map{URL(fileURLWithPath:$0)} ?? base.appendingPathComponent("HermesWorkspace/ddots")
-        self.hermes=hermes ?? env["HERMES_HOME"].map{URL(fileURLWithPath:$0)} ?? home.appendingPathComponent(".hermes")
+        // The same Hermes home the bridge reads (HERMES_HOME, saved choice, gateway LaunchAgent, ~/.hermes).
+        self.hermes=hermes ?? HermesLocator.shared.locate() ?? HermesLocator.shared.fallbackHome
         refresh()
     }
     var status:String { lock.lock();defer{lock.unlock()};refresh(force:false);return problems.keys.sorted().compactMap{problems[$0]}.joined(separator:" · ") }
@@ -246,7 +247,7 @@ final class ConversationRules {
     func text(_ key: String) -> String { (values["texts"] as! [String: String])[key]! }
     func color(_ key: String) -> String { (values["colors"] as! [String: String])[key]!.uppercased() }
     func list(_ key: String) -> [String] { (values["sets"] as! [String: [String]])[key]! }
-    func number(_ key: String) -> Double { (values["numbers"] as! [String: Any])[key] as! Double }
+    func number(_ key: String) -> Double { ((values["numbers"] as! [String: Any])[key] as! NSNumber).doubleValue }
     func matches(_ key: String, _ text: String) -> Bool {
         expressions[key]?.firstMatch(in: text, range: NSRange(text.startIndex..., in: text)) != nil
     }

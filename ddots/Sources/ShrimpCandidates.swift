@@ -23,7 +23,7 @@ enum ShrimpCandidates {
             guard let first = lines.first else { continue }
             var folder = "", start = 1
             if lines.count > 1 && lines[1].hasPrefix("   ") { folder = String(lines[1].dropFirst(3)); start = 2 }
-            if let m = match("^(\\d+)\\. (?!→ )(.+)$", first), lines.count == start {
+            if let m = match("^([0-9]{1,6})\\. (?!→ )(.+)$", first), lines.count == start {
                 guard (m[2] as NSString).pathExtension.count > 0 else { continue }
                 candidates.append(Candidate(number: Int(m[1])!, file: m[2], folder: folder, location: ""))
                 // The number is set apart from the name, which may itself start with one ("5. 8. 메모.md").
@@ -32,7 +32,7 @@ enum ShrimpCandidates {
                 spans.append(Span(range: NSRange(location: offset + number + 1, length: (m[2] as NSString).length), kind: 0))
             } else {
                 guard (first as NSString).pathExtension.count > 0, lines.count > start else { continue }
-                let rows = lines[start...].map { match("^(\\d+)\\. → (.+)$", $0) }
+                let rows = lines[start...].map { match("^([0-9]{1,6})\\. → (.+)$", $0) }
                 guard rows.allSatisfy({ $0 != nil }) else { continue }
                 spans.append(Span(range: NSRange(location: offset, length: (first as NSString).length), kind: 0))
                 var rowOffset = offset + lines.prefix(start).reduce(0) { $0 + ($1 as NSString).length + 1 }

@@ -55,8 +55,16 @@ def _governed_task_id(services, context: dict[str, Any]) -> str:
     """The turn's task_id is a fresh UUID; a Kanban worker has a durable card ID."""
     return str(os.environ.get("HERMES_KANBAN_TASK") or context.get("task_id") or "")
 
+# A turn's task_id is a fresh UUID, so the per-task meters would otherwise grow for the gateway's lifetime.
+RUNTIME_LIMIT = 500
+
+
 def _runtime(services, task_id: str) -> dict[str, Any]:
-    return services._RUNTIME.setdefault(str(task_id), {
+    runtime = services._RUNTIME
+    if str(task_id) not in runtime:
+        while len(runtime) >= RUNTIME_LIMIT:
+            runtime.pop(next(iter(runtime)))  # oldest turn first (insertion order)
+    return runtime.setdefault(str(task_id), {
         "model_calls": 0, "tool_calls": 0, "input_tokens": 0, "output_tokens": 0,
         "total_tokens": 0, "cache_read_tokens": 0, "cache_write_tokens": 0,
         "reasoning_tokens": 0, "cache_read_complete": True, "cache_write_complete": True,

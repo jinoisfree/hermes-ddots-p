@@ -15,7 +15,10 @@ import shlex
 from hermes_facility import team_registry as team
 
 SHELL = {'terminal', 'process', 'process_manage', 'execute_code'}
-INSTALL = re.compile(r"\b(?:pip3?|npm|pnpm|yarn|brew|uv)(?:\s+(?:pip|--?[\w=-]+))*\s+(?:install|add|sync|update|upgrade)\b", re.I)
+# A package manager and an install verb in the same simple command (options and subcommands like
+# `uv tool`, `yarn global`, `npm --prefix DIR` may sit between them).
+INSTALL = re.compile(r"\b(?:pip(?:3(?:\.\d+)?)?|pipx|npm|pnpm|yarn|bun|brew|uv|poetry|conda|mamba|gem|cargo|go)\b"
+                     r"[^|;&\n]*?\s(?:install|i|ci|add|sync|update|upgrade|reinstall)(?=\s|$)", re.I)
 
 
 def enabled(td):

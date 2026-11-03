@@ -19,7 +19,8 @@ SCHEMA = {'name':'personal_report','description':_owner_text('Only when the owne
 # `# 제목` becomes the Slack header block; `*…*` would render as italics. Since 2026-10-19 the status is the bar
 # colour of each section, so the title needs no status icon (an old one is still accepted).
 _TITLE = re.compile(r'# (?:[🔴🟡🟢🔵] )?\S')
-_ATTEMPTS = set()
+_ATTEMPTS = {}  # insertion-ordered set of sent (message, text) keys, bounded below
+_ATTEMPT_LIMIT = 1000
 _LOCK = threading.Lock()
 
 
@@ -42,7 +43,9 @@ def handle(td, args, sender=None):
     key = (message_id,hashlib.sha256(message.encode()).hexdigest())
     with _LOCK:
         if key in _ATTEMPTS:return td._error('PERSONAL_REPORT_ALREADY_ATTEMPTED: 전달 불확실이면 자동 재전송하지 않는다.')
-        _ATTEMPTS.add(key)
+        _ATTEMPTS[key] = True
+        while len(_ATTEMPTS) > _ATTEMPT_LIMIT:
+            _ATTEMPTS.pop(next(iter(_ATTEMPTS)))
     try:
         if sender is None:
             from tools.send_message_tool import send_message_tool

@@ -227,6 +227,12 @@ def retrieve(home, session_id, user_message, cfg, *, now, deadline, bridged=True
         with _LOCK:
             seen = set(_SEEN.get(cache_key, ()))
         digests = read_digests(home)
+        # Members of each conversation group, built once: per digest only its own group is queried,
+        # so the cost no longer grows with digests x sessions (2026-11-03).
+        members = {}
+        for sid, root_id in roots.items():
+            members.setdefault(root_id, []).append(sid)
+        latest = {}
         eligible = []
         for d in digests:
             check(deadline)
@@ -238,13 +244,17 @@ def retrieve(home, session_id, user_message, cfg, *, now, deadline, bridged=True
             if d.get('exclude_tools') != sorted(cfg['exclude_tools']):
                 continue  # Policy changed: wait for regeneration, never reuse unsafe summaries.
             group = roots.get(ids[0], ids[0])
-            lineage_ids = [sid for sid in sessions if roots[sid] == group]
-            if any((db.execute('SELECT MAX(id) FROM messages WHERE session_id=?', (sid,)).fetchone()[0] or 0)
-                   > d['last_message_id'] for sid in lineage_ids):
+            if group in seen:
+                continue
+            if group not in latest:
+                lineage_ids = members.get(group, [group])
+                marks = ','.join('?' * len(lineage_ids))
+                latest[group] = db.execute(f'SELECT COALESCE(MAX(id),0) FROM messages WHERE session_id IN ({marks})',
+                                           lineage_ids).fetchone()[0]
+            if latest[group] > d['last_message_id']:
                 continue  # New tools may have made an already summarized assistant turn private.
-            if group not in seen:
-                eligible.append((group, d))
-        own_ids = [sid for sid in sessions if roots[sid] == own]
+            eligible.append((group, d))
+        own_ids = members.get(own, [own])
         replied = any(db.execute("SELECT 1 FROM messages WHERE session_id=? AND role='assistant' "
                                  "AND COALESCE(content,'')!='' LIMIT 1", (sid,)).fetchone() for sid in own_ids)
         last = db.execute('SELECT role,content,_compressed_summary FROM messages WHERE session_id=? '
@@ -376,7 +386,13 @@ def ask_model(text):
     return response.choices[0].message.content
 
 
-def save(home, rows):
+# Digests follow the session retention (sessions.retention_days: 365); older ones only make the file grow.
+DIGEST_RETENTION_DAYS = 365
+
+
+def save(home, rows, *, now=None):
+    floor = (time.time() if now is None else now) - DIGEST_RETENTION_DAYS * 86400
+    rows = [row for row in rows if row.get('timestamp', 0) >= floor]
     directory = Path(home) / 'recall'
     fd, name = tempfile.mkstemp(prefix='.digests-', dir=directory)
     try:

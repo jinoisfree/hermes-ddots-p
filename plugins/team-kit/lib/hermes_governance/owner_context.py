@@ -29,7 +29,7 @@ def _is_executor(services, profile):
 
 def _personal_actor(services):
     profile = services.personal_roles.profile(services.host)
-    scopes = globals().get('personal_scopes')
+    scopes = services.personal_scopes
     return profile if scopes is not None and scopes.config(services.host) is not None and profile in scopes.OWNERS else services._personal_executor()
 
 def _personal_role_problem(services, name, args):

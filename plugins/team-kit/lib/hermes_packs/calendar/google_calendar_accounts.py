@@ -94,9 +94,9 @@ def lookup(td,args,context):
                 if not page:break
                 if count>=4:raise ValueError('GOOGLE_CALENDAR_RESULT_LIMIT')
             calendars.append({'identifier':actual,'title':primary.get('summary',actual),'source':actual,'backend':'google'})
-        except ValueError as exc:
+        except Exception as exc:  # one account's API/auth error must not hide the other account
             if args.get('account')!='all':raise
-            failures.append({'account':account,'error':str(exc)})
+            failures.append({'account':account,'error':str(exc) if isinstance(exc,ValueError) else type(exc).__name__})
     rows.sort(key=lambda r:r.get('start') or '')
     return json.dumps({'ok':not failures,'receipt':{'work_type':'calendar_lookup','authority':'Google Calendar API',
         'queried_at':datetime.now(KST).isoformat(),'results':rows,'result_count':len(rows),'calendar_results':calendars,

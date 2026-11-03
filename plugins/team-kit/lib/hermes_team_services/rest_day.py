@@ -39,6 +39,13 @@ HOLIDAY_CALENDAR = "ko.south_korea#holiday@group.v.calendar.google.com"
 QUIET = 3
 
 
+from pathlib import Path as _AtomicPath
+import sys as _atomic_sys
+if str(_AtomicPath(__file__).resolve().parents[1]) not in _atomic_sys.path:
+    _atomic_sys.path.insert(0, str(_AtomicPath(__file__).resolve().parents[1]))
+from hermes_facility import atomic as _atomic
+
+
 def root():
     return Path(os.environ.get("HERMES_ROOT") or Path.home() / ".hermes")
 
@@ -98,11 +105,9 @@ def holidays(today, *, fetcher=fetch, now=None):
     except Exception as exc:
         print(f"rest_day: holiday fetch failed ({type(exc).__name__}); using cache", file=sys.stderr)
         return cached.get("days") or {}, "stale_cache" if cached else "none"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(".tmp")
-    tmp.write_text(json.dumps({"fetched_at": now, "years": [str(y) for y in years], "days": days},
-                              ensure_ascii=False, indent=1), encoding="utf-8")
-    os.replace(tmp, path)
+    # Many gates refresh at 08:30/11:00 together: a unique temp name keeps os.replace from racing.
+    _atomic.write_json(path, {"fetched_at": now, "years": [str(y) for y in years], "days": days},
+                       indent=1, newline=False)
     return days, "google"
 
 

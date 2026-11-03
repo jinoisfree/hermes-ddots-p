@@ -29,6 +29,13 @@ RETENTION_DAYS=30
 KST=ZoneInfo('Asia/Seoul')
 
 
+from pathlib import Path as _AtomicPath
+import sys as _atomic_sys
+if str(_AtomicPath(__file__).resolve().parents[1]) not in _atomic_sys.path:
+    _atomic_sys.path.insert(0, str(_AtomicPath(__file__).resolve().parents[1]))
+from hermes_facility import atomic as _atomic
+
+
 def load(name,path):
     spec=importlib.util.spec_from_file_location('private_digest_'+name,path)
     value=importlib.util.module_from_spec(spec);spec.loader.exec_module(value);return value
@@ -105,19 +112,15 @@ def render(rows,now,*,human_total=None,account=ACCOUNT):
 
 
 def save(path,data):
-    fd,temp=tempfile.mkstemp(dir=path.parent,prefix='.personal-mail-')
-    try:
-        with os.fdopen(fd,'w') as stream:json.dump(data,stream);stream.flush();os.fsync(stream.fileno())
-        os.replace(temp,path)
-    finally:
-        if os.path.exists(temp):os.unlink(temp)
+    _atomic.write_text(path, json.dumps(data), prefix='.personal-mail-')
 
 
 def run(root,home,*,reader=None,sender=None,now=None):
     if home!=team.home_of_role('personal', root):raise ValueError('PERSONAL_MAIL_HOME_MISMATCH')
     cfg=settings(home);account=cfg['account']
     now=now or datetime.now(KST)
-    if now.hour not in {9,18}:raise ValueError('PERSONAL_MAIL_SCHEDULE_REQUIRED')
+    # 09:00 workday, 11:00 rest-day (gated by personal_mail_summary_restday.py) and 18:00.
+    if now.hour not in {9,11,18}:raise ValueError('PERSONAL_MAIL_SCHEDULE_REQUIRED')
     target=load('learning',Path(__file__).with_name('learning.py')).owner_report_room(home) or cfg['dm_chat_id']
     if not account or not target:raise ValueError('PERSONAL_MAIL_OWNER_VAULT_UNSET: 금고의 accounts.personal.gmail·dms.personal이 필요하다')
     rows=(reader or (lambda:fetch(root,home)))()

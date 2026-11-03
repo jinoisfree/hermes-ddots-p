@@ -31,6 +31,13 @@ _CONFIG = OrderedDict()
 _LOCK = threading.RLock()
 
 
+from pathlib import Path as _AtomicPath
+import sys as _atomic_sys
+if str(_AtomicPath(__file__).resolve().parents[1]) not in _atomic_sys.path:
+    _atomic_sys.path.insert(0, str(_AtomicPath(__file__).resolve().parents[1]))
+from hermes_facility import atomic as _atomic
+
+
 def settings(home):
     from ruamel.yaml import YAML
     path = Path(home).resolve() / "config.yaml"
@@ -257,17 +264,7 @@ def atomic_document(file, text):
     if text is None:
         file.unlink(missing_ok=True)
         return
-    file.parent.mkdir(parents=True, exist_ok=True)
-    fd, temp = tempfile.mkstemp(prefix=".learning-", dir=file.parent)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            handle.write(text)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temp, file)
-    finally:
-        if os.path.exists(temp):
-            os.unlink(temp)
+    _atomic.write_text(file, text, prefix=".learning-")
 
 
 def transaction_path(home):

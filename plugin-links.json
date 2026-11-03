@@ -14,7 +14,6 @@
     "plugins/team-kit/deadline_watch.py": "lib/hermes_team_services/deadline_watch.py",
     "plugins/team-kit/diagnosis_check.py": "lib/hermes_team_services/diagnosis_check.py",
     "plugins/team-kit/diagnosis_requests.py": "lib/hermes_team_services/diagnosis_requests.py",
-    "plugins/team-kit/doc_vision_ocr.swift": "lib/hermes_team_services/doc_vision_ocr.swift",
     "plugins/team-kit/doctor.py": "lib/hermes_team_services/doctor.py",
     "plugins/team-kit/document_review.py": "lib/hermes_team_services/document_review.py",
     "plugins/team-kit/error_digest.py": "lib/hermes_team_services/error_digest.py",

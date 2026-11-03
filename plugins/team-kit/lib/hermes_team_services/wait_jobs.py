@@ -72,6 +72,13 @@ NOTE = ("[조건 대기] 소유자가 '답 오면·끝나면 알려줘/이어서
         "목록·취소는 list·cancel. 활성 대기는 10개, 기간은 최대 30일이다.")
 
 
+from pathlib import Path as _AtomicPath
+import sys as _atomic_sys
+if str(_AtomicPath(__file__).resolve().parents[1]) not in _atomic_sys.path:
+    _atomic_sys.path.insert(0, str(_AtomicPath(__file__).resolve().parents[1]))
+from hermes_facility import atomic as _atomic
+
+
 def enabled(config):
     return isinstance(config, dict) and config.get("enabled") is True
 
@@ -174,10 +181,7 @@ def load(path):
 
 
 def save(path, data):
-    path = Path(path)
-    tmp = path.with_suffix(".tmp")
-    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
-    tmp.replace(path)
+    _atomic.write_json(path, data, indent=1, newline=False)
 
 
 def waits(home):

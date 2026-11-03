@@ -84,7 +84,7 @@ def item_text(d, *, failed=False):
         lines.append('어떤 후보를 연결할까요?')
     for i,c in enumerate(d['candidates'],1):
         x=c['identity']
-        lines.append(f'{i}. {x["title"]} · {x.get("folder_name") or x.get("list_name") or x.get("calendar_id")} · {x.get("created_at") or x.get("start") or "생성 시각 확인 불가"}')
+        lines.append(f'{i}. {x["title"]} · {x.get("folder_name") or x.get("calendar_id")} · {x.get("created_at") or x.get("start") or "생성 시각 확인 불가"}')
     if d.get('recently_deleted'):
         lines.append('최근 삭제된 항목에 있음 — 복원하거나 연결하지 않습니다.')
     if not d['candidates']:
@@ -104,7 +104,7 @@ def batch_text(rows):
     lines=['*🔴 연결된 업무 원본 확인*',f'연결이 끊긴 업무 {len(rows)}건에 확실한 후보가 있어요. 어떤 후보를 연결할까요?']
     for i,r in enumerate(rows,1):
         x=r['candidates'][0]['identity']
-        lines.append(f'{i}. {r["title"]} → {x["title"]} · {x.get("folder_name") or x.get("list_name") or x.get("calendar_id")}')
+        lines.append(f'{i}. {r["title"]} → {x["title"]} · {x.get("folder_name") or x.get("calendar_id")}')
     lines.append('_숫자=그 업무 연결 · 거절=모두 연결 안 함 · 의견=직접 적기(예: 다 연결해) · 확인=보류_')
     lines.append('[[버튼: '+' | '.join(numbers(len(rows))+TAIL)+']]')
     return '\n'.join(lines)
@@ -120,7 +120,7 @@ class Decisions:
 
     def preview(self):
         with self.store._connect() as conn:
-            missing=[dict(r) for r in conn.execute("SELECT h.*,w.title,w.created_at FROM source_health h JOIN common_work w USING(common_id) WHERE h.status='missing' AND h.reason NOT IN ('relinked','agent_rebuilt') AND w.status='active'")]
+            missing=[dict(r) for r in conn.execute("SELECT h.*,w.title,w.created_at FROM source_health h JOIN common_work w USING(common_id) WHERE h.status='missing' AND h.reason NOT IN ('relinked','agent_rebuilt') AND w.status='active' AND h.domain IN ('notes','calendar')")]
         rows=[]
         for row in missing:
             row['metadata']=json.loads(row['metadata_json'])

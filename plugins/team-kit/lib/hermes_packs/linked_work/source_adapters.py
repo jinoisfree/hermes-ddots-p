@@ -135,7 +135,7 @@ class Calendar:
             raise RuntimeError('calendar notes verification failed')
 
     def move(self, event, start, end):
-        company_scope_guard('calendar', {'action': 'update', 'event_id': event['calendarItemIdentifier'], 'expected_start': event['start']})
+        company_scope_guard('calendar', {'action': 'update', 'event_id': event['calendarItemIdentifier'], 'expected_start': event['start']}, strict=True)
         if self.tools()._calendar_event_move(event, start, end) is None:
             raise RuntimeError('calendar move failed')
 
@@ -165,11 +165,11 @@ class Notes:
             raise RuntimeError('note title/body verification failed')
 
     def edit(self, identifier, lines, edits, before):
-        company_scope_guard('notes', {'action': 'update', 'note_id': identifier})
+        company_scope_guard('notes', {'action': 'update', 'note_id': identifier}, strict=True)
         return self.tools()._edit_linked_note(identifier, before, lines, edits)
 
     def append(self, identifier, line, before):
-        company_scope_guard('notes', {'action': 'update', 'note_id': identifier})
+        company_scope_guard('notes', {'action': 'update', 'note_id': identifier}, strict=True)
         if before and before.get('attachment_names'):
             return self.tools()._append_note_rebuild(identifier, line, before)
         return self.tools()._append_plain_note(identifier, line, before)

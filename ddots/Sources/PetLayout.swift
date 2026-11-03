@@ -344,10 +344,10 @@ struct PetBubbleMotion {
     private var bounds = CGRect.zero
     private(set) var size = PetLayout.bubbleSize
     private var targetSize = PetLayout.bubbleSize
-    private var widthSlide: (start: TimeInterval, origin: CGPoint, size: CGSize)?
+    private var widthSlide: (start: TimeInterval, origin: CGPoint, size: CGSize, duration: TimeInterval)?
     private(set) var widthProgress: CGFloat = 1
-    mutating func slideWidth(now: TimeInterval) {
-        widthSlide = (now, position ?? target, size); widthProgress = 0
+    mutating func slideWidth(now: TimeInterval, duration: TimeInterval = ChatWidthSlide.duration) {
+        widthSlide = (now, position ?? target, size, duration); widthProgress = 0
     }
     mutating func cancelWidthSlide() { widthSlide = nil; widthProgress = 1 }
     private var glideUntil: TimeInterval = 0
@@ -366,7 +366,7 @@ struct PetBubbleMotion {
 
     mutating func step(now: TimeInterval) -> CGPoint {
         if let slide = widthSlide {
-            widthProgress = CGFloat(min(1, max(0, (now - slide.start) / ChatWidthSlide.duration)))
+            widthProgress = CGFloat(min(1, max(0, (now - slide.start) / slide.duration)))
             let eased = widthProgress * widthProgress * (3 - 2 * widthProgress)
             size = CGSize(width: slide.size.width + (targetSize.width - slide.size.width) * eased,
                           height: slide.size.height + (targetSize.height - slide.size.height) * eased)

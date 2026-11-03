@@ -300,7 +300,8 @@ def _calendar_event_get(services, event_id: str, runner: Any = subprocess.run) -
 
 def _calendar_event_move(services, event: dict[str, Any], start: str, end: str, runner: Any = subprocess.run) -> dict[str, Any] | None:
     """Watcher-only: move one non-recurring event, matched by ID, title and current start."""
-    if services._calendar_event_get(event["calendarItemIdentifier"], runner) is None:
+    before = services._calendar_event_get(event["calendarItemIdentifier"], runner)
+    if before is None or before.get("recurring"):
         return None
     binary = services._calendar_cache_root(services.PERSONAL_PROFILE) / "eventkit_calendar_mutation-v1"
     payload = {"action": "update", "event_id": event["calendarItemIdentifier"], "expected_title": event["title"],
@@ -321,9 +322,12 @@ def _calendar_event_rename(services, event, title, runner=subprocess.run):
     binary = services._calendar_cache_root(services.PERSONAL_PROFILE) / 'eventkit_calendar_mutation-v1'
     payload = {'action': 'update', 'event_id': event['calendarItemIdentifier'], 'expected_title': event['title'],
                'expected_start': event['start'], 'title': title, 'span': 'this'}
-    proc = runner([str(binary), json.dumps(payload, ensure_ascii=False)], capture_output=True, text=True, timeout=30, check=False)
-    data = json.loads(proc.stdout) if proc.returncode == 0 else {}
-    after = data.get('after') or {}
+    try:
+        proc = runner([str(binary), json.dumps(payload, ensure_ascii=False)], capture_output=True, text=True, timeout=30, check=False)
+        data = json.loads(proc.stdout) if proc.returncode == 0 else {}
+    except (OSError, subprocess.TimeoutExpired, ValueError):
+        return None
+    after = (data.get('after') if isinstance(data, dict) else None) or {}
     return after if after.get('title') == title and all(after.get(k) == before.get(k) for k in ('start', 'end', 'calendarIdentifier', 'notes')) else None
 
 def _calendar_event_set_notes(services, event, notes, runner=subprocess.run):
@@ -334,12 +338,12 @@ def _calendar_event_set_notes(services, event, notes, runner=subprocess.run):
     binary = services._calendar_cache_root(services.PERSONAL_PROFILE) / 'eventkit_calendar_mutation-v1'
     payload = {'action': 'update', 'event_id': event['calendarItemIdentifier'], 'expected_title': event['title'],
                'expected_start': event['start'], 'notes': notes, 'span': 'this'}
-    proc = runner([str(binary), json.dumps(payload, ensure_ascii=False)], capture_output=True, text=True, timeout=30, check=False)
     try:
+        proc = runner([str(binary), json.dumps(payload, ensure_ascii=False)], capture_output=True, text=True, timeout=30, check=False)
         data = json.loads(proc.stdout) if proc.returncode == 0 else {}
-    except ValueError:
+    except (OSError, subprocess.TimeoutExpired, ValueError):
         return None
-    after = data.get('after') or {}
+    after = (data.get('after') if isinstance(data, dict) else None) or {}
     return after if (after.get('notes') or '') == notes and all(after.get(k) == before.get(k) for k in ('title', 'start', 'end', 'calendarIdentifier')) else None
 
 def _calendar_event_add_alarm(services, event, minutes, runner=subprocess.run):

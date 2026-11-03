@@ -604,7 +604,7 @@ sessions.auto_prune, USER.md 공유), 안전·격리 규칙은 줄이지 않는�
 <<customers_name>> 인스타그램 자동 답장·매시 미답변 DM 목록·새 댓글·리셋 피드·X 소식,
 <<customers_name>>·<<work_name>> <<doctor_name>> 진단 요청·판정 답글·<<report_room>> 결과, <<doctor_name>> 새 오류 요약,
 매일 08:30 학습 보고, <<work_name>> 메일 알림·마감 선제 점검(08:40·15:00),
-공개 hermes-gmail-app, <<doctor_name>> 10:00 조직개편안. 지난 대화·학습 이력은 삭제하지 않는다. Apple Notes·일정 기반 옛 준비 제안은 계속 중지.
+공개판 Gmail 안내, <<doctor_name>> 조직개편안(03:00 새벽 작업·<<report_room>>). 지난 대화·학습 이력은 삭제하지 않는다. Apple Notes·일정 기반 옛 준비 제안은 계속 중지.
 읽기 전용 도구를 쓰기로 열기, <<doctor_name>> 업무 문서 조회·쓰기·칸반 추가 금지. Paseo 실행은 2026-10-25 소유자 결정의 paseo_autofix 경로만 쓰며 그 범위를 넓히자는 제안 금지.
 회사 업무는 <<work_name>>, <<personal_name>>는 AI 아이디어·개인 범위 경계를 유지한다.''')
 
@@ -734,9 +734,9 @@ def render(day, items, *, weekly=False, auto=False, notes='', full=False, paseo=
     title = f'{day.month}월 {day.day}일 개편할 점 {len(items)}건'
     if not items:
         return title + ('\n\n*주간 다이어트*\n후보 0건' if weekly else '') + ('\n\n' + notes if notes else '')
-    lines = [f'*{title}*', '새벽 3시에 Paseo가 판단해 진행할 항목을 고쳤어. 결과와 확인·롤백 버튼은 이 스레드에 있다(덜 끝났으면 끝나는 대로). '
+    lines = [f'*{title}*', '새벽 3시에 Paseo가 판단해 진행할 항목을 고쳤어. 결과와 확인·되돌리기 버튼은 이 스레드에 있다(덜 끝났으면 끝나는 대로). '
              '푸시는 확인 뒤다.' if auto else
-             '번호로 승인·거부·보류해 줘. 승인한 항목만 Paseo가 고치고 이 스레드에 결과와 확인·롤백 버튼을 올린다. 푸시는 확인 버튼 뒤다.'
+             '번호로 승인·거부·보류해 줘. 승인한 항목만 Paseo가 고치고 이 스레드에 결과와 확인·되돌리기 버튼을 올린다. 푸시는 확인 버튼 뒤다.'
              if paseo else '번호로 승인·거부·보류해 줘. 승인은 작업지시문 준비이며 실제 수정이나 푸시 승인이 아니야.']
     ordered = [i for i in items if not i['title'].startswith('다이어트: ')] + [i for i in items if i['title'].startswith('다이어트: ')]
     diet_heading = False
@@ -1104,72 +1104,104 @@ def paint_decisions(home, state, key, report):
         print(f'org review repaint failed ({type(exc).__name__})', flush=True)
 
 
+def slack_error(exc):
+    """Short, secret-free cause: the Slack API error code, never the request or token (2026-11-03)."""
+    match = re.fullmatch(r'Slack refused ([\w.]+): (\w+)', str(exc))
+    return f'{match[1]}: {match[2]}' if match else ''
+
+
 def poll(*, home=HOME, no_post=False):
     if not config(home)['enabled']:
         return []
-    result = []
+    result, failures = [], []
     with L.locked(state_path(home)):
         state = load(home)
         owner = R.owner(home)
-        for key, report in state['reports'].items():
-            if not report.get('items') or not report.get('complete') or report.get('posted_at', 0) < time.time() - 3 * 86400:
+        for key in list(state['reports']):
+            report = state['reports'][key]
+            if (not report.get('items') or not report.get('complete') or report.get('thread_missing')
+                    or report.get('posted_at', 0) < time.time() - 3 * 86400):
                 continue
-            clicks = [{'ts': ts, 'user': owner, 'text': click['text']}
-                      for ts, click in (report.get('button_replies') or {}).items()]
-            for message in messages(home, report) + clicks:
-                ts = message['ts']
-                # The owner's own posts through a user-token app (DDots) carry that app's bot_id; only the
-                # owner's token can post as the owner, so user == owner is the check (as in the Slack adapter).
-                if (message.get('user') != owner or message.get('subtype') or
-                        ts == report['thread_ts'] or ts in report['processed']):
-                    continue
-                reply_kind = classify_reply(message.get('text', ''), len(report['items']), autofix=autofix_enabled(home))
-                if reply_kind is None:
+            # One report must not stop the others (2026-11-03: the 11-01 root was deleted and
+            # thread_not_found blocked every later report). A failed report is retried next run.
+            try:
+                poll_report(home, state, key, report, owner, result, no_post=no_post)
+            except Exception as exc:
+                cause = slack_error(exc)
+                # Only what was already saved survives, exactly as when the whole run used to stop.
+                state = load(home)
+                if cause == 'conversations.replies: thread_not_found':
                     if not no_post:
-                        report['processed'][ts] = {'ignored': True}
+                        state['reports'][key]['thread_missing'] = {'at': time.time(), 'error': 'thread_not_found'}
                         L.save(state_path(home), prune(state))
+                    print(f'org review {key} skipped (report thread deleted)', flush=True)
                     continue
-                if 'autofix' in reply_kind:
-                    action = reply_kind['autofix']
-                    result.append({'day': key, 'ts': ts, 'autofix': action})
-                    if no_post:
-                        continue
-                    reply = autofix().request(home, autofix().report_job(home, key), action, ts)
-                    report['processed'][ts] = {'text': reply or '자동개편 작업이 없는 보고야.', 'autofix_action': True}
-                    L.save(state_path(home), prune(state))
-                    continue
-                decisions = reply_kind['decisions']
-                result.append({'day': key, 'ts': ts, 'decisions': decisions})
-                if no_post:
-                    continue
-                # Persist decision and reply intent together before any network write.
-                paseo = autofix_enabled(home) and not review_auto(home)
-                for n, action in decisions.items():
-                    item = report['items'][n - 1]
-                    state['decisions'].append({'day': key, 'n': n, 'action': action, 'at': float(ts), 'title': item['title']})
-                    if action == '승인' and str(n) not in report['approvals'] and not paseo:
-                        report['approvals'][str(n)] = {'text': f"{n}번 승인 기록. 아래 지시문을 Paseo Hermes-ddots에 전달해 줘. 직접 수정하지 않았어.\n```\n{R.escape(item['instruction'])}\n```"}
-                # 2026-10-28 사용자 결정: 승인한 항목만 Paseo가 고친다(묻지 않는 자동 진행 아님).
-                job = paseo and approved_job(report, key, [n for n, a in decisions.items() if a == '승인'])
-                if job:
-                    autofix().enqueue(home, job[0], job[1], orig=job[2])
-                text = '결정을 기록했어. ' + ', '.join(f'{n}번 {a}' for n, a in decisions.items())
-                if job:
-                    # One reply for the whole decision, not one per approved item (2026-10-29).
-                    text += '\n' + ', '.join(f'{n}번' for n in job[2].values()) + ' Paseo에 넘겼다. 끝나면 이 스레드에 결과와 확인·롤백 버튼을 올린다.'
-                report['processed'][ts] = {'text': text}
-                L.save(state_path(home), prune(state))
-            if not no_post:
-                paint_decisions(home, state, key, report)
-                for ts, part in report['processed'].items():
-                    if part.get('ignored'):
-                        continue
-                    send(home, state, report, part, key + ':decision:' + ts, thread=True)
-                    if part.get('autofix_action'):
-                        autofix().record_receipt(home, key, ts, part['ts'])
-                for n, part in report['approvals'].items():
-                    send(home, state, report, part, key + ':instruction:' + n, thread=True)
+                failures.append(f'{key} {type(exc).__name__}' + (f' ({cause})' if cause else ''))
+    if failures:
+        raise PollFailed('; '.join(failures))
     return result
+
+
+class PollFailed(RuntimeError):
+    """Some reports failed; the message carries only day keys, exception names and Slack error codes."""
+
+
+def poll_report(home, state, key, report, owner, result, *, no_post=False):
+    clicks = [{'ts': ts, 'user': owner, 'text': click['text']}
+              for ts, click in (report.get('button_replies') or {}).items()]
+    for message in messages(home, report) + clicks:
+        ts = message['ts']
+        # The owner's own posts through a user-token app (DDots) carry that app's bot_id; only the
+        # owner's token can post as the owner, so user == owner is the check (as in the Slack adapter).
+        if (message.get('user') != owner or message.get('subtype') or
+                ts == report['thread_ts'] or ts in report['processed']):
+            continue
+        reply_kind = classify_reply(message.get('text', ''), len(report['items']), autofix=autofix_enabled(home))
+        if reply_kind is None:
+            if not no_post:
+                report['processed'][ts] = {'ignored': True}
+                L.save(state_path(home), prune(state))
+            continue
+        if 'autofix' in reply_kind:
+            action = reply_kind['autofix']
+            result.append({'day': key, 'ts': ts, 'autofix': action})
+            if no_post:
+                continue
+            reply = autofix().request(home, autofix().report_job(home, key), action, ts)
+            report['processed'][ts] = {'text': reply or '자동개편 작업이 없는 보고야.', 'autofix_action': True}
+            L.save(state_path(home), prune(state))
+            continue
+        decisions = reply_kind['decisions']
+        result.append({'day': key, 'ts': ts, 'decisions': decisions})
+        if no_post:
+            continue
+        # Persist decision and reply intent together before any network write.
+        paseo = autofix_enabled(home) and not review_auto(home)
+        for n, action in decisions.items():
+            item = report['items'][n - 1]
+            state['decisions'].append({'day': key, 'n': n, 'action': action, 'at': float(ts), 'title': item['title']})
+            if action == '승인' and str(n) not in report['approvals'] and not paseo:
+                report['approvals'][str(n)] = {'text': f"{n}번 승인 기록. 아래 지시문을 Paseo Hermes-ddots에 전달해 줘. 직접 수정하지 않았어.\n```\n{R.escape(item['instruction'])}\n```"}
+        # 2026-10-28 사용자 결정: 승인한 항목만 Paseo가 고친다(묻지 않는 자동 진행 아님).
+        job = paseo and approved_job(report, key, [n for n, a in decisions.items() if a == '승인'])
+        if job:
+            autofix().enqueue(home, job[0], job[1], orig=job[2])
+        text = '결정을 기록했어. ' + ', '.join(f'{n}번 {a}' for n, a in decisions.items())
+        if job:
+            # One reply for the whole decision, not one per approved item (2026-10-29).
+            text += '\n' + ', '.join(f'{n}번' for n in job[2].values()) + ' Paseo에 넘겼다. 끝나면 이 스레드에 결과와 확인·되돌리기 버튼을 올린다.'
+        report['processed'][ts] = {'text': text}
+        L.save(state_path(home), prune(state))
+    if not no_post:
+        paint_decisions(home, state, key, report)
+        for ts, part in report['processed'].items():
+            if part.get('ignored'):
+                continue
+            send(home, state, report, part, key + ':decision:' + ts, thread=True)
+            if part.get('autofix_action'):
+                autofix().record_receipt(home, key, ts, part['ts'])
+        for n, part in report['approvals'].items():
+            send(home, state, report, part, key + ':instruction:' + n, thread=True)
 
 
 def main(argv=None):
@@ -1187,12 +1219,13 @@ def main(argv=None):
         elif args.command == 'daily':
             result = daily(args.day, no_post=args.no_post)
         else:
-            result = poll(no_post=args.no_post)
+            result = poll(home=HOME, no_post=args.no_post)
         if args.command == 'collect' or args.no_post:
             print(json.dumps(result, ensure_ascii=False, indent=2))
         return 0
     except Exception as exc:
-        print('조직개편안 처리 실패: ' + type(exc).__name__, file=sys.stderr)
+        cause = str(exc) if isinstance(exc, PollFailed) else slack_error(exc)
+        print('조직개편안 처리 실패: ' + type(exc).__name__ + (f': {cause}' if cause else ''), file=sys.stderr)
         return 1
 
 

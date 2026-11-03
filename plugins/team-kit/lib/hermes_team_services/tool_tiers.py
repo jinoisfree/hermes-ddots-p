@@ -7,6 +7,7 @@ import threading
 import time
 from collections import Counter
 from datetime import datetime
+from zoneinfo import ZoneInfo
 from pathlib import Path
 
 PINNED = frozenset('team_work skill_view skills_list session_search memory team_learn team_learn_review team_skill_review skill_manage cronjob_manage tool_call tool_search tool_describe'.split())
@@ -17,6 +18,13 @@ FILE = 'learning/tool-tiers.json'
 MAX_TABLE = 6000
 _LOCK = threading.RLock()
 _SESSIONS = {}  # Deliberately resets on gateway restart; never expires an active snapshot.
+
+
+from pathlib import Path as _AtomicPath
+import sys as _atomic_sys
+if str(_AtomicPath(__file__).resolve().parents[1]) not in _atomic_sys.path:
+    _atomic_sys.path.insert(0, str(_AtomicPath(__file__).resolve().parents[1]))
+from hermes_facility import atomic as _atomic
 
 
 def settings(home):
@@ -108,16 +116,14 @@ def rebuild(home, schemas, now=None, *, force=False):
     now = time.time() if now is None else now
     path = Path(home)/FILE
     prior = json.loads(path.read_text()) if path.exists() else None
-    date = datetime.fromtimestamp(now).strftime('%Y-%m-%d')
+    date = datetime.fromtimestamp(now, ZoneInfo('Asia/Seoul')).strftime('%Y-%m-%d')  # same KST day as other daily keys
     if prior and prior.get('date') == date and not force: return prior
     c14,c30 = usage(home, now)
     classes = classify({fn(s)['name'] for s in schemas}, prior, c14,c30, pins(schemas,cfg.get('pinned',[])))
     old = (prior or {}).get('classes',{})
     changes = [{'name':n,'from':old.get(n),'to':v} for n,v in classes.items() if old.get(n)!=v]
     result = {'date':date,'criteria':{'promote_days':14,'promote_count':5,'demote_days':30,'demote_count':0},'classes':classes,'changes':changes}
-    path.parent.mkdir(parents=True,exist_ok=True)
-    tmp = path.with_suffix('.tmp')
-    tmp.write_text(json.dumps(result,ensure_ascii=False,indent=2)+'\n');tmp.replace(path)
+    _atomic.write_json(path, result, indent=2)
     if changes: print(json.dumps({'profile':Path(home).name,'date':date,'changes':changes},ensure_ascii=False))
     return result
 

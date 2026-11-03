@@ -217,7 +217,7 @@ def flush(home):
             if not report['root'].get('ts'):
                 send(home, state, report, report['root'], key); count += 1
             for ts, part in report.get('processed', {}).items():
-                if not part.get('ts'):
+                if not part.get('ts') and part.get('text') is not None:  # 의견 clicks post nothing
                     send(home, state, report, part, key + ':reply:' + ts, thread=True); count += 1
             for part_key, part in report.get('results', {}).items():
                 if not part.get('ts'):

@@ -39,6 +39,13 @@ MAX_CANDIDATES = 6
 DEADLINE_DOMAINS = {"calendar"}
 
 
+from pathlib import Path as _AtomicPath
+import sys as _atomic_sys
+if str(_AtomicPath(__file__).resolve().parents[1]) not in _atomic_sys.path:
+    _atomic_sys.path.insert(0, str(_AtomicPath(__file__).resolve().parents[1]))
+from hermes_facility import atomic as _atomic
+
+
 def root(home):
     home = Path(home)
     return home.parent.parent if home.parent.name == "profiles" else home
@@ -117,17 +124,18 @@ def snapshot(home, *, store=None, now=None):
         raise ValueError("gap_review_symlink_refused")
     try:
         offered = json.loads(log_path.read_text(encoding="utf-8")).get("offered", {})
-    except (OSError, ValueError):
+    except (OSError, ValueError, AttributeError):
         offered = {}
+    # A damaged entry is dropped, never allowed to stop the 08:50 job.
+    offered = {key: float(at) for key, at in (offered.items() if isinstance(offered, dict) else ())
+               if isinstance(at, (int, float)) or (isinstance(at, str) and at.replace('.', '', 1).isdigit())}
     recent = {key for key, at in offered.items() if now - float(at) < REPEAT_DAYS * 86400}
     fresh = [c for c in candidates(home, store, now=now) if f"{c['gap']}:{c['common_id']}" not in recent]
     picked = fresh[:MAX_CANDIDATES]
     offered = {key: at for key, at in offered.items() if now - float(at) < 30 * 86400}
     offered.update({f"{c['gap']}:{c['common_id']}": now for c in picked})
     state_dir.mkdir(exist_ok=True)
-    tmp = log_path.with_suffix(".tmp")
-    tmp.write_text(json.dumps({"offered": offered}, ensure_ascii=False), encoding="utf-8")
-    os.replace(tmp, log_path)
+    _atomic.write_json(log_path, {"offered": offered}, newline=False)
     return {"date_kst": _kst(now), "candidates": picked, "skipped_recently_asked": len(recent),
             "stale_days": STALE_DAYS}
 

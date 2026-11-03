@@ -39,6 +39,13 @@ CHANNEL = vault.text("channels.reports")  # 보고 채널 (2026-10-18); 금고�
 REASONS = {"담당자 확인", "완료 근거 확인", "마감 경과", "취소"}
 
 
+from pathlib import Path as _AtomicPath
+import sys as _atomic_sys
+if str(_AtomicPath(__file__).resolve().parents[1]) not in _atomic_sys.path:
+    _atomic_sys.path.insert(0, str(_AtomicPath(__file__).resolve().parents[1]))
+from hermes_facility import atomic as _atomic
+
+
 def extension(name):
     spec = importlib.util.spec_from_file_location("deadline_" + name, Path(__file__).with_name(name + ".py"))
     module = importlib.util.module_from_spec(spec)
@@ -100,22 +107,7 @@ def load(path):
 
 def save(path, data):
     validate(data)
-    fd, temporary = tempfile.mkstemp(dir=path.parent, prefix=".deadline-")
-    try:
-        with os.fdopen(fd, "w") as file:
-            json.dump(data, file, ensure_ascii=False, indent=2)
-            file.write("\n")
-            file.flush()
-            os.fsync(file.fileno())
-        os.replace(temporary, path)
-        directory = os.open(path.parent, os.O_RDONLY)
-        try:
-            os.fsync(directory)
-        finally:
-            os.close(directory)
-    finally:
-        if os.path.exists(temporary):
-            os.unlink(temporary)
+    _atomic.write_json(path, data, indent=2, fsync_dir=True, prefix=".deadline-")
 
 
 @contextlib.contextmanager

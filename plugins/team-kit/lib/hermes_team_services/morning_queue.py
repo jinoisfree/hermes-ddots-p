@@ -17,6 +17,13 @@ from zoneinfo import ZoneInfo
 KST = ZoneInfo('Asia/Seoul')
 
 
+from pathlib import Path as _AtomicPath
+import sys as _atomic_sys
+if str(_AtomicPath(__file__).resolve().parents[1]) not in _atomic_sys.path:
+    _atomic_sys.path.insert(0, str(_AtomicPath(__file__).resolve().parents[1]))
+from hermes_facility import atomic as _atomic
+
+
 def quiet(now=None):
     """00:00~08:29 KST: 새벽 알림 금지 시간 (2026-10-28 사용자 결정)."""
     now = datetime.fromtimestamp(time.time() if now is None else now, KST)
@@ -39,17 +46,7 @@ def locked(path):
 
 
 def atomic_write(path, text):
-    fd, name = tempfile.mkstemp(prefix='.morning-', dir=path.parent)
-    try:
-        with os.fdopen(fd, 'w') as stream:
-            os.fchmod(stream.fileno(), 0o600)
-            stream.write(text)
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.replace(name, path)
-    finally:
-        if os.path.exists(name):
-            os.unlink(name)
+    _atomic.write_text(path, text, mode=0o600, prefix='.morning-')
 
 
 def read(path):

@@ -145,6 +145,19 @@ class Store:
                 if json.dumps(data,sort_keys=True,ensure_ascii=False)!=original:
                     self.atomic(file,json.dumps(data,ensure_ascii=False,indent=2)+'\n')
 
+    HISTORY_PER_NOTE = 10
+
+    @classmethod
+    def trim(cls, index):
+        """Keep every pending record and each note's latest records only: the full 'before' text of every
+        edit otherwise accumulates forever in index.json, which every read and write loads (2026-11-03)."""
+        kept, counts = [], {}
+        for record in reversed(index['history']):
+            counts[record['id']] = counts.get(record['id'], 0) + 1
+            if record.get('status') == 'pending' or counts[record['id']] <= cls.HISTORY_PER_NOTE:
+                kept.append(record)
+        index['history'] = kept[::-1]
+
     @staticmethod
     def atomic(path, text):
         path.parent.mkdir(parents=True,exist_ok=True)
@@ -261,9 +274,11 @@ class Store:
             text=pack(meta,body,sid)
             record={'id':sid,'before_path':str(previous.relative_to(self.root)) if previous else None,
                     'before':old[1] if old else None,'after_path':str(rel),'after_hash':digest(text),'at':stamp(),'status':'pending'}
-            index['history'].append(record)
-            self.atomic(self.state/'index.json',json.dumps(index,ensure_ascii=False,indent=2)+'\n')
+            # Refuse a concurrent edit before recording pending: nothing was written, so no replay lock.
             if previous and previous.read_text()!=old[1]:raise ValueError('OBSIDIAN_CONCURRENT_CHANGE')
+            index['history'].append(record)
+            self.trim(index)
+            self.atomic(self.state/'index.json',json.dumps(index,ensure_ascii=False,indent=2)+'\n')
             if target==previous:self.atomic(target,text)
             else:
                 with target.open('x') as f:f.write(text);f.flush();os.fsync(f.fileno())
@@ -284,6 +299,7 @@ class Store:
             if f.read_text()!=text:raise ValueError('OBSIDIAN_CONCURRENT_CHANGE')
             os.rename(f,trash);index['notes'][sid]={'path':str(trash.relative_to(self.root)),'deleted':True}
             index['history'].append({'id':sid,'before':text,'before_path':str(f.relative_to(self.root)),'deleted_to':str(trash.relative_to(self.root)),'at':stamp(),'status':'done'})
+            self.trim(index)
             return {'note_id':sid,'trash_path':str(trash.relative_to(self.root))}
 
     def restore(self,sid,snapshot):

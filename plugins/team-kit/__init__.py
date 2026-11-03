@@ -392,6 +392,49 @@ def approval_text(tool_name: str, args: dict[str, Any]) -> str:
     return f"승인하면 실행합니다: {tool_name}" + (f" ({', '.join(parts)})" if parts else "")
 
 
+def _policy_profile() -> str:
+    from gateway.session_context import get_session_env
+    profile = (get_session_env("HERMES_SESSION_PROFILE", "") or os.environ.get("HERMES_PROFILE") or "").strip()
+    if not profile:  # cron binds a profile's home but not its name
+        from hermes_constants import get_hermes_home
+        home = Path(get_hermes_home())
+        profile = home.name if home.parent.name == "profiles" else "default"
+    return profile
+
+
+def _policy_offer(request: Any, **_: Any) -> dict[str, Any] | None:
+    """Unattended runs are not offered a tool the enforced policy refuses there whatever the arguments.
+
+    The model still saw them, called them, got "policy does not allow" and only then used the allowed
+    reads (2026-11-03: 08:40 team_work, 08:50 linked_work_read). The pre_tool_call check stays the
+    enforcement; this only stops offering what it would always refuse. Tools a rule allows for some
+    arguments stay offered."""
+    try:
+        policy = _policy()
+        kind = _run_kind()
+        tools = request.get("tools") if isinstance(request, dict) else None
+        if policy["mode"] != "enforce" or kind == "chat" or not isinstance(tools, list):
+            return None
+        from gateway.session_context import get_session_env
+        rules, profile = policy["rules"], _policy_profile()
+        platform = str(get_session_env("HERMES_SESSION_PLATFORM", "")).strip().lower()
+        conditional = [str(pattern) for rule in rules if isinstance(rule, dict) and rule.get("args")
+                       for pattern in rule.get("tools") or ["*"]]
+
+        def refused(schema: Any) -> bool:
+            name = str((schema.get("function", schema) if isinstance(schema, dict) else {}).get("name") or "")
+            if not name or any(fnmatch.fnmatchcase(name, pattern) for pattern in conditional):
+                return False
+            return decide(rules, tool_name=name, args={}, kind=kind, profile=profile, platform=platform,
+                          has_plugin=getattr(_PLUGIN_CONTEXT, "has_plugin", None))[0] == "deny"
+
+        kept = [schema for schema in tools if not refused(schema)]
+        return None if len(kept) == len(tools) else {"request": dict(request, tools=kept)}
+    except Exception as exc:
+        logger.warning("team-kit policy offer skipped: %s", type(exc).__name__)
+        return None
+
+
 def _policy_pre_tool_call(tool_name: str = "", args: Any = None, **_: Any) -> dict[str, str] | None:
     # The core blocks the tool when this hook raises, so a bug here must not reach it. While a
     # person is chatting an error lets the call through; an unattended enforced run stays blocked.
@@ -404,11 +447,7 @@ def _policy_pre_tool_call(tool_name: str = "", args: Any = None, **_: Any) -> di
         enforce = policy["mode"] == "enforce"
         must_block = enforce and kind != "chat"
         from gateway.session_context import get_session_env
-        profile = (get_session_env("HERMES_SESSION_PROFILE", "") or os.environ.get("HERMES_PROFILE") or "").strip()
-        if not profile:  # cron binds a profile's home but not its name
-            from hermes_constants import get_hermes_home
-            home = Path(get_hermes_home())
-            profile = home.name if home.parent.name == "profiles" else "default"
+        profile = _policy_profile()
         decision, rule = decide(policy["rules"], tool_name=str(tool_name), kind=kind, profile=profile,
                                 args=args if isinstance(args, dict) else {},
                                 platform=str(get_session_env("HERMES_SESSION_PLATFORM", "")).strip().lower(),
@@ -715,13 +754,18 @@ def _work_output(response_text="", **context):
 
 
 def _owner_output(response_text="", **context):
-    """The one team-kit output transform: work halts first, then only fixed button sets stay buttons.
+    """The one output transform: other plugins' steps (hermes_facility.output_steps), work halts,
+    then only fixed button sets stay buttons.
 
-    The core keeps the first transform that returns text, so both steps share this hook."""
-    result = None
+    The core keeps the first transform that returns text, so every step shares this hook."""
+    from hermes_facility import output_steps
+    stepped = output_steps.apply(response_text, **context)
+    result = stepped if stepped != response_text else None
     if _WORK_OUTPUT:
         try:
-            result = _work_output(response_text=response_text, **context)
+            worked = _work_output(response_text=stepped, **context)
+            if isinstance(worked, str) and worked:
+                result = worked
         except Exception:
             logger.exception("team-kit work output transform failed")
     text = result if isinstance(result, str) and result else response_text
@@ -1253,6 +1297,10 @@ def register(ctx) -> None:
     ctx.register_hook("pre_llm_call", _pre_llm_call)
     ctx.register_hook("transform_llm_output", _owner_output)
     ctx.register_hook("pre_tool_call", _pre_tool_call)
+    try:
+        ctx.register_middleware("llm_request", _policy_offer)
+    except Exception:
+        logger.exception("team-kit policy offer registration failed")
     if _NOTION is not None:
         ctx.register_hook("pre_tool_call", _notion_approval_arguments)
     _use_installed_browser()

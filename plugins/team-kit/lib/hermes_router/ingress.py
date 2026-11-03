@@ -38,7 +38,7 @@ def route_event(runner: Any, event: Any, adapter: Any = None, *, store_class: An
 
     from hermes_router.project_threads import project_routing_input, routing_contract
     contract = routing_contract(contract, platform, str(getattr(source, "chat_id", "") or ""))
-    routing_text, has_attachments = project_routing_input(event, contract)
+    routing_text, _ = project_routing_input(event, contract)
 
     from hermes_router.common_router import ClaimStore, claim_key
 
@@ -62,7 +62,7 @@ def route_event(runner: Any, event: Any, adapter: Any = None, *, store_class: An
     dedicated_profile = ((contract.get("dedicated_channels") or {}).get(platform) or {}).get(
         str(getattr(source, "chat_id", "") or "")
     )
-    if dedicated_profile:
+    if dedicated_profile and not (platform == "slack" and isinstance(raw, dict) and raw.get("_hermes_button")):
         explicit_profile = str(dedicated_profile)
     store = (store_class or ClaimStore)(
         contract["claim_database_path"],
@@ -169,7 +169,6 @@ def route_event(runner: Any, event: Any, adapter: Any = None, *, store_class: An
         source,
         routing_text,
         contract,
-        has_attachments=has_attachments,
         explicit_profile=explicit_profile,
         pending_profile=pending_profile,
         thread_profile=thread_profile,

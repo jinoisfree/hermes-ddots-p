@@ -27,7 +27,6 @@ final class ChatPetView: NSView {
     private var behavior = ChatPetBehavior()
     private var frame0 = PetAnimationFrame(row: 0, column: 0)
     private var timer: Timer?
-    var shownFrame: PetAnimationFrame { frame0 }
 
     init(atlas: SpriteAtlas) {
         self.atlas = atlas

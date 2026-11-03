@@ -280,19 +280,22 @@ def guide(store, args: dict, *, session_id: str = '') -> dict:
     work = store.get(common_id)
     if work['status'] != 'active':
         raise MailWorkError('guide needs an active work')
-    replaced = []
-    for ref in work.get('knowledge_refs', []):
-        if ref['ref_type'] == 'owner_guidance' and \
-                str(ref['metadata'].get('field') or '').casefold() == field.casefold():
-            store.unlink_knowledge_ref(common_id, ref_id=ref['ref_id'], reason='superseded_by_owner')
-            replaced.append(ref['metadata'].get('guidance'))
+    older = [ref for ref in work.get('knowledge_refs', []) if ref['ref_type'] == 'owner_guidance'
+             and str(ref['metadata'].get('field') or '').casefold() == field.casefold()]
     at = time.strftime('%Y-%m-%d %H:%M', time.localtime())
     external_id = 'og:' + hashlib.sha256(f'{common_id}|{field}|{guidance}|{time.time()}'.encode()).hexdigest()[:24]
+    # Record the new instruction first: if that fails, the owner's earlier one is still there.
     item = store.link_knowledge_ref(common_id, ref_type='owner_guidance', external_id=external_id,
                                     relation_type='supports', link_reason='explicit_existing_object_link',
                                     source_session_id=session_id or None,
                                     metadata={'field': field, 'guidance': guidance, 'owner_said': owner_said, 'at': at})
     ref = next(r for r in item['knowledge_refs'] if r['external_id'] == external_id)
+    replaced = []
+    for old in older:
+        store.unlink_knowledge_ref(common_id, ref_id=old['ref_id'], reason='superseded_by_owner')
+        replaced.append(old['metadata'].get('guidance'))
+    if older:
+        item = store.get(common_id)
     return {'ok': True, 'recorded': True, 'common_id': common_id, 'title': item['title'], 'ref_id': ref['ref_id'],
             'field': field, 'guidance': guidance, **({'replaced': replaced} if replaced else {})}
 

@@ -14,7 +14,7 @@ APP="$STAGING/ddots.app"
 OUTPUT="${DDOTS_BUILD_OUTPUT:-$ROOT/dist/ddots.app}"
 mkdir -p "$BUILD/module-cache" "$APP/Contents/MacOS" "$APP/Contents/Resources/Pet" "$APP/Contents/Frameworks"
 python3 "$ROOT/scripts/prepare_assets.py"
-xcrun swiftc -swift-version 5 -O -parse-as-library -module-cache-path "$BUILD/module-cache" -target arm64-apple-macosx13.0 -framework AppKit -framework SwiftUI -framework WebKit -F "$SPARKLE" -framework Sparkle -Xlinker -rpath -Xlinker @executable_path/../Frameworks "$ROOT"/Sources/*.swift -o "$BUILD/ddots"
+xcrun swiftc -swift-version 5 -O -parse-as-library -module-cache-path "$BUILD/module-cache" -target arm64-apple-macosx13.0 -framework AppKit -framework SwiftUI -framework WebKit -framework Vision -framework AVFoundation -F "$SPARKLE" -framework Sparkle -Xlinker -rpath -Xlinker @executable_path/../Frameworks "$ROOT"/Sources/*.swift -o "$BUILD/ddots"
 cp "$BUILD/ddots" "$APP/Contents/MacOS/ddots"
 cp "$ROOT/Resources/Info.plist" "$APP/Contents/Info.plist"
 CHANNEL_ARGS=(--channel "$CHANNEL")

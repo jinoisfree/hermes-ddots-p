@@ -197,21 +197,6 @@ def recent(account: str, *, days: int = 2, limit: int = 100, runner=None) -> lis
     return [_clean(item) for item in items]
 
 
-def query_terms(query: str) -> tuple[list[str], int]:
-    """Plain words and the newer_than window of a Gmail query; other operators are dropped."""
-    since, terms = 0, []
-    for token in str(query or "").split():
-        window = re.fullmatch(r"newer_than:(\d{1,3})([dhmy])", token)
-        if window:
-            seconds = {"h": 3600, "d": 86400, "m": 30 * 86400, "y": 365 * 86400}[window.group(2)]
-            since = int(time.time()) - int(window.group(1)) * seconds
-        elif ":" not in token and not token.startswith("-") and token.upper() not in {"OR", "AND"}:
-            word = token.strip("\"'()").casefold()
-            if word:
-                terms.append(word)
-    return terms, since
-
-
 def search(account: str, query: str, limit: int, runner=None, *, all_mailboxes=False, cache_root=None) -> list[dict]:
     account = _account(account)
     base = {'account': account, 'all_mailboxes': all_mailboxes}

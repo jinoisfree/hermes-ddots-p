@@ -46,6 +46,13 @@ CHANNEL = vault.text("dms.doctor")  # 소유자와 진단 담당의 DM. 금고�
 STAMP = re.compile(r"^(\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:[.,]\d+)?(?:[+-]\d{2}:\d{2}|Z)?)")
 
 
+from pathlib import Path as _AtomicPath
+import sys as _atomic_sys
+if str(_AtomicPath(__file__).resolve().parents[1]) not in _atomic_sys.path:
+    _atomic_sys.path.insert(0, str(_AtomicPath(__file__).resolve().parents[1]))
+from hermes_facility import atomic as _atomic
+
+
 def managed(label):
     return label.startswith(("ai.hermes.", _owner_text("com.<<owner_label_lower>>.")))
 
@@ -300,18 +307,7 @@ def atomic_state(path, data):
     path.parent.mkdir(parents=True, exist_ok=True)
     if path.is_symlink() or path.parent.is_symlink():
         raise ValueError("symlink state")
-    fd, temporary = tempfile.mkstemp(prefix=".doctor-", dir=path.parent)
-    try:
-        with os.fdopen(fd, "w") as stream:
-            os.fchmod(stream.fileno(), 0o600)
-            json.dump(data, stream, ensure_ascii=False)
-            stream.write("\n")
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.replace(temporary, path)
-    finally:
-        if os.path.exists(temporary):
-            os.unlink(temporary)
+    _atomic.write_json(path, data, mode=0o600, prefix=".doctor-")
 
 
 def deliver(home, text):

@@ -84,7 +84,7 @@ def _gmail_success_receipt(services, operation: str, entry: dict[str, Any], gmai
     }, ensure_ascii=False)
 
 def _gmail_account(services) -> str:
-    if (scopes := globals().get('personal_scopes')) is not None and scopes.MAIL_ACCOUNT.get():
+    if (scopes := services.personal_scopes) is not None and scopes.MAIL_ACCOUNT.get():
         return scopes.MAIL_ACCOUNT.get()
     settings = services._PLUGIN_CONTEXT.get_config("gmail", {}) if services._PLUGIN_CONTEXT else {}
     return str(settings.get("account", "") or "") if isinstance(settings, dict) else ""

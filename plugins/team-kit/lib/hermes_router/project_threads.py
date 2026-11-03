@@ -30,8 +30,7 @@ def routing_contract(contract, platform, chat_id):
     hub = hub_settings(contract, platform, chat_id)
     if not hub:
         return contract
-    return {**contract, "hub_request_routing": True,
-            "patterns": {**contract.get("patterns", {}), **hub.get("patterns", {})}}
+    return {**contract, "hub_request_routing": True}
 
 
 def identity(scope_id, chat_id, thread_id, owner_id):
@@ -141,8 +140,8 @@ def project_routing_input(event, contract):
     return text, bool(getattr(event, "media_urls", None))
 
 
-def select_project_profile(source, text, contract, *, has_attachments=False, **kwargs):
-    from hermes_router.common_router import _direct_text, _matches, select_profile
+def select_project_profile(source, text, contract, **kwargs):
+    from hermes_router.common_router import select_profile
     from hermes_router.project_requests import addressed_profiles
     platform = str(getattr(getattr(source, "platform", None), "value", ""))
     hub = hub_settings(contract, platform, str(source.chat_id))
@@ -153,10 +152,6 @@ def select_project_profile(source, text, contract, *, has_attachments=False, **k
     if kwargs.get("explicit_profile"):
         return select_profile(text, contract, **kwargs)
     decision = approval_route(contract, source, text) or select_profile(text, contract, **kwargs)
-    if (has_attachments and hub_settings(contract, platform, str(source.chat_id))
-            and decision.reason in {"fallback", "thread_continuation"}
-            and _matches(contract.get("patterns", {}), "attachment_request", _direct_text(text))):
-        return select_profile("첨부 파일 " + text, contract, **kwargs)
     return handoff_route(contract, source, text, decision)
 
 

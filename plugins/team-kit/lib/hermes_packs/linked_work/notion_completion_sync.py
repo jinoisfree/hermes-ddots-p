@@ -109,7 +109,8 @@ def quiet_hours(now=None):
 
 def work_error_reason(exc):
     message = str(exc)
-    if message == _owner_text("개인 범위는 <<personal_name>> 담당('ㅈ'으로 요청)"):
+    # personal_scopes.wrong_owner('personal'), possibly followed by a handoff hint.
+    if message.startswith(_owner_text("개인 범위는 <<personal_name>> 담당")):
         return 'personal_scope_denied'
     code = message.split(':', 1)[0].strip()
     return code if code in WORK_ERROR_REASONS else 'unknown_error'
@@ -352,7 +353,8 @@ class Sync:
     def event(self, common_id, key, status, **fields):
         fields = compact_bodies(fields, self.rollback, time.time())
         if not self.dry:
-            save(self.rollback_path, self.rollback)
+            if body_refs(fields):  # the multi-MB body archive is rewritten only when this event added a body
+                save(self.rollback_path, self.rollback)
             with self.store._connect() as conn:
                 self.store._event(conn, common_id, 'notion_completion_sync',
                                   {'key': key, 'status': status, **fields})
@@ -678,6 +680,7 @@ class Sync:
             ids = [r['common_id'] for r in conn.execute("""
                 SELECT common_id FROM common_work WHERE (status='active' AND (
                     EXISTS (SELECT 1 FROM source_links s WHERE s.common_id=common_work.common_id
+                            AND s.domain IN ('notes','calendar')  -- reminders (todo) were removed 2026-10-31
                             AND COALESCE(json_extract(s.metadata_json, '$.link_state.status'),'ok') IN ('ok','transient'))
                     OR EXISTS (SELECT 1 FROM knowledge_refs k WHERE k.common_id=common_work.common_id
                                AND k.ref_type='notion_page' AND k.unlinked_at IS NULL
@@ -715,7 +718,8 @@ class Sync:
                 if any(d['status']=='transient' for d in decisions):
                     self.blocked_steps(item, decisions, errors)
                     continue
-                if not self.dry and any(d.get('old_id') for d in decisions):
+                # inspect() wrote new link_state/ids to the store: read them back, not the stale copy.
+                if not self.dry and any(d.get('old_id') or d.get('changed') for d in decisions):
                     item = self.store.get(cid)
                 allowed = {(d['domain'],d['source_id']) for d in decisions if d['status']=='ok'}
                 if self.content_engine is not None:
@@ -848,19 +852,22 @@ class Sync:
         if self.link_lifecycle is not None and not self.dry:
             # Migration and watcher share the same durable transition journal.
             # A detached source is still reportable after it leaves source_links.
+            # A watermark replaces one notice key per transition (they only grew, 2026-11-03): events are
+            # handled in id order, so everything up to it is done and only newer events are read.
+            seen_ids = [int(k.split(':', 1)[1]) for k in self.state['notices'] if k.startswith('link-state-event:')]
+            if seen_ids:
+                self.state['link_state_seen'] = max([self.state.get('link_state_seen', 0), *seen_ids])
+                self.state['notices'] = [k for k in self.state['notices'] if not k.startswith('link-state-event:')]
+            watermark = self.state.get('link_state_seen', 0)
             with self.store._connect() as conn:
-                transitions = conn.execute("SELECT event_id, common_id, payload_json FROM common_work_events WHERE event_type='source_state_changed' ORDER BY event_id").fetchall()
-            notices = set(self.state['notices'])
+                transitions = conn.execute("SELECT event_id, common_id, payload_json FROM common_work_events WHERE event_type='source_state_changed' AND event_id > ? ORDER BY event_id", (watermark,)).fetchall()
             latest = {}
             for event in transitions:
                 data = json.loads(event['payload_json'])
                 latest[(event['common_id'],data['domain'],data['source_id'])] = event['event_id']
             for event in transitions:
-                key = f'link-state-event:{event["event_id"]}'
-                if key in notices:
-                    continue
                 data = json.loads(event['payload_json'])
-                self.state['notices'].append(key)
+                self.state['link_state_seen'] = event['event_id']
                 if (event['event_id']==latest[(event['common_id'],data['domain'],data['source_id'])]
                         and data['status'] not in {'ok','out_of_scope'}):
                     if data['status']=='missing' and getattr(self,'link_decisions_enabled',False):
@@ -1117,12 +1124,6 @@ def main(*, dry_run=False):
                                     for _, title in missed))
             except Exception as exc:
                 log_work_error(home, 'conflict-decisions', 'conflict_ask_failed', exc)
-
-        if sync.completion is not None and not dry_run:
-            try:
-                sync.completion.flush_asks()
-            except Exception as exc:
-                log_work_error(home, 'completion', 'completion_ask_failed', exc)
 
         if sync.link_decisions_enabled and not dry_run and sync.state.get('pending_link_decisions'):
             from hermes_packs.linked_work.link_decisions import Decisions, Inventory

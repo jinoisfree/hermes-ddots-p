@@ -58,6 +58,27 @@ class UpdateTests(unittest.TestCase):
             launch.assert_not_called()
             run.assert_not_called()
 
+    def test_channel_relay_stop_and_new_binary_restart(self):
+        from update_channel import policy
+        for channel in ('private', 'public'):
+            label = policy(channel)[1] + '.relay'
+            with self.subTest(channel=channel), patch.object(m.subprocess, 'run') as run:
+                run.return_value = type('R', (), {'returncode': 0})()
+                self.assertTrue(m.stop_relay(channel))
+                m.start_relay(self.dest, channel=channel)
+                self.assertEqual(run.call_args_list, [
+                    call(['/bin/launchctl', 'print', f'gui/{m.os.getuid()}/{label}'], capture_output=True),
+                    call(['/bin/launchctl', 'bootout', f'gui/{m.os.getuid()}/{label}'], capture_output=True),
+                    call([str(self.dest / 'Contents/MacOS/ddots'), '--relay-enable'], capture_output=True)])
+
+    def test_public_relay_fallback_uses_public_launch_item(self):
+        from update_channel import policy
+        with patch.object(m.subprocess, 'run') as run, patch.object(m.Path, 'home', return_value=self.root):
+            run.return_value = type('R', (), {'returncode': 1})()
+            m.start_relay(self.dest, channel='public')
+            self.assertEqual(run.call_args[0][0], ['/bin/launchctl', 'bootstrap', f'gui/{m.os.getuid()}',
+                str(self.root / f"Library/LaunchAgents/{policy('public')[1]}.relay.plist")])
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
@@ -145,3 +166,24 @@ class UpdateTests(unittest.TestCase):
             stop.assert_not_called()
         self.assertEqual((self.dest / 'old').read_text(), 'preserve')
         self.assertEqual(list(self.root.glob('*.bak-*')), [])
+
+    def test_migration_retires_the_private_relay_item_into_backups(self):
+        from update_channel import policy, PUBLIC_BUNDLE
+        label = policy('private')[1] + '.relay'
+        if label == PUBLIC_BUNDLE + '.relay':
+            self.skipTest('생성된 공개 트리에는 별도 비공개 대화 공유 항목이 없습니다.')
+        agents = self.root / 'Library/LaunchAgents'
+        agents.mkdir(parents=True)
+        (agents / f'{label}.plist').write_text('old')
+        with patch.object(m.Path, 'home', return_value=self.root), patch.object(m, 'BACKUPS', self.root / 'backups'), \
+                patch.object(m.subprocess, 'run') as launchctl:
+            m.retire_private_relay()
+        self.assertFalse((agents / f'{label}.plist').exists())
+        self.assertEqual([p.read_text() for p in (self.root / 'backups').glob(f'{label}.plist.private-*')], ['old'])
+        self.assertIn('bootout', launchctl.call_args[0][0])
+
+    def test_migration_never_brings_back_the_old_relay_item(self):
+        with patch.object(m.subprocess, 'run') as run:
+            run.return_value = type('R', (), {'returncode': 1})()
+            m.start_relay(self.dest, fallback=False)
+        self.assertEqual(run.call_count, 1)  # only --relay-enable; no bootstrap of the stale item

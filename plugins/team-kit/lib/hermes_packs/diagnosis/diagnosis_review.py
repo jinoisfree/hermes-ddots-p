@@ -5,8 +5,6 @@ import json
 import os
 from pathlib import Path
 import subprocess
-import importlib.util as _ilu, pathlib as _pl, sys as _sys
-from hermes_facility import team_registry as team
 
 
 def deployment(diag, args):
@@ -14,16 +12,8 @@ def deployment(diag, args):
     if not path.is_file() or path.stat().st_size > diag.MAX_FILE:
         raise ValueError('A real bounded source file is required')
     history = diag.history_read({'path': str(path), 'limit': 3})
+    # Profiles link plugins/<name> into one plugin-store copy (2026-11-01), so there are no copies to compare.
     paths = [path]
-    relative = None
-    # Compare only copies that the existing synchronizer manages; no arbitrary traversal.
-    for plugin in ('team-kit', 'team-delegation'):
-        base = diag.ROOT / 'plugins' / plugin
-        if base in path.parents:
-            relative = path.relative_to(base)
-            paths.extend(p / relative for p in sorted((diag.ROOT / 'profiles').glob('*/plugins/' + plugin))
-                         if not (plugin == 'team-delegation' and team.has_role(p.parts[-3], 'doctor') and str(relative) == 'plugin.yaml'))
-            break
     checks = []
     for p in paths:
         try:

@@ -128,7 +128,7 @@ def mail(home, args):
         # Each secretary reads only its own scope's mailbox (2026-10-18 사용자 결정), like gmail_direct.
         own='personal' if team.home_has_role(home,'personal') else 'company' if team.home_has_role(home,'work') else None
         if own and str(account).casefold()!=str(shared[own]['gmail']).casefold():
-            raise ValueError("PERSONAL_SCOPE_WRONG_OWNER: "+(_owner_text("개인 메일은 <<personal_name>> 담당('ㅈ'으로 요청)") if own=='company' else _owner_text('회사 메일은 <<work_name>> 담당이다.'))
+            raise ValueError("PERSONAL_SCOPE_WRONG_OWNER: "+(_owner_text("개인 메일은 <<personal_name>> 담당(멘션으로 요청)") if own=='company' else _owner_text('회사 메일은 <<work_name>> 담당이다.'))
                              +_owner_text(" <<owner_label_lower>>-world 스레드면 거부로 끝내지 말고 team_project plan(profile=담당 비서) 후 dispatch(task_id, tool='mail_waiting')로 바로 넘긴다."))
         if account==shared['personal']['gmail']:
             if not shared['personal'].get('connected'):raise ValueError('PERSONAL_ACCOUNT_NOT_CONNECTED: 개인 계정 연결 전')

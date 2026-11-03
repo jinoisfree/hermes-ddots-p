@@ -428,8 +428,9 @@ final class SlackController {
                 UserDefaults.standard.set(retention.filtered(values), forKey: key)
             }
         }
-        let excluded = model.unkept, rooms = snapshot.rooms, archive = self.archive ?? (persists ? DdotsArchive(root: DdotsArchive.standard(), retention: retention) : nil), store = self.store
-        if let bridge { queue.sync { bridge.removeUnkeptCache() } }
+        let excluded = model.unkept, archive = self.archive ?? (persists ? DdotsArchive(root: DdotsArchive.standard(), retention: retention) : nil)
+        // Never wait on the Slack queue here: a sync pass there can take many seconds of HTTP.
+        if let bridge { queue.async { bridge.removeUnkeptCache() } }
         else if persists {
             retention.locked {
                 if var cache = SlackCache.read(Self.cacheURL) {
@@ -439,22 +440,16 @@ final class SlackController {
                 }
             }
         }
-        // Writes and downloads already queued finish before existing copies are removed.
-        var failed = false
-        fileQueue.sync {
-            guard !excluded.isEmpty else { return }
-            do {
-                try archive?.removeUnkept()
-                for room in rooms where excluded.contains(room.id) {
-                    let folder = store.root.appendingPathComponent(SlackFileStore.safe(room.name))
-                    if FileManager.default.fileExists(atPath: folder.path) {
-                        guard rooms.filter({ SlackFileStore.safe($0.name) == SlackFileStore.safe(room.name) }).count == 1 else { failed = true; continue }
-                        try FileManager.default.removeItem(at: folder)
-                    }
+        // Writes and downloads already queued finish before existing copies are removed. Asynchronous: that queue
+        // also waits on the keychain at startup and on long downloads, and the main thread must never wait for it.
+        // Downloads land directly in ~/Downloads (no per-room folder), so only the archive's own records go.
+        if !excluded.isEmpty, let archive {
+            fileQueue.async { [weak self] in
+                do { try archive.removeUnkept() } catch {
+                    DispatchQueue.main.async { self?.sendNotice = "이전에 보관한 파일 일부를 지우지 못했어요. 공유 폴더의 기록과 파일을 확인해 주세요." }
                 }
-            } catch { failed = true }
+            }
         }
-        if failed { sendNotice = "이전에 보관한 파일 일부를 지우지 못했어요. 공유 폴더의 기록과 파일을 확인해 주세요." }
         if persists, !retention.cacheExcluded.isEmpty {
             let folder = Self.cacheURL.deletingLastPathComponent()
             queue.sync { try? FileManager.default.removeItem(at: folder.appendingPathComponent("slack-diagnostics.txt")); diagnostics = "" }

@@ -73,7 +73,9 @@ SETTING = Path.home() / _owner_text('<<workspace_folder>>/Hermes-ddots')
 AGENT = ROOT / 'hermes-agent'
 CLONE = ROOT / 'plugins/claude-subscription-directsdk-experimental'
 # (repository, remote, branch) the 확인 button may push; nothing else is ever pushed.
-REMOTES = {'setting': (SETTING, 'origin', 'main'), 'agent': (AGENT, 'private', _owner_text('<<owner_label_lower>>'))}
+# hermes-agent has no private remote (2026-11-01): its local branch commits stay local and reach the
+# remote only as core-backup/ inside the Hermes-ddots commit that ./sync makes.
+REMOTES = {'setting': (SETTING, 'origin', 'main')}
 # ./sync mirrors: repository prefix -> live folder.
 MIRRORS = (('hermes/', ROOT), ('launchd/', Path.home() / 'Library/LaunchAgents'), ('local-bin/', Path.home() / '.local/bin'))
 # Owner decision 2026-10-25: 일반개발, Opus 5.5 medium only.
@@ -400,7 +402,8 @@ HOLD_QUIET = False  # set by ``tick``: the launchd runner stays silent 00:00~08:
 def quiet(now=None):
     """00:00~08:29 KST: no new Slack posts from 진단담당's background work (2026-10-28 사용자 결정)."""
     now = datetime.fromtimestamp(time.time() if now is None else now, O.KST)
-    return (now.hour, now.minute) < (8, 30)
+    from hermes_schedule.policy import clock  # same owner policy as morning_queue.quiet
+    return (now.hour, now.minute) < clock('quiet_until', (8, 30))
 
 
 def post(home, job, text):
@@ -543,7 +546,7 @@ def result_report(job):
     lines.append(_owner_text(f"• Paseo 대화: `{job.get('agent_id', '')[:8]}` (<<doctor_name>> 자동개편 {key})"))
     if any(commits.values()):
         lines.append('확인·푸시는 변경 기록 처리이며 미해결 문제의 종결이 아니다.')
-        lines.append(_owner_text('*확인*을 누르면 위 커밋을 원격에 올린다(Hermes-ddots origin main · hermes-agent private <<owner_label_lower>>, 강제 푸시 없음).\n'
+        lines.append(_owner_text('*확인*을 누르면 위 커밋을 원격에 올린다(Hermes-ddots origin main, 강제 푸시 없음. hermes-agent 커밋은 로컬에 두고 core-backup으로 보관).\n'
                      '*되돌리기*를 누르면 되돌림 커밋을 만들고 실제 파일을 되돌린 뒤 필요하면 게이트웨이를 재시작한다. '
                      '원본이 이미 원격에 있으면 되돌림 커밋도 올린다.'))
         return '\n'.join(lines) + '\n[[버튼: 확인 | 되돌리기]]'
@@ -651,7 +654,7 @@ def enqueue_incident(home, record, fix_key, record_path, now=None):
         if key in state['jobs']:
             return 'duplicate'
         same = [j for j in state['jobs'].values() if j.get('fix_key') == fix_key]
-        if any(j['status'] in ('queued', 'analyzing', 'implementing') for j in same):
+        if any(j['status'] in ('queued', 'analyzing', 'implementing', 'deferred', WAITING_OWNER) for j in same):
             return 'duplicate'
         previous = [j['key'] for j in same if j['status'] in ('reported', 'confirmed') and now - j.get('queued_at', 0) < 14 * 86400]
         counted = [j for j in state['jobs'].values() if j.get('kind') == 'incident'
@@ -697,8 +700,8 @@ def decide_cap(home, key, choice, now=None):
                                                'done', choice)
         except Exception as exc:
             print(f'autofix cap repaint failed ({type(exc).__name__})', file=sys.stderr)
-    return {'내일로': '알았다. 이 결함은 내일 10:00 조직개편안에서 처리한다.',
-            '확인': '알았다. 오늘은 보류하고 내일 10:00 조직개편안에서 처리한다.',
+    return {'내일로': '알았다. 이 결함은 내일 03:00 새벽 조직개편안에서 처리한다.',
+            '확인': '알았다. 오늘은 보류하고 내일 03:00 새벽 조직개편안에서 처리한다.',
             '승인': '이 결함을 지금 고친다. 끝나면 이 스레드에 결과를 올린다.',
             '거절': '알았다. 이 결함은 고치지 않는다.',
             '이것만 고쳐': '이 결함만 지금 고친다. 끝나면 이 스레드에 결과를 올린다.',
@@ -900,7 +903,7 @@ def advance(home, job):
 
 def push_targets(job):
     return [{'repository': str(REMOTES[name][0]), 'remote': REMOTES[name][1], 'branch': REMOTES[name][2], 'commit': commits[0]}
-            for name, commits in (job.get('commits') or {}).items() if commits]
+            for name, commits in (job.get('commits') or {}).items() if commits and name in REMOTES]
 
 
 def confirm(home, job):
@@ -926,7 +929,7 @@ def finish_confirm(home, job):
     via_paseo = job['status'] == 'confirming'
     pushed, problems = {}, []
     for name, commits in (job.get('commits') or {}).items():
-        if commits:
+        if commits and name in REMOTES:
             repo, remote, branch = REMOTES[name]
             if via_paseo and on_remote(repo, remote, branch, commits[0]):
                 outcome = {'ok': True, 'by': 'paseo'}
@@ -966,7 +969,10 @@ def rollback(home, job):
     try:
         files = changed_files(SETTING, commits.get('setting') or [])
         was_pushed = {name: bool(c) and on_remote(REMOTES[name][0], REMOTES[name][1], REMOTES[name][2], c[-1])
-                      for name, c in commits.items()}
+                      for name, c in commits.items() if name in REMOTES}
+        if commits.get('agent'):
+            # First, so the ./sync below records the reverted core in core-backup/.
+            done['agent'] = revert(AGENT, commits['agent'], job['key'])
         if commits.get('setting'):
             done['setting'] = revert(SETTING, commits['setting'], job['key'])
             skipped = restore_live(files)
@@ -975,8 +981,6 @@ def rollback(home, job):
             sh([str(SETTING / 'sync')], cwd=SETTING, timeout=600)
             if git(SETTING, 'status', '--porcelain').stdout.strip():
                 notes.append('./sync 뒤 남은 차이가 있다. 다른 변경이 섞였을 수 있어 커밋하지 않았다.')
-        if commits.get('agent'):
-            done['agent'] = revert(AGENT, commits['agent'], job['key'])
         if job.get('clone_changed'):
             notes.append('claude-subscription 플러그인 클론 변경은 되돌리지 않았다. 수동 확인 필요.')
         if needs_restart(files, commits.get('agent')):

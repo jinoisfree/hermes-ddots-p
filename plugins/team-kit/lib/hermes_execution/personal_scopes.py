@@ -135,13 +135,11 @@ def role_problem(td, name, args):
             return 'PERSONAL_SCOPE_BACKGROUND_REFUSED: 예약·배경에서 라벨·필터 호출은 허용되지 않는다.'
         if action in {'lookup', 'read', 'thread', 'download', 'accounts', 'ack', 'labels', 'filter_list'}:
             if background(td) and not (team.has_role(current(td), 'work') and target == 'company'
-                    and args.get('action') in {'lookup', 'read', 'thread', 'ack'}
+                    and action in {'lookup', 'read', 'thread', 'ack'}
                     and (td.get_session_env('HERMES_CRON_SESSION', '') or os.environ.get('HERMES_CRON_SESSION'))
                     and not any(td.get_session_env(f, '') or os.environ.get(f) for f in FLAGS[1:])):
                 return 'PERSONAL_SCOPE_BACKGROUND_REFUSED: 예약·배경에서 허용되지 않은 메일 호출이다.'
             return None
-        if target != OWNERS[current(td)]:
-            return wrong_owner(target)
     if name in SCOPED_TOOLS:
         if (background(td) or td.get_session_env('HERMES_SESSION_PLATFORM', '') not in {'slack', 'photon'}
                 or not td.get_session_env('HERMES_SESSION_CHAT_ID', '')
@@ -155,7 +153,7 @@ MAIL_HANDOFF = _owner_text(" <<owner_label_lower>>-world 스레드면 거부로 
 
 
 def wrong_owner(scope):
-    return _owner_text("개인 범위는 <<personal_name>> 담당('ㅈ'으로 요청)") if scope == 'personal' else _owner_text('회사 범위는 <<work_name>> 담당이다.')
+    return _owner_text("개인 범위는 <<personal_name>> 담당(멘션으로 요청)") if scope == 'personal' else _owner_text('회사 범위는 <<work_name>> 담당이다.')
 
 
 def scope_of(cfg, domain, row):

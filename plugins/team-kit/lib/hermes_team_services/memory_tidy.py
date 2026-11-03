@@ -24,6 +24,7 @@ import os
 import re
 import sys
 import time
+from contextlib import ExitStack
 from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -76,6 +77,72 @@ def targets(base=None):
             label = "공유 USER.md" if name == "USER.md" else team.label_of(profile) + " MEMORY.md"
             found.append((label, real, limit))
     return found
+
+
+def aliases(path, base=None):
+    """The real file plus every profile path that is a link to it (the shared USER.md)."""
+    base = Path(base or root())
+    real = Path(path).resolve()
+    found = {real}
+    for profile in PROFILES:
+        home = base if profile == "default" else base / "profiles" / profile
+        alias = home / "memories" / real.name
+        if alias.is_symlink() and alias.resolve() == real:
+            found.add(alias)
+    return sorted(found, key=str)
+
+
+def _lock(path):
+    return Path(path).with_suffix(Path(path).suffix + ".lock")
+
+
+def share_locks(base=None):
+    """Give every link to a shared memory file the real file's lock (one inode, hard links).
+
+    The core locks ``<path>.lock`` per unresolved path, so profiles writing the shared USER.md through
+    their own links never excluded each other. A hard link makes every alias lock the same file without
+    a core change; the core opens it with O_NOFOLLOW, which a hard link (unlike a symlink) passes.
+    Returns the alias lock paths that were (re)linked."""
+    linked = []
+    seen = set()
+    for _label, real, _limit in targets(base):
+        if real in seen:
+            continue
+        seen.add(real)
+        names = aliases(real, base)
+        if len(names) < 2:
+            continue
+        source = _lock(real)
+        os.close(os.open(source, os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0), 0o600))
+        inode = source.stat().st_ino
+        for alias in names:
+            target = _lock(alias)
+            if target == source or (target.exists() and not target.is_symlink() and target.stat().st_ino == inode):
+                continue
+            temp = target.with_name(f"{target.name}.{os.getpid()}.link")
+            os.link(source, temp)
+            os.replace(temp, target)  # atomic: a writer opens either the old or the shared lock
+            linked.append(str(target))
+    return linked
+
+
+def lock_paths(path, base=None):
+    """One lock path per distinct lock file reached through ``path``'s aliases.
+
+    Locking the same inode twice through two descriptors would block this process on itself (flock),
+    so hard-linked locks count once."""
+    chosen, inodes = [], set()
+    for alias in aliases(path, base):
+        lock = _lock(alias)
+        try:
+            key = (lock.stat().st_dev, lock.stat().st_ino)
+        except FileNotFoundError:
+            key = ("missing", str(lock))
+        if key in inodes:
+            continue
+        inodes.add(key)
+        chosen.append(alias)
+    return chosen
 
 
 def parse(raw):
@@ -177,7 +244,9 @@ def tidy(label, path, limit, *, model=ask_model, now=None, dry_run=False):
               "chars_before": len(raw), "chars_after": len(DELIMITER.join(final)), "changes": changes, "merged": merged}
     if dry_run:
         return result
-    with MemoryStore._file_lock(path):
+    with ExitStack() as held:
+        for lock_path in lock_paths(path):
+            held.enter_context(MemoryStore._file_lock(lock_path))
         if path.read_text(encoding="utf-8-sig") != raw:
             return {"label": label, "status": "skipped", "reason": "changed_while_tidying"}
         MemoryStore._write_file(path, final)
@@ -223,6 +292,13 @@ def main(argv=None):
     parser.add_argument("--dry-run", action="store_true", help="모델 답과 검사 결과만 출력하고 쓰거나 보내지 않는다.")
     args = parser.parse_args(argv)
     results = []
+    if not args.dry_run:
+        try:
+            linked = share_locks()
+            if linked:
+                print("MEMORY_TIDY_SHARED_LOCKS:" + ",".join(linked), file=sys.stderr)
+        except OSError as exc:
+            print("MEMORY_TIDY_SHARED_LOCKS_FAILED:" + type(exc).__name__, file=sys.stderr)
     for label, path, limit in targets():
         try:
             results.append(tidy(label, path, limit, dry_run=args.dry_run))

@@ -156,7 +156,7 @@ import SQLite3
             return (ServiceUsage(observedAt: usageNow, maxAge: 3600, windows: [UsageWindow(weekly: true, usedPercent: 15, resetAt: usageNow.addingTimeInterval(86400))]),
                     ServiceUsage(observedAt: usageNow, maxAge: 3600, windows: [UsageWindow(weekly: false, usedPercent: 2), UsageWindow(weekly: true, usedPercent: 41)]))
         }
-        var server = HermesRelayServer(home: home, token: token, interval: 0.1, readUsage: fakeUsage)
+        var server = HermesRelayServer(home: home, token: token, interval: 0.1, sendsMessages: true, readUsage: fakeUsage)
         let maintenanceLock = NSLock()
         var maintenance: [ThreeTapFailure] = []
         server.onTapFailure = { failure in maintenanceLock.lock(); maintenance.append(failure); maintenanceLock.unlock() }
@@ -308,7 +308,7 @@ import SQLite3
         check(client.search("답변").isEmpty, "requests fail fast while disconnected")
         check(client.poll(unreadSince: nil).avatars["default"]?.image != nil && client.poll(unreadSince: nil).characters == first.characters, "(c) disconnection preserves received names and images")
         execute(home.appendingPathComponent("state.db"), ["INSERT INTO messages VALUES (12, 's1', 'assistant', '끊긴 동안', NULL, \(Date().timeIntervalSince1970))"])
-        server = HermesRelayServer(home: home, token: token, interval: 0.1, readUsage: fakeUsage)
+        server = HermesRelayServer(home: home, token: token, interval: 0.1, sendsMessages: true, readUsage: fakeUsage)
         check((try? server.start(host: "127.0.0.1", port: port)) == port, "relay comes back on the same port")
         check(wait(15) { let r = client.poll(unreadSince: nil); return r.status == .connected(stores: 2) && r.messages.last?.body == "끊긴 동안" } != nil, "client reconnects and catches up")
 
@@ -327,10 +327,18 @@ import SQLite3
         let late = RemoteHermes(host: "127.0.0.1", port: port, token: token)
         late.start()
         check(wait(3) { late.poll(unreadSince: nil).status == .unavailable(RemoteHermes.lost) } != nil, "(d) starting without a server reports retrying")
-        server = HermesRelayServer(home: home, token: token, interval: 0.1, readUsage: fakeUsage)
+        server = HermesRelayServer(home: home, token: token, interval: 0.1, sendsMessages: true, readUsage: fakeUsage)
         check((try? server.start(host: "127.0.0.1", port: port)) == port, "late server binds the temporary port")
         check(wait(15) { late.poll(unreadSince: nil).avatars["default"]?.image != nil && !late.poll(unreadSince: nil).characters.isEmpty } != nil, "(d) client automatically connects when server appears")
         late.stop(); server.stop()
+        // The shipping default: the receiving ddots shows no iMessage side, so no message body crosses the link.
+        server = HermesRelayServer(home: home, token: token, interval: 0.1, readUsage: fakeUsage)
+        check((try? server.start(host: "127.0.0.1", port: port)) == port, "default server binds the temporary port")
+        let quiet = RemoteHermes(host: "127.0.0.1", port: port, token: token)
+        quiet.start()
+        check(wait(15) { !quiet.poll(unreadSince: nil).characters.isEmpty } != nil, "default server still sends names")
+        check(quiet.poll(unreadSince: nil).messages.isEmpty && quiet.search("답변").isEmpty, "default server sends no message bodies or search results")
+        quiet.stop(); server.stop()
         try syncChecks(home: home, token: token)
         print("PASS: \(passed) relay wire, code, live delivery, request, reconnect and shared settings checks")
     }
@@ -368,7 +376,7 @@ import SQLite3
         check(SettingsStore(user: "../U1", folder: folder) == nil, "no file outside the folder")
 
         // Over the relay: the other Mac sends a change and hears the original's
-        let server = HermesRelayServer(home: home, token: token, interval: 0.1, syncFolder: folder, readUsage: { nil })
+        let server = HermesRelayServer(home: home, token: token, interval: 0.1, syncFolder: folder, sendsMessages: true, readUsage: { nil })
         let port = try server.start(host: "127.0.0.1", port: 0)
         defer { server.stop() }
         let client = RemoteHermes(host: "127.0.0.1", port: port, token: token)

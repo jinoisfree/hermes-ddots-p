@@ -3,27 +3,21 @@
 Any completion signal (Notion 상태 Done, every task done, or the common work completed in
 conversation) completes the work everywhere: Notion pages get 상태 Done with all to-dos checked, calendar events get a '✅ ' title
 and the gray (graphite) Google color, and the memo moves to the Notes folder 'complete' (owner decision
-2026-10-26: no question; earlier questions still answer through the '옮겨' button).
+2026-10-26: no question).
 """
-from contextlib import contextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
-import asyncio
-import fcntl
 import json
 import logging
-import os
 import subprocess
 import time
 
-from hermes_packs.linked_work import slack_report
 import importlib.util as _ilu, pathlib as _pl, sys as _sys
 from hermes_facility import team_registry as team
 
 DONE_MARK = '✅ '
 GRAY = '8'  # Google Calendar event color "Graphite"
 MOVE_FOLDER = 'complete'
-MOVE, KEEP = '옮겨', '그대로 두기'
 STATUS = '상태'
 
 
@@ -73,7 +67,6 @@ class Completion:
         self.sync, self.since = sync, float(since)
         self.calendar_service = calendar_service
         self.notes_runner = notes_runner
-        self.asks = []  # posted after the watcher's own reports
 
     @property
     def journal(self):
@@ -348,35 +341,6 @@ class Completion:
             logging.getLogger(__name__).warning('completion_calendar_color_failed:%s', type(exc).__name__)
             return False
 
-    # ---- memo move question ----------------------------------------------------------------
-    def flush_asks(self):
-        home = self.sync.path.parent.parent
-        channel = slack_report.report_room(home)
-        if not channel or self.sync.dry:
-            return
-        for item in self.asks:
-            with locked(home) as (state, save):
-                key = item['common_id']
-                if key in state['asks']:
-                    continue
-                state['asks'][key] = {'common_id': key, 'title': item['title'], 'channel': channel,
-                                      'message_ts': None, 'status': 'waiting', 'at': time.time()}
-                save()  # Never resend blindly after an ambiguous Slack timeout.
-                state['asks'][key]['message_ts'] = slack_report.post_thread(home, channel, question(item))
-                save()
-        self.asks = []
-
-
-def question(item):
-    domains = {s['domain'] for s in item['sources']}
-    marked = [label for present, label in (
-              (any(r['ref_type'] == 'notion_page' for r in item.get('knowledge_refs', [])), '노션'),
-              (('calendar' in domains), '일정')) if present]
-    done = f'연결된 {"·".join(marked)}에 완료를 표시했어요. ' if marked else ''
-    return (f'*🔴 {item["title"]} — 모두 완료*\n'
-            f'{done}메모를 `{MOVE_FOLDER}` 폴더로 옮길까요?\n'
-            f'[[버튼: {MOVE} | {KEEP}]]')
-
 
 def company_calendar_service():
     from google.oauth2.credentials import Credentials
@@ -390,26 +354,6 @@ def company_calendar_service():
     return build('calendar', 'v3', credentials=credentials, cache_discovery=False)
 
 
-@contextmanager
-def locked(home):
-    path = Path(home) / 'state/completion-moves.json'
-    path.parent.mkdir(parents=True, exist_ok=True)
-    lock = path.with_suffix('.lock')
-    if path.is_symlink() or lock.is_symlink():
-        raise ValueError('completion_state_symlink')
-    with lock.open('a') as stream:
-        fcntl.flock(stream, fcntl.LOCK_EX)
-        state = json.loads(path.read_text()) if path.exists() else {'asks': {}}
-        def save():
-            tmp = path.with_name(path.name + '.tmp')
-            with tmp.open('w') as output:
-                os.chmod(tmp, 0o600)
-                json.dump(state, output, ensure_ascii=False, indent=2)
-                output.flush(); os.fsync(output.fileno())
-            os.replace(tmp, path)
-        yield state, save
-
-
 def move_note(note_id, runner=subprocess.run):
     from hermes_packs.notes import obsidian_notes
     if obsidian_notes.handles(note_id):return obsidian_notes.move_completed(note_id)
@@ -417,74 +361,3 @@ def move_note(note_id, runner=subprocess.run):
     proc = runner(['/usr/bin/osascript', script, 'move', note_id, MOVE_FOLDER, '', ''],
                   capture_output=True, text=True, timeout=60, check=False)
     return proc.returncode == 0  # the script re-resolves the note and confirms the destination folder
-
-
-def handle(home, store, channel, thread, text, button=None, runner=subprocess.run):
-    """Owner answer in a completion question thread. Returns (state, reply) or None if not ours."""
-    with locked(home) as (state, save):
-        asks = [a for a in state['asks'].values() if a['channel'] == channel and a['message_ts'] == thread]
-        if len(asks) != 1:
-            return None
-        ask = asks[0]
-        if button and (button.get('label') != text or button.get('message_ts') != thread):
-            return None
-        if text not in (MOVE, KEEP):
-            return ('waiting', f'`{MOVE}` 또는 `{KEEP}` 버튼으로 골라 주세요.')
-        if ask['status'] in ('moved', 'kept'):
-            return ('done', '이미 처리했어요.')
-        if text == KEEP:
-            ask['status'] = 'kept'; save()
-            return ('done', '메모는 그대로 두었어요.')
-        notes = [s['source_id'] for s in store.get(ask['common_id'])['sources'] if s['domain'] == 'notes']
-        if not notes:
-            ask['status'] = 'failed'; save()
-            return ('failed', '연결된 메모를 찾지 못해 옮기지 않았어요.')
-        moved = [nid for nid in notes if move_note(nid, runner)]
-        ask['status'] = 'moved' if len(moved) == len(notes) else 'failed'
-        ask['moved'] = moved
-        save()
-        if ask['status'] == 'moved':
-            return ('done', f'메모 {len(moved)}개를 `{MOVE_FOLDER}` 폴더로 옮겼어요.')
-        return ('failed', f'메모 {len(notes)}개 중 {len(moved)}개만 옮겼어요. 다시 누르면 남은 메모를 옮겨요.')
-
-
-def close(home, channel, message_ts, outcome):
-    """Turn the answered question green and drop its buttons (3-color rule)."""
-    with locked(home) as (state, _):
-        ask = next((a for a in state['asks'].values() if a['channel'] == channel and a['message_ts'] == message_ts), None)
-    if ask:
-        slack_report.post_thread(home, channel, f'*🟢 {ask["title"]} — 모두 완료*\n{outcome}', message_ts=message_ts)
-
-
-async def dispatch(home, event=None, **_):
-    if not enabled(home) or not (Path(home) / 'state/completion-moves.json').is_file():
-        return None
-    source = getattr(event, 'source', None)
-    if getattr(getattr(source, 'platform', None), 'value', '') != 'slack':
-        return None
-    if getattr(source, 'user_id', '') != slack_report._sender().owner(home):
-        return None
-    from hermes_packs.linked_work.common_work_links import CommonWorkStore
-    from hermes_constants import get_hermes_home
-    if Path(get_hermes_home()).resolve() != Path(home).resolve():
-        return None
-    def process():
-        channel, thread = getattr(source, 'chat_id', ''), getattr(source, 'thread_id', '')
-        store = CommonWorkStore.production(Path.home() / '.hermes/shared/common-work-links.sqlite3')
-        try:
-            result = handle(home, store, channel, thread, str(getattr(event, 'text', '') or '').strip(),
-                            (getattr(event, 'raw_message', None) or {}).get('_hermes_button'))
-        except Exception as exc:
-            logging.getLogger(__name__).warning('completion_move_failed:%s', type(exc).__name__)
-            result = ('failed', '처리가 중단됐어요. 버튼을 다시 눌러 주세요.')
-        if result is None:
-            return None
-        color = {'done': '🟢', 'waiting': '🟡', 'failed': '🔴'}[result[0]]
-        try:
-            slack_report.post_thread(home, channel, f'*{color} 메모 정리*\n{result[1]}', thread_ts=thread)
-            if result[0] == 'done':
-                close(home, channel, thread, result[1])
-        except Exception as exc:
-            logging.getLogger(__name__).warning('completion_move_notify_failed:%s', type(exc).__name__)
-        return {'action': 'skip', 'reason': 'completion memo move handled by plugin'}
-    return await asyncio.to_thread(process)

@@ -6,7 +6,7 @@
   3. 확정된 진단 결함과 점검·오류 확인을 한 Paseo 작업(``night-<날짜>``)으로 묻지 않고 넘긴다.
      Paseo는 표식 커밋까지만 하고 푸시는 아침 보고 스레드의 확인 버튼 뒤다.
   4. 어제 조직개편안을 보내지 않고 만들어 Paseo에 바로 넘긴다(2026-10-29 사용자 결정, ``org_review.night``).
-     08:30 조직개편안 보고가 그 스레드에 결과와 확인·롤백 버튼을 받는다.
+     08:30 조직개편안 보고가 그 스레드에 결과와 확인·되돌리기 버튼을 받는다.
   5. 월요일에는 지난 대화 보존 현황을 센다(본문을 읽거나 지우지 않는다).
 
 결과는 ``watcher-state/night-batch.json``에 남고 08:30 ``morning_system``이 private-service-27으로 보고한다.
@@ -149,17 +149,22 @@ def run(root, home, agents, document, *, dry_run=False, now=None):
         except Exception as exc:  # the diagnoses above are already done; keep them
             checked, check_error = '', type(exc).__name__
         defects = [row for row in results if row['status'] == 'night_done' and row['fix_key']]
-        items = [A.incident_item(DR.read(row['id']), row['fix_key'], str(DR.path(row['id'])), [])
-                 for row in defects]
-        if checked:
-            items.append(system_item(checked))
         key = 'night-' + day
-        queued = None
-        if items and not dry_run:
-            queued = A.enqueue_night(home, key, items, [row['id'] for row in defects])
+        queued, items, enqueue_error = None, [], ''
+        # The diagnoses above already changed their records: a failure here must still save the night.
+        try:
+            items = [A.incident_item(DR.read(row['id']), row['fix_key'], str(DR.path(row['id'])), [])
+                     for row in defects]
+            if checked:
+                items.append(system_item(checked))
+            if items and not dry_run:
+                queued = A.enqueue_night(home, key, items, [row['id'] for row in defects])
+        except Exception as exc:
+            enqueue_error = type(exc).__name__
         night = {'day': day, 'at': now.isoformat(), 'diagnoses': results, 'carried': len(carried),
                  'job': key if queued in ('queued', 'duplicate') else None,
-                 'items': [i['title'] for i in items], 'check_error': check_error, 'reported': False}
+                 'items': [i['title'] for i in items], 'check_error': check_error, 'reported': False,
+                 **({'enqueue_error': enqueue_error} if enqueue_error else {})}
         if not dry_run:
             # 2026-10-29 사용자 결정: 조직개편안도 새벽에 만들어 Paseo가 진행하고, 아침 보고에 확인·롤백만 묻는다.
             try:

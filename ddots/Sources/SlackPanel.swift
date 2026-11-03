@@ -74,58 +74,12 @@ enum SlackSidebar {
     }
     static let topInset: CGFloat = 4
     static let inset: CGFloat = 6
-    static let corner: CGFloat = 14
-    static let flare: CGFloat = 7
     static let faces: CGFloat = 34
     /// Room left above and below an opened thread when the window grows to fit it.
     static let threadMargin: CGFloat = 28
     /// How far replies sit in from the thread's edge: the picture and the gap beside it.
     static let threadIndent: CGFloat = ChatMetrics.avatar + 9
 
-    /// The chosen tab's outline, open on the right with flared corners so it runs into the conversation.
-    static func contour(_ path: inout Path, in rect: CGRect, y: CGFloat, height: CGFloat) {
-        let left = rect.minX + inset, right = rect.maxX, top = y + flare, bottom = y + height - flare
-        path.addLine(to: CGPoint(x: right, y: y))
-        path.addQuadCurve(to: CGPoint(x: right - flare, y: top), control: CGPoint(x: right, y: top))
-        path.addLine(to: CGPoint(x: left + corner, y: top))
-        path.addQuadCurve(to: CGPoint(x: left, y: top + corner), control: CGPoint(x: left, y: top))
-        path.addLine(to: CGPoint(x: left, y: bottom - corner))
-        path.addQuadCurve(to: CGPoint(x: left + corner, y: bottom), control: CGPoint(x: left, y: bottom))
-        path.addLine(to: CGPoint(x: right - flare, y: bottom))
-        path.addQuadCurve(to: CGPoint(x: right, y: y + height), control: CGPoint(x: right, y: bottom))
-    }
-}
-
-/// The veil over the tab strip with the chosen tab left clear. Animating `y` slides the opening between tabs.
-struct SlackSidebarVeil: Shape {
-    var y: CGFloat
-    var height: CGFloat
-    var hasTab: Bool
-    var animatableData: AnimatablePair<CGFloat, CGFloat> { get { .init(y, height) } set { y = newValue.first; height = newValue.second } }
-    func path(in rect: CGRect) -> Path {
-        var path = Path(rect)
-        guard hasTab else { return path }
-        path.move(to: CGPoint(x: rect.maxX, y: y))
-        SlackSidebar.contour(&path, in: rect, y: y, height: height)
-        path.closeSubpath()
-        return path
-    }
-}
-
-/// The hairline between the strip and the conversation, bending around the chosen tab.
-struct SlackSidebarEdge: Shape {
-    var y: CGFloat
-    var height: CGFloat
-    var hasTab: Bool
-    var animatableData: AnimatablePair<CGFloat, CGFloat> { get { .init(y, height) } set { y = newValue.first; height = newValue.second } }
-    func path(in rect: CGRect) -> Path {
-        let line = rect.insetBy(dx: 0.5, dy: 0)
-        var path = Path()
-        path.move(to: CGPoint(x: line.maxX, y: rect.minY))
-        if hasTab { SlackSidebar.contour(&path, in: line, y: y, height: height) }
-        path.addLine(to: CGPoint(x: line.maxX, y: rect.maxY))
-        return path
-    }
 }
 
 /// Only the editor observes every syllable as it is being composed.
@@ -1620,6 +1574,9 @@ final class SlackModel: ObservableObject {
     /// Called after the hosting view has laid out. Entry uses final native geometry, before showing the conversation.
     /// No timer or animated scroll is involved. Layout refinements stay anchored until actual user input takes over.
     @discardableResult func prepareEntryViewport() -> Bool {
+        // Connection guidance and search results do not render the conversation viewport.
+        // Waiting for its stamps would keep the opening picture hidden until a drag ends it.
+        guard connected, !findOpen else { cancelEntry(); return true }
         guard let entry = entryViewport else { return true }
         guard entryHolds, entry.stamp == entryViewportStamp, entry.scrolls == userScrolls,
               source == .slack, pageHold == nil else { cancelEntry(); return true }
@@ -2309,17 +2266,6 @@ extension ChatView {
     }
     private var slackPinMark: some View {
         Image(systemName: "pin.fill").font(.system(size: 8)).foregroundColor(quiet).rotationEffect(.degrees(45)).accessibilityLabel("고정됨")
-    }
-
-    /// White on red for every room. A muted room is told apart by its bell mark, not by a duller number.
-    @ViewBuilder private func slackBadge(_ count: Int) -> some View {
-        if count > 0 {
-            Text(SlackUnread.badge(count)).font(.system(size: 9, weight: .bold)).foregroundColor(.white)
-                .frame(minWidth: 15, minHeight: 15).padding(.horizontal, count > 9 ? 3 : 0)
-                .background(Capsule().fill(Color.red))
-                .overlay(Capsule().stroke(dark ? Color.black.opacity(0.7) : Color.white, lineWidth: 1.5))
-                .offset(x: 7, y: -5).transition(.scale.combined(with: .opacity))
-        }
     }
 
     /// One face alone, two overlapping, three in a triangle or four in a square, like a group conversation's picture.
@@ -3115,13 +3061,6 @@ extension ChatView {
 }
 
 extension ChatView {
-    /// What a file-only message is called where one line stands in for it.
-    func slackPreview(_ message: ChatMessage) -> String {
-        if !message.fromUser && SlackText.isThinking(message.body) { return "작성 중…" }
-        let text = ChatText.preview(message.body)
-        return text.isEmpty ? (message.files.first.map { "📎 " + $0.name } ?? message.marks.first.map { ChatText.preview($0.text) } ?? "") : text
-    }
-
     /// A picture shows itself; anything else shows its name and size. Pressing either saves the file to the shared folder and opens it.
     func fileView(_ file: ChatFile, in message: ChatMessage) -> some View {
         let busy = slack.busyFiles.contains(file.id)

@@ -50,9 +50,13 @@ final class HermesRelayServer {
     private var usageBusy = false
     private var nextUsage = Date.distantPast
 
+    /// Message bodies, receipts and search go out only while the receiving ddots shows the iMessage side.
+    let sendsMessages: Bool
+
     init(home: URL? = nil, token: String, interval: TimeInterval = 0.5, syncFolder: URL = SettingsStore.folder,
-         usageInterval: TimeInterval = 60, readUsage: @escaping () -> (codex: ServiceUsage?, claude: ServiceUsage?)? = UsageSources.paseo) {
-        self.syncFolder = syncFolder
+         usageInterval: TimeInterval = 60, sendsMessages: Bool = IMessageFeature.enabled,
+         readUsage: @escaping () -> (codex: ServiceUsage?, claude: ServiceUsage?)? = UsageSources.paseo) {
+        self.syncFolder = syncFolder; self.sendsMessages = sendsMessages
         followsLocation = home == nil
         bridge = HermesBridge(home: home, makesImages: false); self.token = token; self.interval = interval
         self.usageInterval = usageInterval; self.readUsage = readUsage
@@ -187,12 +191,14 @@ final class HermesRelayServer {
         case "sync":
             receiveSync(frame, from: client)
             return
-        case "search":
-            reply.messages = bridge.search(String((frame.text ?? "").prefix(200))).map(RelayFrame.Message.init)
-        case "older":
-            reply.messages = bridge.older(before: frame.before?.message).map(RelayFrame.Message.init)
-        case "around":
-            reply.messages = bridge.around(profile: frame.profile ?? "", messageID: frame.row ?? 0).map(RelayFrame.Message.init)
+        case "search", "older", "around":
+            // No message bodies leave this Mac while the receiving side shows none (IMessageFeature).
+            guard sendsMessages else { reply.messages = []; break }
+            switch frame.op {
+            case "search": reply.messages = bridge.search(String((frame.text ?? "").prefix(200))).map(RelayFrame.Message.init)
+            case "older": reply.messages = bridge.older(before: frame.before?.message).map(RelayFrame.Message.init)
+            default: reply.messages = bridge.around(profile: frame.profile ?? "", messageID: frame.row ?? 0).map(RelayFrame.Message.init)
+            }
         default: return
         }
         send(reply, to: client)
@@ -240,7 +246,8 @@ final class HermesRelayServer {
         refreshUsage()
         let usage = usageCodex == nil && usageClaude == nil ? nil : RelayUsage(codex: usageCodex, claude: usageClaude)
         sendSync(to: watchers)
-        let result = bridge.poll(unreadSince: nil)
+        // The receiving ddots shows no iMessage conversation (IMessageFeature): never send message bodies it would drop.
+        let result = bridge.poll(unreadSince: nil, includeMessages: sendsMessages)
         // Who is writing in which Slack thread; the other Mac shows the dots under its own Slack view.
         let slack = bridge.slackActivity()
         var receipts: [Double: [RelayFrame.Receipt]] = [:]
@@ -268,7 +275,7 @@ final class HermesRelayServer {
             if client.avatars != result.avatars { client.avatars = result.avatars; frame.avatars = result.avatars.mapValues(RelayFrame.Avatar.init); changed = true }
             if let usage, client.usage != usage { client.usage = usage; frame.usage = usage; changed = true }
             if client.slack != slack { client.slack = slack; frame.slack = slack; changed = true }
-            if let unread = client.unread, messagesChanged || client.unreadChanged {
+            if sendsMessages, let unread = client.unread, messagesChanged || client.unreadChanged {
                 let key = unread.timeIntervalSince1970
                 if receipts[key] == nil {
                     receipts[key] = bridge.receipts(after: unread).map { RelayFrame.Receipt(id: $0.id, fromUser: $0.fromUser, date: $0.date.timeIntervalSince1970) }

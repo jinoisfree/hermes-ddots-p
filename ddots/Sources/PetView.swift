@@ -19,12 +19,17 @@ final class PetPanel: NSPanel {
     /// Placement constrains the visible artwork; its transparent cell may cross the screen edge.
     override func constrainFrameRect(_ frameRect: NSRect, to screen: NSScreen?) -> NSRect { frameRect }
     var chatExpanded = false
+    var clipboardPresented = false
+    var onClipboardKey: ((NSEvent) -> Bool)?
     var onCollapse: (() -> Void)?
     var onChatKey: ((NSEvent) -> Bool)?
     /// A shortcut for the page beside the conversation, when the keyboard is in it.
     var onPageKey: ((NSEvent) -> Bool)?
     var onPasteAttachments: (() -> Bool)?
     override func sendEvent(_ event: NSEvent) {
+        if clipboardPresented, event.type == .keyDown, onClipboardKey?(event) == true { return }
+        if clipboardPresented, event.type == .leftMouseDown || event.type == .rightMouseDown,
+           let pet = contentView as? PetView, pet.clipboardContains(event.locationInWindow) { makeKey() }
         // Let selectable text receive the first press instead of spending it on key-window focus.
         if chatExpanded, !isKeyWindow, event.type == .leftMouseDown,
            let pet = contentView as? PetView,
@@ -36,10 +41,11 @@ final class PetPanel: NSPanel {
         super.sendEvent(event)
     }
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        if clipboardPresented, onClipboardKey?(event) == true { return true }
         if chatExpanded, onPageKey?(event) == true { return true }
         if chatExpanded, event.modifierFlags.contains(.command), Self.shortcutKey(event) == "f", onChatKey?(event) == true { return true }
         if chatExpanded, Self.editAction(for: event) == #selector(NSText.paste(_:)), onPasteAttachments?() == true { return true }
-        if chatExpanded, let action = Self.editAction(for: event), NSApp.sendAction(action, to: nil, from: self) { return true }
+        if chatExpanded || clipboardPresented, let action = Self.editAction(for: event), NSApp.sendAction(action, to: nil, from: self) { return true }
         return super.performKeyEquivalent(with: event)
     }
     /// The letter a shortcut stands for. A Korean or other non-Latin input source can report its own character,
@@ -63,8 +69,8 @@ final class PetPanel: NSPanel {
         default: return nil
         }
     }
-    override var canBecomeKey: Bool { chatExpanded }
-    override func cancelOperation(_ sender: Any?) { onCollapse?() }
+    override var canBecomeKey: Bool { chatExpanded || clipboardPresented }
+    override func cancelOperation(_ sender: Any?) { if clipboardPresented { (contentView as? PetView)?.dismissClipboard() } else { onCollapse?() } }
     override var canBecomeMain: Bool { false }
 }
 
@@ -75,6 +81,33 @@ final class PetGlassView: NSGlassEffectView {
 
 final class PetVibrancyView: NSVisualEffectView {
     override func hitTest(_ point: NSPoint) -> NSView? { nil }
+}
+
+/// A local visual overlay. It never mutates the normal headline/subtitle or a chat model.
+final class ClipboardCopyTextView: NSView {
+    private var notice: ClipboardCopyNotice.Frame?
+    override var isOpaque: Bool { false }
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+    func present(_ frame: ClipboardCopyNotice.Frame?) {
+        let changed = notice?.text != frame?.text
+        notice = frame; isHidden = frame == nil
+        if changed {
+            setAccessibilityElement(frame != nil); setAccessibilityRole(.staticText)
+            setAccessibilityLabel(frame?.text)
+        }
+        needsDisplay = true
+    }
+    override func draw(_ dirtyRect: NSRect) {
+        guard let notice else { return }
+        let paragraph = NSMutableParagraphStyle(); paragraph.lineBreakMode = .byTruncatingTail
+        let area = bounds.insetBy(dx: 12, dy: 10)
+        func text(_ value: String, alpha: Double) {
+            (value as NSString).draw(in: area, withAttributes: [.font: NSFont.systemFont(ofSize: 11), .foregroundColor: NSColor.labelColor.withAlphaComponent(alpha), .paragraphStyle: paragraph])
+        }
+        let combined = max(0.001, notice.alpha + notice.previousAlpha)
+        if let previous = notice.previous { text(previous, alpha: notice.previousAlpha / combined) }
+        text(notice.text, alpha: notice.previous == nil ? 1 : notice.alpha / combined)
+    }
 }
 
 final class BubbleTextView: NSView {
@@ -208,11 +241,19 @@ final class GenieChatHost: NSHostingView<ChatView> {
     }
 }
 
+/// The shelf is entered through hover, so its first press must reach SwiftUI even before it has key focus.
+final class ClipboardShelfHost: NSHostingView<ClipboardShelf> {
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+}
+
 final class PetView: NSView {
     let atlas: SpriteAtlas
     private let spriteSurface = PetSpriteView()
     var identity: PetIdentity { didSet { updateIdentityDescription() } }
     let bubbleText = BubbleTextView()
+    let clipboardCopyText = ClipboardCopyTextView()
+    private var clipboardCopyNotice = ClipboardCopyNotice()
+    private(set) var clipboardCopyFrame: ClipboardCopyNotice.Frame?
     private var bubbleSurface: NSView!
     /// Small circles rising from the pet's head to the bubble, the way a thought balloon is drawn in a comic.
     private var thoughtDots: [(surface: NSView, tint: NSView)] = []
@@ -382,16 +423,219 @@ final class PetView: NSView {
     var petBadgeVisible: Bool { !petBadge.isHidden }
     var petBadgeRect: CGRect { petBadge.frame }
     /// Something asks for attention: the bubble comes out for a while.
-    func revealBubble() { reveal.alert(now: ProcessInfo.processInfo.systemUptime); updateBubbleShown() }
+    func revealBubble() { clipboardCopyNotice.clear(); reveal.alert(now: ProcessInfo.processInfo.systemUptime); updateBubbleShown() }
+    private var canShowClipboardCopyNotice: Bool {
+        clipboardLibrary?.settings.enabled != false && !chatExpanded && !morphing && !genieActive && !clipboardPresented && !isPaused && !resting
+            && window?.isVisible == true && !isHiddenOrHasHiddenAncestor && !didDrag
+            && state != .waiting && state != .failed && slackModel?.needsPetApproval != true
+            && actions.isEmpty && previewRow == nil && !previewLook
+    }
+    func showClipboardCopyNotice(_ message: String) {
+        guard canShowClipboardCopyNotice else { return }
+        clipboardCopyNotice.show(message, now: ProcessInfo.processInfo.systemUptime)
+        updateBubbleShown()
+    }
+    func cancelClipboardCopyNotice() {
+        guard clipboardCopyFrame != nil else { return }
+        clipboardCopyNotice.clear(); updateBubbleShown()
+    }
+    private func updateClipboardCopyNotice(now: TimeInterval) -> Bool {
+        let wasShown = clipboardCopyFrame != nil
+        if !canShowClipboardCopyNotice { clipboardCopyNotice.clear() }
+        clipboardCopyFrame = clipboardCopyNotice.update(now: now, reducedMotion: reducesMotion)
+        clipboardCopyText.present(clipboardCopyFrame)
+        guard let frame = clipboardCopyFrame else {
+            if wasShown {
+                CATransaction.begin(); CATransaction.setDisableActions(true)
+                bubbleSurface.layer?.setAffineTransform(.identity)
+                ([bubbleSurface!] + thoughtDots.map(\.surface)).forEach { $0.alphaValue = 1 }
+                CATransaction.commit()
+                bubbleText.isHidden = clipboardPresented || chatExpanded
+            }
+            return wasShown
+        }
+        bubbleText.isHidden = true
+        CATransaction.begin(); CATransaction.setDisableActions(true)
+        bubbleSurface.layer?.setAffineTransform(CGAffineTransform(translationX: 0, y: frame.offset))
+        ([bubbleSurface!] + thoughtDots.map(\.surface)).forEach { $0.alphaValue = min(1, frame.alpha + frame.previousAlpha) }
+        CATransaction.commit()
+        return false
+    }
     /// The pointer came onto the pet and has not left it or the bubble it brought out.
     private var hovering = false
+    var clipboardAvailable = false { didSet { updateBubbleShown() } }
+    private(set) var clipboardPresented = false
+    private var clipboardDismissed = false
+    private var clipboardRequested = false
+    private var clipboardSurfaceActive = false
+    private var clipboardShortcutAwaitingEntry = false
+    func toggleClipboardFromShortcut() {
+        if clipboardPresented { dismissClipboard(); return }
+        guard clipboardLibrary?.settings.enabled == true, !chatExpanded, !clipboardAttention else { return }
+        clipboardRequested = true; clipboardDismissed = false; hovering = true; clipboardShortcutAwaitingEntry = true
+        updateBubbleShown()
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.clipboardPresented, let panel = self.window as? PetPanel else { return }
+            panel.makeKey()
+            if let field = self.clipboardHost.flatMap({ ClipboardSearch.field(in: $0) }) { panel.makeFirstResponder(field) }
+        }
+    }
+    private var clipboardRowEntered: TimeInterval?
+    private let clipboardRow = ClipboardDrawerRow(frame: .zero)
+    private weak var clipboardLibrary: ClipboardLibrary?
+    var onClipboardGeometry: (() -> Void)?
+    var onClipboardResize: ((CGSize) -> Void)?
+    var onResetClipboardSize: (() -> Void)?
+    var clipboardOpacityPercent = BubbleOpacity.defaultPercent { didSet { updateScrim() } }
+    private(set) var clipboardResizing = false
+    var clipboardOpenHeight: CGFloat = ClipboardDrawer.defaultSize.height
+    var clipboardRowVisible: Bool { clipboardRow.superview != nil && !clipboardRow.isHidden }
+    func clipboardPreviewEnded() { clipboardExitDeadline = nil }
+    var clipboardTintAlpha: CGFloat { scrim.layer?.backgroundColor?.alpha ?? 0 }
+    var clipboardPreviewRect: CGRect { clipboardHost?.frame ?? .zero }
+    var clipboardRowRect: CGRect { clipboardRow.convert(clipboardRow.bounds, to: self) }
+    var clipboardAttention: Bool {
+        state == .waiting || state == .failed || slackModel?.needsPetApproval == true || !actions.isEmpty
+            || reveal.update(now: ProcessInfo.processInfo.systemUptime, held: false)
+    }
+    func openClipboard() {
+        guard clipboardAvailable, !chatExpanded, !clipboardAttention else { return }
+        clipboardRequested = true; clipboardDismissed = false; hovering = true
+        clipboardRowEntered = nil; updateBubbleShown()
+    }
+    func dismissClipboard() { clipboardRequested = false; clipboardShortcutAwaitingEntry = false; clipboardRowEntered = nil; clipboardDismissed = true; clipboardExitDeadline = nil; clipboardHolding = false; window?.makeFirstResponder(nil); window?.resignKey(); updateClipboardPresentation() }
+    private var clipboardHolding = false
+    private var clipboardIncoming = false
+    private var clipboardDrop: ClipboardDrop?
+    private var clipboardHost: NSHostingView<ClipboardShelf>?
+    private var clipboardLocalEvents: Any?
+    private var clipboardGlobalEvents: Any?
+    private var clipboardExitDeadline: TimeInterval?
+    var clipboardExitTime: TimeInterval? { clipboardExitDeadline }
+    /// Coordinates are in the content view; the sprite always keeps its existing click/drag route.
+    func clipboardContains(_ point: NSPoint) -> Bool {
+        !spriteContains(point) && clipboardPresented && bubbleSurface.frame.contains(point)
+    }
+    private func clipboardPointerEvent(_ event: NSEvent) {
+        guard let window, clipboardLibrary?.settings.enabled == true else { return }
+        let point = pointerLocation()
+        let local = convert(window.convertPoint(fromScreen: point), from: nil)
+        let head = atlas.interactionRect(in: spriteRect)
+        if event.type == .flagsChanged { clipboardLibrary?.commandHeld = event.modifierFlags.contains(.command); return }
+        if event.type == .leftMouseDown || event.type == .rightMouseDown {
+            if clipboardLibrary?.preview.owns(event.window) == true { return }
+            if clipboardPresented {
+                if head.contains(local) || clipboardContains(local) {
+                    clipboardExitDeadline = nil
+                } else { dismissClipboard() }
+            }
+            return
+        }
+        let onHead = head.insetBy(dx: -8, dy: -8).contains(local)
+        if !onHead { hoverArmed = true }
+        if clipboardPresented {
+            if ClipboardDrawer.containsPointer(local, head: head, bubble: bubbleSurface.frame) {
+                clipboardExitDeadline = nil; hovering = true
+                if bubbleSurface.frame.contains(local) { clipboardShortcutAwaitingEntry = false }
+            } else if !clipboardShortcutAwaitingEntry && clipboardLibrary?.preview.isOpen != true && clipboardExitDeadline == nil {
+                clipboardExitDeadline = ProcessInfo.processInfo.systemUptime + 0.3
+            }
+        } else if !onHead {
+            clipboardDismissed = false
+        }
+        updateBubbleShown()
+    }
+    private func installClipboardEvents() {
+        if let clipboardLocalEvents { NSEvent.removeMonitor(clipboardLocalEvents) }
+        if let clipboardGlobalEvents { NSEvent.removeMonitor(clipboardGlobalEvents); self.clipboardGlobalEvents = nil }
+        let mask: NSEvent.EventTypeMask = [.flagsChanged, .mouseMoved, .leftMouseDragged, .rightMouseDragged, .otherMouseDragged, .leftMouseDown, .rightMouseDown]
+        clipboardLocalEvents = NSEvent.addLocalMonitorForEvents(matching: mask) { [weak self] event in
+            self?.clipboardPointerEvent(event); return event
+        }
+    }
+    private func updateClipboardEventScope() {
+        let needed = clipboardLibrary?.settings.enabled == true && window?.isVisible == true && !chatExpanded && (bubbleShown || hovering || clipboardPresented)
+        if needed && clipboardGlobalEvents == nil {
+            let mask: NSEvent.EventTypeMask = [.flagsChanged, .mouseMoved, .leftMouseDragged, .rightMouseDragged, .otherMouseDragged, .leftMouseDown, .rightMouseDown]
+            clipboardGlobalEvents = NSEvent.addGlobalMonitorForEvents(matching: mask) { [weak self] event in self?.clipboardPointerEvent(event) }
+        } else if !needed, let monitor = clipboardGlobalEvents { NSEvent.removeMonitor(monitor); clipboardGlobalEvents = nil }
+    }
+    var onClipboardPresentation: ((Bool) -> Void)?
+    func installClipboard(_ library: ClipboardLibrary) {
+        clipboardHost?.removeFromSuperview()
+        clipboardLibrary = library
+        if clipboardRow.superview == nil { surfaceContent.addSubview(clipboardRow) }
+        clipboardRow.activate = { [weak self] collapse in
+            guard let self else { return }
+            if self.clipboardPresented {
+                if collapse { self.dismissClipboard() }
+                else if self.clipboardAttention { self.dismissClipboard(); self.onClick?(1) }
+            } else { self.openClipboard() }
+        }
+        installClipboardEvents()
+        clipboardDrop = ClipboardDrop(library: library)
+        if !chatExpanded { registerForDraggedTypes(ClipboardPasteboard.supported) }
+        let host = ClipboardShelfHost(rootView: ClipboardShelf(library: library, holding: { [weak self] value in
+            self?.clipboardHolding = value; self?.updateBubbleShown()
+        }))
+        host.sizingOptions = []; host.isHidden = true
+        addSubview(host); clipboardHost = host
+    }
+    private func updateClipboardPresentation() {
+        let enabled = clipboardLibrary?.settings.enabled == true
+        if !enabled {
+            clipboardRequested = false; clipboardIncoming = false; clipboardHolding = false
+            clipboardShortcutAwaitingEntry = false; clipboardRowEntered = nil; clipboardExitDeadline = nil
+            if clipboardResizing { clipboardResizing = false; resizeDrag = nil }
+        }
+        let shown = enabled && !clipboardDismissed && (clipboardRequested || clipboardIncoming) && !chatExpanded && !morphing && !genieActive
+            && previewRow == nil && !previewLook && !didDrag
+        let rowShown = enabled && (shown || (clipboardAvailable && !clipboardAttention && !chatExpanded && !morphing && !genieActive && (hovering || clipboardCopyFrame != nil)))
+        let rowChanged = clipboardRow.isHidden == rowShown
+        if rowShown { clipboardSurfaceActive = true }
+        clipboardRow.isHidden = !rowShown
+        clipboardRow.expanded = shown; clipboardRow.attention = shown && clipboardAttention
+        if shown {
+            clipboardRow.text = (clipboardAttention ? "📱 " : "") + headline
+            clipboardRow.detail = subtitle; clipboardRow.avatar = bubbleText.avatar; clipboardRow.avatarName = bubbleText.avatarName
+        } else if let library = clipboardLibrary {
+            if library.permissionNeeded { clipboardRow.text = "📋 붙여넣기 허용이 필요해요" }
+            else if library.paused { clipboardRow.text = "📋 기록 멈춤 · \(library.entries.count)" }
+            else {
+                let recent = library.entries.first.map { ClipboardCopyNotice.name($0) } ?? ""
+                clipboardRow.text = "📋 클립보드 \(library.entries.count)  \(recent)"
+            }
+        }
+        if shown != clipboardPresented {
+            clipboardPresented = shown
+            if !shown { clipboardExitDeadline = nil; clipboardRequested = false }
+            clipboardHost?.isHidden = !shown; bubbleText.isHidden = shown || chatExpanded
+            (window as? PetPanel)?.clipboardPresented = shown
+            if !shown, !chatExpanded { window?.makeFirstResponder(nil); window?.resignKey() }
+            onClipboardPresentation?(shown); needsLayout = true
+        }
+        if rowChanged { onClipboardGeometry?(); needsLayout = true }
+        updateClipboardEventScope()
+    }
+    override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
+        guard !chatExpanded, sender.draggingSourceOperationMask.contains(.copy), clipboardDrop?.accepts(sender.draggingPasteboard) == true else { return [] }
+        clipboardIncoming = true; updateBubbleShown(); return .copy
+    }
+    override func draggingUpdated(_ sender: NSDraggingInfo) -> NSDragOperation { draggingEntered(sender) }
+    override func draggingExited(_ sender: NSDraggingInfo?) { clipboardIncoming = false; updateBubbleShown() }
+    override func prepareForDragOperation(_ sender: NSDraggingInfo) -> Bool { !chatExpanded && clipboardDrop?.accepts(sender.draggingPasteboard) == true }
+    override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        defer { clipboardIncoming = false; updateBubbleShown() }
+        guard !chatExpanded else { return false }
+        return clipboardDrop?.receive(sender.draggingPasteboard) == true
+    }
     /// Folding the conversation leaves the pointer on the pet or where the bubble lands. That is not a visit:
     /// the pointer has to be seen off the pet once before it can bring the bubble out again.
     private var hoverArmed = true
     private func updateBubbleShown() {
         // The glass is still on its way down from the conversation's size. This goes by the glass itself, not by
         // whether the fold was ever marked as finished.
-        let folding = bubbleSurface.frame.height > foldedHeight + 1 || bubbleSurface.frame.width > PetLayout.bubbleSize.width + 1
+        let folding = !clipboardPresented && (bubbleSurface.frame.height > foldedHeight + 1 || bubbleSurface.frame.width > PetLayout.bubbleSize.width + 1)
         if morphing, !chatExpanded, !folding { finishMorph() }
         var held = chatExpanded || folding || previewRow != nil || previewLook || didDrag
             || (!isPaused && (state == .waiting || slackModel?.needsPetApproval == true))
@@ -401,10 +645,32 @@ final class PetView: NSView {
             let onHead = over(head)
             if !onHead { hoverArmed = true }
             // Once it is out for the pointer, the pointer can cross over to it and press what it offers.
-            hovering = hoverArmed && (onHead || (hovering && bubbleShown && over(head.union(bubbleSurface.frame))))
-            held = held || hovering
+            if clipboardPresented {
+                // Only pointer events arm this deadline. Geometry, focus and timer ticks cannot invent an exit.
+                if let deadline = clipboardExitDeadline, ProcessInfo.processInfo.systemUptime >= deadline, !clipboardHolding, clipboardLibrary?.preview.isOpen != true {
+                    clipboardExitDeadline = nil; hovering = false; clipboardRequested = false; clipboardDismissed = true
+                    window.makeFirstResponder(nil); window.resignKey()
+                }
+            } else {
+                hovering = hoverArmed && (onHead || (hovering && bubbleShown && over(head.union(bubbleSurface.frame))))
+            }
+            if !clipboardPresented && !clipboardDismissed && clipboardRowVisible && !clipboardAttention && over(clipboardRowRect) {
+                let now = ProcessInfo.processInfo.systemUptime
+                if clipboardRowEntered == nil { clipboardRowEntered = now }
+                if now - clipboardRowEntered! >= 0.3 { clipboardRequested = true; clipboardDismissed = false; clipboardRowEntered = nil }
+            } else { clipboardRowEntered = nil }
+            held = held || hovering || clipboardHolding || clipboardIncoming || clipboardPresented
         } else { hovering = false }
-        let shown = reveal.update(now: ProcessInfo.processInfo.systemUptime, held: held) || bubbleAlwaysShown
+        updateClipboardPresentation()
+        let copyEnded = updateClipboardCopyNotice(now: ProcessInfo.processInfo.systemUptime)
+        let shown = reveal.update(now: ProcessInfo.processInfo.systemUptime, held: held || clipboardCopyFrame != nil) || bubbleAlwaysShown
+        if clipboardCopyFrame != nil {
+            bubbleShown = true; stowBubble(false); updatePetBadge(); return
+        }
+        if copyEnded {
+            // The copy overlay has already faded; do not add the ordinary bubble's second fade.
+            bubbleShown = shown; stowBubble(!shown); updatePetBadge(); return
+        }
         guard shown != bubbleShown else { return }
         bubbleShown = shown
         let surfaces = [bubbleSurface!] + thoughtDots.map(\.surface)
@@ -447,7 +713,11 @@ final class PetView: NSView {
     var badgeVisible: Bool { unreadCount > 0 && !isPaused && !chatExpanded && window?.isVisible == true }
     var badgeRect: CGRect { bubbleText.convert(bubbleText.badgeRect, to: self) }
     private func resizeEdge(_ point: CGPoint) -> PetLayout.ResizeEdge {
-        guard chatExpanded, let placement else { return [] }
+        guard let placement else { return [] }
+        if clipboardPresented {
+            return ClipboardDrawer.resizeEdge(at: point, bubble: placement.bubbleRect, below: placement.bubbleBelow)
+        }
+        guard chatExpanded else { return [] }
         return PetLayout.resizeEdge(at: point, bubble: placement.bubbleRect, below: placement.bubbleBelow)
     }
     /// The folded bubble's height just now, which is where the conversation's opening starts from.
@@ -597,6 +867,9 @@ final class PetView: NSView {
         needsLayout = true
     }
     var chatAlpha: CGFloat { chatHost?.alphaValue ?? 0 }
+    var chatVisibilityProbe: (surface: NSView, host: NSView?, clipboardActive: Bool) {
+        (bubbleSurface, chatHost, clipboardSurfaceActive)
+    }
     var widthPictureTransparent: Bool { (widthPicture?.backgroundColor?.alpha ?? 0) == 0 }
     var onAnimationWork: ((Double, Double) -> Void)?
     var chatShown: Bool { chatHost?.isHidden == false }
@@ -633,8 +906,13 @@ final class PetView: NSView {
     }
     var chatExpanded = false { didSet {
         guard chatExpanded != oldValue else { return }
+        if clipboardDrop != nil {
+            if chatExpanded { unregisterDraggedTypes() }
+            else { registerForDraggedTypes(ClipboardPasteboard.supported) }
+        }
         // Both stay on screen while the glass moves; each is put away when it has faded. With motion turned down nothing lingers.
         morphing = !reducesMotion
+        updateClipboardPresentation()
         chatBlurPeak = 0
         if morphing { chatHost?.isHidden = false; bubbleText.isHidden = false } else { settleMorph() }
         updateScrim()
@@ -670,6 +948,8 @@ final class PetView: NSView {
         guard (bubbleShown ? spriteRect.union(bubbleSurface.frame) : spriteRect).insetBy(dx: -12, dy: -12).contains(local) else { return nil }
         if !resizeEdge(local).isEmpty { return self }
         if hasWidthPicture { return widthHeader.frame.contains(local) ? widthHeader : self }
+        if clipboardRowVisible, clipboardRowRect.contains(local) { return clipboardRow }
+        if clipboardPresented, let host = clipboardHost, host.frame.contains(local) { return host.hitTest(local) ?? host }
         if chatExpanded, bubbleSurface.frame.contains(local), let host = chatHost {
             return host.hitTest(local) ?? host
         }
@@ -690,10 +970,10 @@ final class PetView: NSView {
     }
     var spriteRect: CGRect { placement?.spriteRect ?? PetLayout(scale: petScale).spriteRect }
     var petScale: CGFloat = 1 { didSet { if petScale != oldValue { invalidateGeniePicture() }; needsLayout = true; needsDisplay = true } }
-    var state: WorkState = .idle { didSet { bubbleText.state = state } }
+    var state: WorkState = .idle { didSet { bubbleText.state = state; if state == .waiting || state == .failed { cancelClipboardCopyNotice() } } }
     var headline = "ddots" { didSet { bubbleText.headline = headline; updateIdentityDescription() } }
     var subtitle = "AI 작업을 살펴보고 있어요" { didSet { bubbleText.subtitle = subtitle } }
-    var actions: [String] = [] { didSet { bubbleText.actionTitles = actions; updateIdentityDescription() } }
+    var actions: [String] = [] { didSet { bubbleText.actionTitles = actions; updateIdentityDescription(); if !actions.isEmpty { cancelClipboardCopyNotice() } } }
     var onAction: ((Int) -> Void)?
     var onClick: ((Int) -> Void)?
     var onPress: (() -> Void)?
@@ -706,6 +986,7 @@ final class PetView: NSView {
     var onDisplayTick: (() -> Void)?
     var onAnimationTick: (() -> Void)?
     var isPaused = false { didSet {
+        if isPaused { cancelClipboardCopyNotice() }
         animationStarted = ProcessInfo.processInfo.systemUptime; pointerInteraction.reset(); replyJump = false; chatPlayback = PetChatPlayback(); doze = PetDoze(); needsDisplay = true
         bubbleText.unreadCount = isPaused ? 0 : unreadCount
         bubbleText.setPulseAllowed(!isPaused && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion)
@@ -748,6 +1029,7 @@ final class PetView: NSView {
         scrim.layer?.masksToBounds = true
         surfaceContent.addSubview(scrim)
         surfaceContent.addSubview(bubbleText)
+        clipboardCopyText.present(nil); surfaceContent.addSubview(clipboardCopyText)
         if #available(macOS 26.0, *) {
             let glass = PetGlassView()
             glass.style = .clear
@@ -815,6 +1097,7 @@ final class PetView: NSView {
     /// Hidden windows still receive timer callbacks unless the timer itself is stopped. Keep data polling separate.
     @objc func updateAnimationVisibility() {
         if resting || window?.isVisible != true {
+            cancelClipboardCopyNotice()
             let wasAnimating = timer != nil
             timer?.invalidate(); timer = nil
             pointerInteraction.reset(); bubbleText.setPulseAllowed(false)
@@ -833,7 +1116,7 @@ final class PetView: NSView {
         RunLoop.main.add(animationTimer, forMode: .common)
     }
     required init?(coder: NSCoder) { fatalError() }
-    deinit { timer?.invalidate(); widthClock?.stop(); NotificationCenter.default.removeObserver(self); NSWorkspace.shared.notificationCenter.removeObserver(self) }
+    deinit { if let clipboardLocalEvents { NSEvent.removeMonitor(clipboardLocalEvents) }; if let clipboardGlobalEvents { NSEvent.removeMonitor(clipboardGlobalEvents) }; timer?.invalidate(); widthClock?.stop(); NotificationCenter.default.removeObserver(self); NSWorkspace.shared.notificationCenter.removeObserver(self) }
     @objc private func displayOptionsChanged() { updateScrim() }
     override func viewDidChangeEffectiveAppearance() {
         super.viewDidChangeEffectiveAppearance(); invalidateGeniePicture(); updateScrim()
@@ -843,11 +1126,30 @@ final class PetView: NSView {
         let collapsedHeight = PetLayout.bubbleSize(actionCount: 1).height
         let progress = chatSize.height > collapsedHeight
             ? Double((bubbleSurface.frame.height - collapsedHeight) / (chatSize.height - collapsedHeight)) : 0
-        let alpha = BubbleOpacity.alpha(progress: progress, percent: chatOpacityPercent,
-                                        reduceTransparency: NSWorkspace.shared.accessibilityDisplayShouldReduceTransparency)
+        let shelfProgress = min(1, max(0, Double((bubbleSurface.frame.height - foldedHeight) / max(1, clipboardOpenHeight - foldedHeight))))
+        if !clipboardPresented && !clipboardRowVisible && bubbleSurface.frame.height <= foldedHeight + 1 { clipboardSurfaceActive = false }
+        if chatExpanded { clipboardSurfaceActive = false }
+        let drawerMaterial = !chatExpanded && clipboardSurfaceActive
+        let alpha = BubbleOpacity.alpha(progress: drawerMaterial ? shelfProgress : progress,
+                                        percent: drawerMaterial ? clipboardOpacityPercent : chatOpacityPercent,
+                                        reduceTransparency: NSWorkspace.shared.accessibilityDisplayShouldReduceTransparency || CommandLine.arguments.contains("--ui-smoke-reduce-transparency"))
         let dark = effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
         CATransaction.begin(); CATransaction.setDisableActions(true)
-        scrim.layer?.backgroundColor = (dark ? NSColor.black : NSColor.white).withAlphaComponent(alpha).cgColor
+        let tint: NSColor = drawerMaterial && dark ? NSColor(calibratedRed: 0.015, green: 0.02, blue: 0.04, alpha: 1) : (dark ? .black : .white)
+        scrim.layer?.backgroundColor = tint.withAlphaComponent(alpha).cgColor
+        let radius: CGFloat = drawerMaterial ? 24 : PetLayout.cornerRadius
+        scrim.layer?.cornerRadius = radius
+        if #available(macOS 26, *), let glass = bubbleSurface as? PetGlassView { glass.cornerRadius = radius }
+        else { bubbleSurface.layer?.cornerRadius = radius }
+        bubbleSurface.layer?.shadowOpacity = drawerMaterial ? 0.25 : 0
+        bubbleSurface.layer?.shadowColor = NSColor.black.cgColor
+        bubbleSurface.layer?.shadowRadius = 14
+        bubbleSurface.layer?.shadowOffset = CGSize(width: 0, height: -6)
+        bubbleSurface.layer?.shadowPath = drawerMaterial ? CGPath(roundedRect: bubbleSurface.bounds, cornerWidth: radius, cornerHeight: radius, transform: nil) : nil
+        if drawerMaterial {
+            scrim.layer?.borderWidth = 1 / (window?.backingScaleFactor ?? 2)
+            scrim.layer?.borderColor = NSColor.white.withAlphaComponent(dark ? 0.2 : 0.6).cgColor
+        } else { scrim.layer?.borderWidth = 0 }
         for dot in thoughtDots {
             // The circles are too small for the glass to read on its own, so they carry a little more tint than the bubble.
             dot.tint.layer?.backgroundColor = (dark ? NSColor.black : NSColor.white).withAlphaComponent(min(1, alpha + 0.15)).cgColor
@@ -871,7 +1173,13 @@ final class PetView: NSView {
         bubbleSurface.frame = placement?.bubbleRect ?? PetLayout(scale: petScale).bubbleRect
         surfaceContent.frame = NSRect(origin: .zero, size: bubbleSurface.frame.size)
         scrim.frame = surfaceContent.bounds
-        bubbleText.frame = surfaceContent.bounds
+        let rowHeight: CGFloat = clipboardRowVisible ? (clipboardPresented ? ClipboardDrawer.footerHeight : ClipboardDrawer.rowHeight) : 0
+        let below = placement?.bubbleBelow == true
+        let regions = ClipboardDrawer.regions(in: surfaceContent.bounds, rowHeight: rowHeight, below: below)
+        bubbleText.frame = regions.content
+        clipboardCopyText.frame = bubbleText.frame
+        clipboardRow.below = below; clipboardRow.frame = regions.row
+        clipboardHost?.frame = regions.content.offsetBy(dx: bubbleSurface.frame.minX, dy: bubbleSurface.frame.minY)
         layoutThoughtDots()
         updatePetBadge()
         updateScrim()
@@ -1059,13 +1367,21 @@ final class PetView: NSView {
     }
     override func mouseDown(with event: NSEvent) {
         let local = convert(event.locationInWindow,from:nil)
+        // Hosting views forward unhandled presses in their blank space through the responder chain.
         let edge: PetLayout.ResizeEdge = spriteContains(local) ? [] : resizeEdge(local)
         if !edge.isEmpty, let placement, let window, let screen = window.screen {
             clearDrag()
+            if clipboardPresented {
+                if event.clickCount == 2 { onResetClipboardSize?(); return }
+                clipboardResizing = true; clipboardHolding = true
+                resizeDrag = (window.convertPoint(toScreen:event.locationInWindow),placement,screen.visibleFrame,screen.frame,edge,0)
+                return
+            }
             if event.clickCount == 2 { if paneWidth > 0, edge.contains(.right) { onResetPaneSize?() } else { onResetChatSize?() }; return }
             resizeDrag = (window.convertPoint(toScreen:event.locationInWindow),placement,screen.visibleFrame,screen.frame,edge,paneWidth)
             onResizeBegan?(); return
         }
+        if clipboardPresented && clipboardContains(local) { clipboardLibrary?.selectedIDs.removeAll(); clearDrag(); return }
         if isExpandedBubbleEvent(event) { clearDrag(); return }
         dragStart = window?.convertPoint(toScreen: event.locationInWindow); previousDragMouse = dragStart
         windowStart = placement?.anchorOrigin; didDrag = false
@@ -1074,6 +1390,12 @@ final class PetView: NSView {
         if let resizeDrag, let window {
             let point = window.convertPoint(toScreen:event.locationInWindow)
             let delta = CGPoint(x:point.x-resizeDrag.point.x,y:point.y-resizeDrag.point.y)
+            if clipboardResizing {
+                let start = resizeDrag.placement.globalBubble.size
+                let width = start.width + (resizeDrag.edge.contains(.right) ? 2 * delta.x : resizeDrag.edge.contains(.left) ? -2 * delta.x : 0)
+                let height = start.height + (resizeDrag.edge.contains(.far) ? (resizeDrag.placement.bubbleBelow ? -delta.y : delta.y) : 0)
+                onClipboardResize?(CGSize(width: width, height: height)); return
+            }
             var edge = resizeDrag.edge
             if resizeDrag.pane > 0, edge.contains(.right) { onResizePane?(resizeDrag.pane+delta.x); edge.remove(.right) }
             if !edge.isEmpty || resizeDrag.pane == 0 {
@@ -1094,7 +1416,12 @@ final class PetView: NSView {
         advanceAnimation()
     }
     override func mouseUp(with event: NSEvent) {
-        if resizeDrag != nil { resizeDrag = nil; onResizeEnded?(); return }
+        if resizeDrag != nil {
+            resizeDrag = nil
+            if clipboardResizing { clipboardResizing = false; clipboardHolding = false; clipboardExitDeadline = nil }
+            else { onResizeEnded?() }
+            return
+        }
         if dragStart != nil { onDragEnded?() }
         // Let go over the conversation, a pet that was being carried is still set down where it is.
         if !didDrag, isExpandedBubbleEvent(event) { clearDrag(); return }
@@ -1132,7 +1459,15 @@ final class PetView: NSView {
     private static let risingResizeCursor = diagonalCursor(true), fallingResizeCursor = diagonalCursor(false)
     override func resetCursorRects() {
         super.resetCursorRects()
-        guard chatExpanded, let placement else { return }
+        guard let placement else { return }
+        if clipboardPresented {
+            let r = placement.bubbleRect
+            addCursorRect(CGRect(x: r.minX, y: r.minY + ClipboardDrawer.footerHeight, width: 6, height: max(0, r.height - ClipboardDrawer.footerHeight)), cursor: .resizeLeftRight)
+            addCursorRect(CGRect(x: r.maxX - 6, y: r.minY + ClipboardDrawer.footerHeight, width: 6, height: max(0, r.height - ClipboardDrawer.footerHeight)), cursor: .resizeLeftRight)
+            addCursorRect(CGRect(x: r.minX + 6, y: r.maxY - 6, width: r.width - 12, height: 6), cursor: .resizeUpDown)
+            return
+        }
+        guard chatExpanded else { return }
         for region in PetLayout.resizeRegions(bubble: placement.bubbleRect, below: placement.bubbleBelow) {
             let cursor: NSCursor
             if region.edge == .far { cursor = .resizeUpDown }

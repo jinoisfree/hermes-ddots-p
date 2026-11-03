@@ -43,7 +43,10 @@ def _write_gate_memory(services, data: dict[str, dict[str, float]]) -> None:
     path = services._gate_memory_path()
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(data), encoding="utf-8")
+        # Atomic: a concurrent reader must never see half a file and drop every gate entry.
+        temp = path.with_name(f"{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+        temp.write_text(json.dumps(data), encoding="utf-8")
+        os.replace(temp, path)
     except OSError:
         logging.getLogger("team_delegation.personal").warning("could not write gate memory", exc_info=True)
 

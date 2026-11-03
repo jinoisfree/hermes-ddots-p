@@ -163,7 +163,6 @@ final class NativeThreadCard: NSTableCellView, NSTextViewDelegate {
         return NSSize(width: width, height: ceil(max(0, size.height)))
     }
     static let stackFont = NSFont.systemFont(ofSize: ChatMetrics.auxiliaryFont, weight: .medium)
-    static let noteFont = NSFont.systemFont(ofSize: ChatMetrics.auxiliaryFont, weight: .medium)
     static let stackLine: CGFloat = 14
     static let bellPoint: CGFloat = 12
     static let bellBox: CGFloat = 26

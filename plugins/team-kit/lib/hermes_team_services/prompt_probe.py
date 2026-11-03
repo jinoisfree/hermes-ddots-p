@@ -22,6 +22,13 @@ MAX_BYTES = 1_000_000
 CJK_RE = re.compile('[ᄀ-ᇿ぀-ヿ㄰-㆏㐀-䶿一-鿿가-힯豈-﫿]')
 
 
+from pathlib import Path as _AtomicPath
+import sys as _atomic_sys
+if str(_AtomicPath(__file__).resolve().parents[1]) not in _atomic_sys.path:
+    _atomic_sys.path.insert(0, str(_AtomicPath(__file__).resolve().parents[1]))
+from hermes_facility import atomic as _atomic
+
+
 def tokens(text):
     """Same estimate as diagnosis_overhead.tokens (Hermes estimate_tokens_rough)."""
     if not text:
@@ -90,9 +97,7 @@ def record(home, request, *, session_id='', api_call_count=None, platform='', **
             stream.write(json.dumps(row, ensure_ascii=False) + '\n')
         if path.stat().st_size > MAX_BYTES:
             lines = path.read_text(encoding='utf-8').splitlines()
-            tmp = path.with_suffix('.tmp')
-            tmp.write_text('\n'.join(lines[-KEEP:]) + '\n', encoding='utf-8')
-            tmp.replace(path)
+            _atomic.write_text(path, '\n'.join(lines[-KEEP:]) + '\n')
     except Exception:
         logger.debug('team-kit prompt probe failed', exc_info=True)
     return None

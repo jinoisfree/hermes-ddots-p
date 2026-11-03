@@ -13,7 +13,7 @@ if _owner_library not in _owner_sys.path:
 from hermes_facility.owner_text import render as _owner_text
 
 from pathlib import Path
-from urllib.parse import quote, unquote, urlparse
+from urllib.parse import quote
 from html import escape
 import json
 import re
@@ -172,17 +172,6 @@ def scope(td,args,owner):
     if args.get('folder'):args['folder']=store.folder(args['folder'])
     elif args.get('action')=='create':args['folder']=store.folder(td._notes_create_folder(''))
     return args
-
-
-def local_links(body,root,source_parent):
-    # Preserve all body-local links when re-rendering a summary/source.
-    def sub(m):
-        target=m[2]
-        if urlparse(target).scheme:return m[0]
-        p=(source_parent/unquote(target)).resolve()
-        if not p.is_relative_to(root):raise ValueError('OBSIDIAN_ATTACHMENT_OUTSIDE_VAULT')
-        return m[0]
-    return re.sub(r'(!?\[[^\]\n]*\]\()([^)]+)\)',sub,body)
 
 
 def sync_properties(td,row,common=None):

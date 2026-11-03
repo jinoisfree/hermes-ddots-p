@@ -27,8 +27,6 @@ struct ShrimpVault {
             ["경로 줘", "파일오픈", "다운로드"] + (table ? ["표"] : []) + (editable ? ["수정"] : []) + ["종결"]
         }
     }
-    static let ending: Set<String> = ["종결", "끝", "그만", "종료"]
-    static let followups: Set<String> = Set(["경로 줘", "맥미니 경로 줘", "다운로드", "열어줘", "보내줘", "내용 보여줘", "읽어줘", "요약해줘", "표", "표 보여줘", "표로 보여줘", "수정"]).union(ending)
     func fallback(_ message: ChatMessage) -> Bool? {
         guard trusted(message) else { return nil }
         switch message.body {

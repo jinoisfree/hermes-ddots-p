@@ -32,6 +32,13 @@ _APPROVE = r"(?:승인(?:한다|합니다|해|할게)?|해(?:줘)?|하자|진행
 _REJECT = r"(?:(?:거절|거부)(?:한다|합니다|해)?|취소(?:해|해줘)?|건너뛰어|하지\s*마|ㄴㄴ|no)"
 
 
+from pathlib import Path as _AtomicPath
+import sys as _atomic_sys
+if str(_AtomicPath(__file__).resolve().parents[1]) not in _atomic_sys.path:
+    _atomic_sys.path.insert(0, str(_AtomicPath(__file__).resolve().parents[1]))
+from hermes_facility import atomic as _atomic
+
+
 def _normalized(text: str) -> str:
     value = re.sub(r"<@[^>]+>", " ", str(text or ""))
     value = re.sub(r"[.!…~]+$", "", value.strip())
@@ -66,9 +73,7 @@ def _load_pending(path: Path, now: float) -> Optional[dict[str, Any]]:
 
 
 def _write_pending(path: Path, pending: dict[str, Any]) -> None:
-    tmp = path.with_suffix(".tmp")
-    tmp.write_text(json.dumps(pending, ensure_ascii=False, indent=2), encoding="utf-8")
-    tmp.replace(path)
+    _atomic.write_json(path, pending, indent=2, newline=False)
 
 
 def _run_backup(vault: Path, run: Callable[..., Any]) -> dict[str, Any]:

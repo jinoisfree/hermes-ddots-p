@@ -54,16 +54,6 @@ class CommonWorkError(ValueError):
     pass
 
 
-class ApprovalRequired(CommonWorkError):
-    pass
-
-
-class PartialCompletionError(CommonWorkError):
-    def __init__(self, message: str, *, item: Mapping[str, Any]) -> None:
-        super().__init__(message)
-        self.item = dict(item)
-
-
 def _validate_source(domain: str, source_id: str) -> tuple[str, str]:
     normalized_domain = str(domain or "").strip().casefold()
     normalized_id = str(source_id or "").strip()

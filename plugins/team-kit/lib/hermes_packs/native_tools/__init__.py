@@ -848,7 +848,10 @@ def _wiki_direct(services, args: dict[str, Any], **_: Any) -> str:
             body = path.read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError) as exc:
             return services._error(f"wiki read failed: {exc}")
-        offset = max(0, int(args.get("offset") or 0))
+        try:
+            offset = max(0, int(args.get("offset") or 0))
+        except (TypeError, ValueError):
+            return services._error("offset must be a number")
         text, truncated = services._wiki_clip(body[offset:])
         relative = unicodedata.normalize("NFC", str(path.relative_to(vault)))
         return json.dumps(
@@ -867,7 +870,10 @@ def _wiki_direct(services, args: dict[str, Any], **_: Any) -> str:
         query = re.sub(r"\s+", " ", query).strip()
         if not query:
             return services._error("knowledge mode requires query")
-        limit = max(1, min(5, int(args.get("limit") or 3)))
+        try:
+            limit = max(1, min(5, int(args.get("limit") or 3)))
+        except (TypeError, ValueError):
+            return services._error("limit must be a number")
         command = ["query", "--vault", str(vault), "--query", query, "--limit", str(limit), "--context-only"]
     elif mode == "inventory":
         term = str(args.get("term") or "").strip()

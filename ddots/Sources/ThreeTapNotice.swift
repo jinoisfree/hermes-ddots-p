@@ -18,15 +18,16 @@ struct ThreeTapCommand {
         process.executableURL = executable; process.arguments = arguments; process.environment = environment
         _ = fcntl(pipe.fileHandleForWriting.fileDescriptor, F_SETNOSIGPIPE, 1)
         process.standardInput = pipe; process.standardOutput = FileHandle.nullDevice; process.standardError = FileHandle.nullDevice
+        // Set before run(): a child that exits at once would otherwise never signal and cost the whole timeout.
+        let done = DispatchSemaphore(value: 0)
+        process.terminationHandler = { _ in done.signal() }
         do { try process.run() } catch { return -1 }
         pipe.fileHandleForReading.closeFile()
         do { try pipe.fileHandleForWriting.write(contentsOf: input); try pipe.fileHandleForWriting.close() } catch {
             try? pipe.fileHandleForWriting.close()
             if process.isRunning { process.terminate() }
         }
-        let done = DispatchSemaphore(value: 0)
-        process.terminationHandler = { _ in done.signal() }
-        if process.isRunning, done.wait(timeout: .now()+15) == .timedOut {
+        if done.wait(timeout: .now()+15) == .timedOut {
             process.terminate()
             if done.wait(timeout: .now()+1) == .timedOut, process.isRunning { kill(process.processIdentifier, SIGKILL) }
         }

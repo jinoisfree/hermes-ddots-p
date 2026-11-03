@@ -483,7 +483,8 @@ def runs_read(args):
 
 
 def code_roots():
-    roots = [ROOT / 'plugins', ROOT / 'bin', ROOT / 'hermes-agent']
+    # Shared plugins live in plugin-store; plugins/<name> are links into it (2026-11-01).
+    roots = [ROOT / 'plugins', ROOT / 'plugin-store', ROOT / 'bin', ROOT / 'hermes-agent']
     for profile in PROFILES:
         roots.extend(home(profile) / p for p in ('plugins', 'skills', 'config.yaml', 'SOUL.md'))
     return roots

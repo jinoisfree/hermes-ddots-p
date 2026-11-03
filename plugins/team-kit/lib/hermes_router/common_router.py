@@ -90,11 +90,6 @@ def approval_response_choice(text: str) -> str | None:
     return None
 
 
-def _matches(patterns: Mapping[str, Any], name: str, text: str) -> bool:
-    pattern = str(patterns.get(name) or "")
-    return bool(pattern and re.search(pattern, text, re.IGNORECASE))
-
-
 _RECENT_OWNER_APPROVAL_SECONDS = 600
 
 

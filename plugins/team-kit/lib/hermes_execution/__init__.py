@@ -2747,8 +2747,6 @@ def register(ctx) -> None:
         from hermes_constants import get_hermes_home
         from hermes_packs.linked_work import link_decisions
         register_hook('pre_gateway_dispatch', partial(link_decisions.dispatch, Path(get_hermes_home())))
-        from hermes_packs.linked_work import work_completion
-        register_hook('pre_gateway_dispatch', partial(work_completion.dispatch, Path(get_hermes_home())))
         from hermes_packs.linked_work import conflict_decisions
         register_hook('pre_gateway_dispatch', partial(conflict_decisions.dispatch, Path(get_hermes_home())))
         from hermes_packs.linked_work import work_tool_writes
@@ -2761,7 +2759,9 @@ def register(ctx) -> None:
     register_hook("post_approval_response", _lead_skill_approval_response)
     register_hook('post_approval_response', request_approvals.response)
     register_hook('post_llm_call', request_approvals.ended)
-    register_hook("transform_llm_output", _mark_unverified_links)
+    # Through team-kit's single output hook: a second transform hook would skip team-kit's checks.
+    from hermes_facility import output_steps
+    output_steps.add('team-delegation.unverified_links', _mark_unverified_links)
     register_hook("kanban_task_claimed", _on_claim)
 
 

@@ -31,6 +31,13 @@ except ImportError:
     STEER_MARKER_CLOSE = "[/OUT-OF-BAND USER MESSAGE]"
 
 
+from pathlib import Path as _AtomicPath
+import sys as _atomic_sys
+if str(_AtomicPath(__file__).resolve().parents[1]) not in _atomic_sys.path:
+    _atomic_sys.path.insert(0, str(_AtomicPath(__file__).resolve().parents[1]))
+from hermes_facility import atomic as _atomic
+
+
 @lru_cache(maxsize=None)
 def extension(name):
     import importlib.util
@@ -49,6 +56,7 @@ SECRET = re.compile(
     rb"xox[abpsr]-[A-Za-z0-9-]{10,}|sk-[A-Za-z0-9_-]{20,}|gh[pousr]_[A-Za-z0-9]{30,}"
     rb"|AIza[0-9A-Za-z_-]{30,}|ya29\.[A-Za-z0-9_-]{20,}|-----BEGIN [A-Z ]*PRIVATE KEY"
     rb"|IGQ[A-Za-z0-9_-]{20,}|EAA[A-Za-z0-9]{30,}"
+    rb"|xapp-\d-[A-Za-z0-9-]{10,}|ntn_[A-Za-z0-9]{40,}|(?<![A-Za-z0-9_])secret_[A-Za-z0-9]{40,}"
     rb"|(?<![A-Za-z0-9_])ct_[A-Za-z0-9]+_[A-Za-z0-9_-]{20,}"
 )
 NOTE = _owner_text("""[일하는 방법 학습]
@@ -134,19 +142,7 @@ def locked(file):
 
 
 def save(file, data):
-    file = Path(file)
-    file.parent.mkdir(parents=True, exist_ok=True)
-    fd, temp = tempfile.mkstemp(prefix="." + file.name, dir=file.parent)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            json.dump(data, handle, ensure_ascii=False, indent=2)
-            handle.write("\n")
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temp, file)
-    finally:
-        if os.path.exists(temp):
-            os.unlink(temp)
+    _atomic.write_json(file, data, indent=2)
 
 
 def load(home):

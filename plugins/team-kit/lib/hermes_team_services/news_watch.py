@@ -63,6 +63,13 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
+from pathlib import Path as _AtomicPath
+import sys as _atomic_sys
+if str(_AtomicPath(__file__).resolve().parents[1]) not in _atomic_sys.path:
+    _atomic_sys.path.insert(0, str(_AtomicPath(__file__).resolve().parents[1]))
+from hermes_facility import atomic as _atomic
+
+
 def https_url(value):
     if not isinstance(value, str):
         raise WatchError('invalid_url')
@@ -329,15 +336,7 @@ def sender(home):
 
 
 def save(path, state):
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, name = tempfile.mkstemp(prefix='.news-watch-', dir=path.parent)
-    try:
-        with os.fdopen(fd, 'w') as file:
-            json.dump(state, file, ensure_ascii=False)
-            file.flush(); os.fsync(file.fileno())
-        os.replace(name, path)
-    finally:
-        if os.path.exists(name): os.unlink(name)
+    _atomic.write_json(path, state, newline=False, prefix='.news-watch-')
 
 
 def append_bounded(values, value):

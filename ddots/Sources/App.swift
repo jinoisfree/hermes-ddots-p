@@ -205,6 +205,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
     private var perchUsesTimer = false
     var perchTransition: (start: TimeInterval, opening: Bool, placement: PetPlacement)? { didSet { if perchTransition == nil, oldValue != nil || pet?.genieActive == true { pet?.endGenie() } } }
     var bubbleSize = PetLayout.bubbleSize
+    var clipboard: ClipboardLibrary?
+    var clipboardHotKey: ClipboardHotKey?
+    var clipboardPreferredSize = ClipboardDrawer.load()
     var hermesEnabled: Bool { UserDefaults.standard.bool(forKey: "hermesChatEnabled") }
     /// UI checks use a made-up number so they neither depend on saved settings nor can reach a real thread.
     var hermesHandle: String? { isSmoke ? "+15555550100" : UserDefaults.standard.string(forKey: "hermesHandle").flatMap(HermesBridge.validHandle) }
@@ -236,6 +239,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         }
         closingRun = run
         appUpdate?.stop()
+        clipboard?.prepareClose(run)
         // Nothing new is read from Slack while closing.
         slackTimer?.invalidate(); slackTimer = nil
         slack.prepareClose(run)
@@ -425,6 +429,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
             resizeStartOrigin = nil
         }
         pet.onResetChatSize = { [weak self] in self?.resetChatSize() }
+        prepareClipboard()
         prepareThreeTap()
         buildMenu()
         installEditMenu()
@@ -547,7 +552,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
                     return
                 }
                 self.capture(destination: destination)
-                if CommandLine.arguments.contains("--ui-smoke-hybrid") { self.verifyHybridChat(destination: destination) }
+                if CommandLine.arguments.contains("--ui-smoke-clipboard") { Task { @MainActor in await self.verifyClipboard(destination: destination) } }
+                else if CommandLine.arguments.contains("--ui-smoke-hybrid") { self.verifyHybridChat(destination: destination) }
                 else if CommandLine.arguments.contains("--ui-smoke-update-notices") { self.verifyUpdateNotices(destination: destination) }
                 else if CommandLine.arguments.contains("--ui-smoke-update-reminder") { self.verifyUpdateReminder(destination: destination) }
                 else if CommandLine.arguments.contains("--ui-smoke-connect-offer") { self.verifyConnectOffer(destination: destination) }
@@ -1031,8 +1037,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
     func setBubbleActions(_ actions: [PetAction]) {
         guard actions != bubbleActions else { return }
         bubbleActions = actions; pet.actions = actions.map(\.title)
-        bubbleSize = PetLayout.bubbleSize(actionCount: actions.count); pet.foldedHeight = bubbleSize.height
-        constrainPosition()
+        updateClipboardGeometry()
     }
     /// One click opens the conversation and one click folds it; the second click of a double click does nothing more.
     func petClicked(count: Int) {
@@ -1280,6 +1285,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         menu.addItem(.separator())
         addMenu("펫 숨기기", #selector(togglePet)); petMenuItem = menu.items.last
         addMenu("잠시 쉬기", #selector(togglePause)); pauseMenuItem = menu.items.last
+        addMenu("클립보드 기록 멈춤/다시 시작", #selector(toggleClipboardPause))
+        addMenu("클립보드 비우기", #selector(clearClipboard))
         menu.addItem(.separator())
         addMenu("설정…", #selector(showOptions))
         menu.items.last?.keyEquivalent = ","
@@ -1838,6 +1845,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
             }
             page("일반", [[usageTitle, paseoStatus], [login, loginStatus, loginSettings],
                          [updateNotices], [action("업데이트 연결…", #selector(connectAppUpdate))]])
+            if let clipboard {
+                let host = NSHostingView(rootView: ClipboardSettingsView(library: clipboard, persist: !isSmoke))
+                host.frame = NSRect(x: 0, y: 0, width: 450, height: 450)
+                page("클립보드", [[host]])
+            }
             let bubble = check("말풍선 항상 보이기", #selector(toggleBubbleAlwaysShown(_:)))
             bubbleCheckbox = bubble
             let tap = check(ThreeTapController.title, #selector(toggleThreeTap)); tapCheckbox = tap
@@ -2056,7 +2068,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         }
         bubbleMotion.retarget(placement.globalBubble.origin, visibleFrame: screen.visibleFrame,
                               now: ProcessInfo.processInfo.systemUptime,
-                              immediately: resizingChat || NSWorkspace.shared.accessibilityDisplayShouldReduceMotion || CommandLine.arguments.contains("--ui-smoke-reduce-motion"), size: placement.globalBubble.size, headerAtTop: placement.expanded && placement.bubbleBelow)
+                              immediately: resizingChat || pet.clipboardResizing || NSWorkspace.shared.accessibilityDisplayShouldReduceMotion || CommandLine.arguments.contains("--ui-smoke-reduce-motion"), size: placement.globalBubble.size, headerAtTop: placement.expanded && placement.bubbleBelow)
         advancePlacement()
     }
     var spriteProbe: ((String) -> Void)?
@@ -2446,5 +2458,7 @@ extension AppDelegate: NSMenuDelegate {
         guard menu === self.menu else { return }
         petMenuItem?.title = panel.isVisible ? "펫 숨기기" : "펫 보이기"
         pauseMenuItem?.title = model.paused ? "다시 시작" : "잠시 쉬기"
+        menu.items.first { $0.action == #selector(toggleClipboardPause) }?.title = clipboard?.paused == true ? "클립보드 기록 다시 시작" : "클립보드 기록 멈춤"
+        updateClipboardMenu()
     }
 }
