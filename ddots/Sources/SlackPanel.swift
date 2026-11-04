@@ -434,6 +434,11 @@ final class SlackModel: ObservableObject {
     /// All active channels, including ones hidden from the sidebar or muted.
     @Published var hubCandidates: [SlackRoom] = []
     var ddotsHubName: String? { hubCandidates.first { $0.id == ddotsHub }?.name }
+    /// The single display target for the first room; nil preserves the configured home appearance.
+    var ddotsDisplayRoom: SlackRoom? { Ddots.displayRoom(preferred: preferredHub, hub: ddotsHub, rooms: hubCandidates) }
+    var ddotsName: String { ddotsDisplayRoom?.name ?? Ddots.roomName }
+    func displayRoom(_ room: SlackRoom) -> SlackRoom { room.id == Ddots.room ? ddotsDisplayRoom ?? room : room }
+    func headerKey(_ room: SlackRoom) -> String { displayRoom(room).id }
     var onChooseHub: (() -> Void)?
     /// A changed hub is a different destination even though the visible tab keeps its internal ID.
     /// Keep unsent words with their old channel and drop any reply aimed into that channel.
@@ -1235,10 +1240,18 @@ final class SlackModel: ObservableObject {
     @Published var headerTitles: [String: String] = [:]
     @Published var headerDescriptions: [String: String] = [:]
     var onEditHeader: ((String) -> Void)?
-    func headerTitle(_ room: SlackRoom) -> String { headerTitles[room.id] ?? room.name }
+    func headerTitle(_ room: SlackRoom) -> String {
+        headerTitles[headerKey(room)] ?? (room.id == Ddots.room ? ddotsName : room.name)
+    }
     func headerDescription(_ room: SlackRoom) -> String {
+        if let description = headerDescriptions[headerKey(room)] { return description }
         if room.id == Ddots.room, let name = ddotsHubName { return "#" + name }
-        return headerDescriptions[room.id] ?? (room.direct ? "함께 나누는 대화" : "조직원들의 소식과 대화")
+        return room.direct ? "함께 나누는 대화" : "조직원들의 소식과 대화"
+    }
+    func saveHeader(_ room: SlackRoom, title: String, description: String) {
+        let key = headerKey(room)
+        headerTitles[key] = title.isEmpty ? nil : title
+        headerDescriptions[key] = title.isEmpty ? nil : description
     }
     /// The zone a dragged room is held over, to be marked.
     @Published var dropZone: Int?
@@ -1295,6 +1308,14 @@ final class SlackModel: ObservableObject {
     @Published var roomPictures: [String: NSImage] = [:]
     var onPicture: ((String) -> Void)?
     var onClearPicture: ((String) -> Void)?
+    /// Resolve once for both ordinary channels and an explicitly selected first room.
+    func picture(for room: SlackRoom) -> NSImage? {
+        let shown = displayRoom(room)
+        if let zone = Ddots.sectionZone(shown.id) { return roomPictures[Ddots.sectionPicture(zone)] }
+        if shown.id == Ddots.room { return Ddots.picture }
+        guard !shown.direct, !Ddots.isTab(shown.id) else { return nil }
+        return roomPictures[shown.id] ?? Ddots.roomPictures[shown.id] ?? Ddots.roomPictures[shown.name]
+    }
     var onRename: ((String) -> Void)?
     /// Channels put away in Slack, to be brought back from the add menu.
     @Published var archivedRooms: [SlackRoom] = []
@@ -1913,7 +1934,7 @@ extension ChatView {
                     if list { slackSearchField(width: width) }
                     ForEach(Array(rooms.enumerated()), id: \.element.id) { offset, room in
                         if let zones, zones.breaks(offset) {
-                            if zones.zone(offset - 1) == 0 { Color.clear.frame(height: SlackSidebar.dividerHeight) }
+                            if zones.zone(offset - 1) == 0 { Color.clear.frame(height: SlackZones.gap(after: 0)) }
                             else { slackDivider(zone: zones.zone(offset), list: list) }
                         }
                         Group {
@@ -1959,6 +1980,21 @@ extension ChatView {
                                 } else
                                 // ddots keeps its place at the top and cannot be taken off the list; only its alerts can be turned off.
                                 if room.id == Ddots.room {
+                                    Menu("고정 채널 변경") {
+                                        Button("기본(Slack 기본 채널)") { slack.chooseHub("") }
+                                        Divider()
+                                        ForEach(slack.hubCandidates) { channel in
+                                            Button { slack.chooseHub(channel.id) } label: {
+                                                if slack.preferredHub == channel.id { Label("#" + channel.name, systemImage: "checkmark") }
+                                                else { Text("#" + channel.name) }
+                                            }
+                                        }
+                                    }
+                                    if let channel = slack.ddotsDisplayRoom {
+                                        Button("사진 바꾸기…") { slack.onPicture?(channel.id) }
+                                        if slack.roomPictures[channel.id] != nil { Button("사진 지우기") { slack.onClearPicture?(channel.id) } }
+                                        Divider()
+                                    }
                                     if let hub = slack.ddotsHub {
                                         Button("에이전트 추가…") { slack.onInviteAgents?(hub) }
                                         Divider()
@@ -2106,7 +2142,7 @@ extension ChatView {
                         HStack(spacing: 4) {
                             Text(hit.fromUser ? "나" : hit.speaker).font(.system(size: 11, weight: .semibold)).lineLimit(1)
                             Spacer(minLength: 0)
-                            Text((slack.rooms + slack.stacked + slack.grouped).first { hit.id.hasPrefix("slack:\($0.id):") }?.name ?? (slack.ddotsHub.map { hit.id.hasPrefix("slack:\($0):") } == true ? Ddots.roomName : ""))
+                            Text((slack.rooms + slack.stacked + slack.grouped).first { hit.id.hasPrefix("slack:\($0.id):") }?.name ?? (slack.ddotsHub.map { hit.id.hasPrefix("slack:\($0):") } == true ? slack.ddotsName : ""))
                                 .font(.system(size: 10)).foregroundColor(quiet).lineLimit(1)
                         }
                         Text(SlackSearch.highlighted(AttributedString(SlackSearch.snippet(hit.body, query: slack.query)), query: slack.query)).font(.system(size: 11)).foregroundColor(quiet)
@@ -2270,13 +2306,12 @@ extension ChatView {
 
     /// One face alone, two overlapping, three in a triangle or four in a square, like a group conversation's picture.
     @ViewBuilder func slackFaces(_ members: [SlackMember], room: SlackRoom) -> some View {
+        let shown = slack.displayRoom(room)
+        let members = shown.id == room.id ? members : slack.members[shown.id] ?? []
+        let room = shown
         let box = SlackSidebar.faces, small: CGFloat = 16
         Group {
-            if let zone = Ddots.sectionZone(room.id), let picture = slack.roomPictures[Ddots.sectionPicture(zone)] {
-                Image(nsImage: picture).resizable().interpolation(.high).scaledToFill().frame(width: box - 4, height: box - 4).clipShape(Self.face(box - 4))
-            } else if room.id == Ddots.room, let picture = Ddots.picture {
-                Image(nsImage: picture).resizable().interpolation(.high).scaledToFill().frame(width: box - 4, height: box - 4).clipShape(Self.face(box - 4))
-            } else if !room.direct, !Ddots.isTab(room.id), let picture = slack.roomPictures[room.id] ?? Ddots.roomPictures[room.id] ?? Ddots.roomPictures[room.name] {
+            if let picture = slack.picture(for: room) {
                 Image(nsImage: picture).resizable().interpolation(.high).scaledToFill().frame(width: box - 4, height: box - 4).clipShape(Self.face(box - 4))
             } else if let who = Ddots.representative(room, users: Set(members.map(\.user))) {
                 avatarBadge(who.name, profile: who.profile, size: box - 4)
@@ -2995,13 +3030,13 @@ extension ChatView {
     }
     private var slackSendRoom: String? { slack.target?.room ?? slack.postRoom }
     /// What the empty draft says: where the next message goes.
-    private var slackPrompt: String {
+    var slackPrompt: String {
         if slack.isDdots {
             if let thread = slack.target {
                 return (slack.project(thread)?.title ?? String(MessageFormat.plain(thread.root.body).prefix(36))) + " · 이어서 말하기"
             }
             if !slack.ddotsPicked, let name = slack.ddotsHubName { return name + "에 새 요청" }
-            guard let who = slack.recipient else { return slack.target == nil ? Ddots.roomName : "스레드에 답글" }
+            guard let who = slack.recipient else { return slack.target == nil ? slack.ddotsName : "스레드에 답글" }
             return slack.target == nil ? who.name + "에게 새 글" : who.name + " 스레드에 답글"
         }
         return slack.target == nil ? "\(slack.room.map { ($0.direct ? "@" : "#") + $0.name } ?? "Slack")에 새 글" : "스레드에 답글"
@@ -3017,7 +3052,7 @@ extension ChatView {
         let writers = slack.threads.flatMap { thread in
             (slack.typing[thread.id] ?? []).map(\.speaker) + thread.messages.filter { !$0.fromUser && (SlackText.isThinking($0.body) || $0.streaming) }.map(\.speaker)
         }.filter { !$0.isEmpty && seen.insert($0).inserted }
-        let label = writers.isEmpty ? (slack.recipient?.name ?? Ddots.roomName) : writers.joined(separator: ", ") + " 작성 중…"
+        let label = writers.isEmpty ? (slack.recipient?.name ?? slack.ddotsName) : writers.joined(separator: ", ") + " 작성 중…"
         // The cell is mostly empty around the pet, so it is pulled up to the top and the name is pulled up under its feet.
         let body = ChatPetMetrics.body(atlas)
         return VStack(spacing: 0) {

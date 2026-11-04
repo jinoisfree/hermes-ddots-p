@@ -693,6 +693,11 @@ enum Ddots {
         if !configured.isEmpty, let home = channels.first(where: { $0.id == configured || $0.name == configured }) { return home.id }
         return channels.first { $0.isGeneral == true }?.id
     }
+    /// Only a valid, explicitly selected hub lends its identity to the first room.
+    static func displayRoom(preferred: String, hub: String?, rooms: [SlackRoom]) -> SlackRoom? {
+        guard !preferred.isEmpty, preferred == hub else { return nil }
+        return rooms.first { $0.id == preferred && !$0.direct && !isTab($0.id) && $0.id != room }
+    }
     /// Whose thread each one in the channel is, by the thread's stamp: the first character to speak in it.
     /// A thread nobody has answered yet is nobody's.
     static func owners(_ messages: [ChatMessage]) -> [String: String] {

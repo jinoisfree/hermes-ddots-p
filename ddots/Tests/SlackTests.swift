@@ -2163,6 +2163,22 @@ final class FakeSlack {
         check(Ddots.hub(hubRooms, preferred: "C_GONE", configured: "C_A") == "C_A"
               && Ddots.hub(hubRooms, preferred: "D_BAD", configured: "C_GONE") == "C_GEN", "AC-04: missing or direct choices fall through")
         check(Ddots.hub([chosenB], configured: "C_GONE") == nil && Ddots.hub([homeA], configured: "C_A") == "C_A", "AC-05: old unmarked rooms retain configured home or DM fallback")
+        // DDOTS-HOME-ROOM-IDENTITY AC-01/05/06: the explicit choice alone owns display identity.
+        check(Ddots.displayRoom(preferred: "C_B", hub: "C_B", rooms: hubRooms) == chosenB,
+              "DHI AC-01: display is the selected channel including its Slack name")
+        check(Ddots.displayRoom(preferred: "", hub: "C_GEN", rooms: hubRooms) == nil
+              && Ddots.displayRoom(preferred: "", hub: "C_A", rooms: hubRooms) == nil
+              && Ddots.displayRoom(preferred: "", hub: nil, rooms: hubRooms) == nil,
+              "DHI AC-06: general/configured/no hub all keep the original home appearance")
+        check(Ddots.displayRoom(preferred: "C_GONE", hub: "C_GEN", rooms: hubRooms) == nil
+              && Ddots.displayRoom(preferred: "D_BAD", hub: "C_GEN", rooms: hubRooms) == nil
+              && Ddots.displayRoom(preferred: "D_BAD", hub: "D_BAD", rooms: hubRooms) == nil,
+              "DHI AC-06: an invalid saved choice never lends identity to its fallback")
+        let refreshedName = SlackRoom(id: "C_B", name: "renamed-private-choice")
+        check(Ddots.displayRoom(preferred: "C_B", hub: "C_B", rooms: [refreshedName])?.name == "renamed-private-choice",
+              "DHI AC-01: refreshed Slack name wins without changing the channel ID")
+        check(["C_A", "C_B", "C_A"].compactMap { Ddots.displayRoom(preferred: $0, hub: $0, rooms: hubRooms)?.id } == ["C_A", "C_B", "C_A"],
+              "DHI AC-05: A to B to A retains the channel IDs used by pictures and headers")
         let legacyRoomData = Data("{\"id\":\"C_OLD\",\"name\":\"old cache\",\"direct\":false}".utf8)
         let legacyRoom = try! JSONDecoder().decode(SlackRoom.self, from: legacyRoomData)
         check(legacyRoom.isGeneral == nil && Ddots.hub([legacyRoom], configured: "") == nil, "AC-05: old room cache decodes without is_general")

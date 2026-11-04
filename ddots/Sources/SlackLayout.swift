@@ -304,6 +304,8 @@ enum SlackLayout {
 /// stands wherever the section changes from the row above.
 struct SlackZones: Equatable {
     static let dividerHeight: CGFloat = 19
+    /// Keep the pinned first room close to the first section heading.
+    static func gap(after zone: Int) -> CGFloat { zone == 0 ? 4 : dividerHeight }
     /// The section of each row, from the top.
     let zones: [Int]
 
@@ -314,7 +316,7 @@ struct SlackZones: Equatable {
     /// True when a line stands just above the row at `offset`.
     func breaks(_ offset: Int) -> Bool { offset > 0 && zones.indices.contains(offset) && zones[offset] != zones[offset - 1] }
     /// How far the lines push down the row at `offset`.
-    func above(_ offset: Int) -> CGFloat { CGFloat((0...max(0, offset)).filter(breaks).count) * Self.dividerHeight }
+    func above(_ offset: Int) -> CGFloat { (0...max(0, offset)).filter(breaks).reduce(CGFloat(0)) { $0 + Self.gap(after: zone($1 - 1)) } }
 }
 
 /// One source of geometry for compact section headers, full room rows and their continuous rails.
@@ -327,7 +329,7 @@ struct SlackSectionLayout {
         self.sections = sections; self.zones = zones
         var y: CGFloat = 0, tops: [CGFloat] = [], heights: [CGFloat] = []
         for i in sections.indices {
-            if divided && i > 0 && zones[i] != zones[i - 1] { y += SlackZones.dividerHeight }
+            if divided && i > 0 && zones[i] != zones[i - 1] { y += SlackZones.gap(after: zones[i - 1]) }
             let height: CGFloat = sections[i] ? (list ? 29 : 36) : (list ? 58 : 72)
             tops.append(y); heights.append(height); y += height
         }

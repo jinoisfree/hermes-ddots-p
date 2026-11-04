@@ -71,8 +71,8 @@ extension ChatView {
         let query = shown != text && !SlackSearch.highlights(text, query: slack.findQuery).isEmpty ? shown : slack.findQuery
         return SlackSearch.highlighted(AttributedString(SlackSearch.snippet(shown, query: query)), query: query)
     }
-    private func findRoom(_ id: String) -> String {
-        if slack.ddotsShown.contains(id) { return Ddots.roomName }
+    func findRoom(_ id: String) -> String {
+        if slack.ddotsShown.contains(id) { return slack.ddotsName }
         guard let room = (slack.rooms + slack.stacked + slack.grouped).first(where: { $0.id == id }) else { return id }
         return (room.direct ? "@" : "#") + room.name
     }

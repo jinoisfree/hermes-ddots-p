@@ -333,8 +333,7 @@ final class SlackController {
         model.onEditHeader = { [weak self] id in
             guard let self, let room = self.model.room, room.id == id,
                   let value = SlackRoomDialogs.editHeader(title: self.model.headerTitle(room), description: self.model.headerDescription(room)) else { return }
-            self.model.headerTitles[id] = value.0.isEmpty ? nil : value.0
-            self.model.headerDescriptions[id] = value.0.isEmpty ? nil : value.1
+            self.model.saveHeader(room, title: value.0, description: value.1)
             if self.persists {
                 UserDefaults.standard.set(self.model.headerTitles, forKey: "slackHeaderTitles")
                 UserDefaults.standard.set(self.model.headerDescriptions, forKey: "slackHeaderDescriptions")
@@ -1084,7 +1083,7 @@ final class SlackController {
         }
         if model.groups != groups { model.groups = groups }
         // ddots keeps the first place, above every pinned room.
-        if !ddots.isEmpty { rooms.insert(SlackRoom(id: Ddots.room, name: Ddots.roomName), at: 0); rowZones[Ddots.room] = 0 }
+        if !ddots.isEmpty { rooms.insert(SlackRoom(id: Ddots.room, name: model.ddotsName), at: 0); rowZones[Ddots.room] = 0 }
         if model.rowZones != rowZones { model.rowZones = rowZones }
         let hiddenRooms = snapshot.rooms.filter { model.hidden.contains($0.id) && $0.id != hub }
         if model.hiddenRooms != hiddenRooms { model.hiddenRooms = hiddenRooms }

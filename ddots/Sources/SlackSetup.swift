@@ -771,7 +771,8 @@ extension AppDelegate {
                     try? FileManager.default.removeItem(at: shelf.root)
                     verifyDdotsActivity(destination: destination) {
                         Task { @MainActor in
-                            verifyHubSwitch(destination: destination)
+                            self.verifyHubSwitch(destination: destination)
+                            await self.verifyHubIdentity(destination: destination)
                             try? "ddots hub smoke passed\n".write(to: destination.appendingPathComponent("ddots-hub.txt"), atomically: true, encoding: .utf8)
                             NSApp.terminate(nil)
                         }
@@ -837,6 +838,98 @@ extension AppDelegate {
         verifyHubArchiveSwitch(destination: destination)
         try? "PASS AC-01..10: fixed channel menu/picker, hidden/private choices, priority, fallback, names, drafts and shared selection/reset; no real writes.\n"
             .write(to: destination.appendingPathComponent("home-room-switch.txt"), atomically: true, encoding: .utf8)
+    }
+    /// DHI AC-01..09: real model/controller/view projection, using synthetic channels and memory-only edits.
+    @MainActor func verifyHubIdentity(destination: URL) async {
+        let model = slack.model
+        let view = ChatView(model: chat, slack: model, web: web)
+        var report: [String] = []
+        func check(_ value: Bool, _ message: String) {
+            smokeCheck(value, "home identity: " + message); report.append("PASS " + message)
+        }
+        let home = SlackRoom(id: Ddots.room, name: "stale home name")
+        let titles = model.headerTitles, descriptions = model.headerDescriptions, pictures = model.roomPictures
+        defer {
+            model.headerTitles = titles; model.headerDescriptions = descriptions; model.roomPictures = pictures
+            model.chooseHub("")
+        }
+        model.select(Ddots.room); model.draft = ""; model.writeNewPost()
+        model.headerTitles[Ddots.room] = "기본 제목"; model.headerDescriptions[Ddots.room] = "기본 설명"
+        check(model.ddotsDisplayRoom == nil && model.ddotsName == "workspace" && model.headerKey(home) == "ddots"
+              && model.headerTitle(home) == "기본 제목" && model.headerDescription(home) == "기본 설명", "AC-06 default uses home name and ddots header keys")
+        check(model.picture(for: home)?.tiffRepresentation == Ddots.picture?.tiffRepresentation, "AC-06 default retains homePicture or member faces")
+        model.chooseHub("CHUB")
+        check(model.ddotsDisplayRoom?.id == "CHUB" && model.ddotsName == "workspace" && model.rooms.first?.name == "workspace",
+              "AC-01/09 choosing even the current default adopts its channel name immediately")
+        check(model.headerTitle(home) == "workspace" && model.headerDescription(home) == "#workspace", "AC-03 ignores old ddots header overrides")
+        check(view.slackPrompt == "workspace에 새 요청" && view.findRoom("CHUB") == "workspace", "AC-04 composer and whole search use the selected channel name")
+        let first = NSImage(size: NSSize(width: 32, height: 32), flipped: false) { rect in NSColor.systemRed.setFill(); rect.fill(); return true }
+        let second = NSImage(size: NSSize(width: 32, height: 32), flipped: false) { rect in NSColor.systemBlue.setFill(); rect.fill(); return true }
+        model.roomPictures["CHUB"] = first
+        check(model.picture(for: home) === first && model.picture(for: SlackRoom(id: "CHUB", name: "workspace")) === first,
+              "AC-02/07/09 first room and ordinary channel share the custom picture path")
+        model.saveHeader(home, title: "채널 A 제목", description: "채널 A 설명")
+        check(model.headerTitles["CHUB"] == "채널 A 제목" && model.headerDescriptions["CHUB"] == "채널 A 설명"
+              && model.headerTitles["ddots"] == "기본 제목", "AC-08 header edits save under channel ID and preserve ddots")
+        await identityFrame("channel-a")
+        model.chooseHub("CHIDDEN")
+        check(model.rooms.first?.name == "hidden-private" && model.ddotsName == "hidden-private"
+              && view.slackPrompt == "hidden-private에 새 요청" && view.findRoom("CHIDDEN") == "hidden-private",
+              "AC-01/04/09 switching updates row, composer and search immediately")
+        check(model.headerTitle(home) == "hidden-private" && model.headerDescription(home) == "#hidden-private", "AC-03/05 A header never leaks to B")
+        model.roomPictures["CHIDDEN"] = second
+        model.saveHeader(home, title: "채널 B 제목", description: "채널 B 설명")
+        check(model.picture(for: home) === second && model.headerKey(home) == "CHIDDEN", "AC-05 B has its own picture and edit target")
+        await identityFrame("channel-b")
+        model.chooseHub("CHUB")
+        check(model.picture(for: home) === first && model.headerTitle(home) == "채널 A 제목" && model.headerDescription(home) == "채널 A 설명",
+              "AC-05 A to B to A restores each picture, title and description")
+        model.roomPictures["CHUB"] = nil
+        let expectedPicture = Ddots.roomPictures["CHUB"] ?? Ddots.roomPictures["workspace"]
+        check(model.picture(for: home)?.tiffRepresentation == expectedPicture?.tiffRepresentation,
+              "AC-02/07 clearing custom picture returns to configured channel picture, never homePicture")
+        let candidates = model.hubCandidates
+        model.hubCandidates = candidates.map { $0.id == "CHUB" ? SlackRoom(id: "CHUB", name: "새 채널 이름") : $0 }
+        check(model.ddotsName == "새 채널 이름" && view.findRoom("CHUB") == "새 채널 이름", "AC-01 Slack rename refreshes the single display name")
+        model.headerTitles["CHUB"] = nil; model.headerDescriptions["CHUB"] = nil
+        check(model.headerTitle(home) == "새 채널 이름" && model.headerDescription(home) == "#새 채널 이름", "AC-03 unedited header follows refreshed Slack name")
+        model.hubCandidates = candidates
+        checkSameFace("configured channel picture")
+        model.hubCandidates = candidates.map { $0.id == "CHUB" ? SlackRoom(id: "CHUB", name: "SNS담당방") : $0 }
+        check(Ddots.representative(model.displayRoom(home))?.profile == "sns-manager", "AC-02 selected channel resolves its own representative")
+        checkSameFace("representative or configured name picture")
+        model.hubCandidates = candidates.map { $0.id == "CHUB" ? SlackRoom(id: "CHUB", name: "unowned-fixture") : $0 }
+        let members = model.members["CHUB"]
+        model.members["CHUB"] = [SlackMember(profile: "fixture-one", name: "첫 사람", user: "UONE"), SlackMember(profile: "fixture-two", name: "둘째 사람", user: "UTWO")]
+        checkSameFace("channel member faces")
+        model.members["CHUB"] = []
+        checkSameFace("empty channel hash mark")
+        model.members["CHUB"] = members; model.hubCandidates = candidates
+        model.chooseHub("")
+        check(model.rooms.first?.name == "workspace" && model.ddotsDisplayRoom == nil && model.headerKey(home) == "ddots"
+              && model.headerTitle(home) == "기본 제목" && model.headerDescription(home) == "기본 설명", "AC-06/09 reset restores original home appearance immediately")
+        await identityFrame("default")
+        try! (report.joined(separator: "\n") + "\n").write(to: destination.appendingPathComponent("home-room-identity.txt"), atomically: true, encoding: .utf8)
+
+        @MainActor func checkSameFace(_ kind: String) {
+            func pixels(_ room: SlackRoom) -> Data {
+                let host = NSHostingView(rootView: view.slackFaces(model.members[room.id] ?? [], room: room))
+                host.frame = CGRect(x: 0, y: 0, width: 34, height: 34); host.layoutSubtreeIfNeeded()
+                guard let bitmap = host.bitmapImageRepForCachingDisplay(in: host.bounds) else { smokeFailed("face bitmap") }
+                host.cacheDisplay(in: host.bounds, to: bitmap)
+                guard let data = bitmap.representation(using: .png, properties: [:]) else { smokeFailed("face pixels") }
+                return data
+            }
+            guard let channel = model.ddotsDisplayRoom else { smokeFailed("explicit display target") }
+            check(pixels(home) == pixels(channel), "AC-02 first and ordinary room render identical " + kind)
+        }
+        @MainActor func identityFrame(_ name: String) async {
+            try? await Task.sleep(nanoseconds: 450_000_000)
+            capture(destination: destination.appendingPathComponent("home-identity-" + name))
+            if let room = chat.smokeFrames["room-ddots"], let section = chat.smokeFrames["room-" + Ddots.group(model.sections[0])] {
+                check(abs(section.minY - room.maxY - 4) < 1, "compact home-to-section gap is 4pt (" + name + ")")
+            } else { smokeFailed("home and first section have measured UI frames") }
+        }
     }
     /// Actual controller projection and scan cursors, with a temporary synthetic record only.
     func verifyHubArchiveSwitch(destination: URL) {
