@@ -18,6 +18,16 @@ enum SlackResizeSmoke {
     }()
     static let records = CommandLine.arguments.contains("--ui-smoke") && CommandLine.arguments.contains("--ui-smoke-resize")
     static func without(_ name: String) -> Bool { experiment == name }
+    /// A row on screen while the window's edge is dragged is drawn, not left as empty space. The AppKit list keeps a real
+    /// card in the table for every row in view and nothing for one out of view; the SwiftUI list it replaced reported which
+    /// of its rows were held as spacers.
+    @MainActor static func rowStaysLive(_ id: String, model: SlackModel) -> Bool {
+        guard NativeListFeature.enabled else { return renderedHolds[id] == false }
+        guard let coordinator = model.nativeGeometry as? NativeThreadList.Coordinator,
+              let row = coordinator.diagnostics.rowIDs.firstIndex(of: id),
+              let cell = coordinator.table.view(atColumn: 0, row: row, makeIfNecessary: false) else { return false }
+        return (cell as? NativeThreadCard)?.value != nil || cell is NativeThreadList.Cell
+    }
     static var renderedHolds: [String: Bool] = [:]
     static var measuring = false
     static var places = 0, frames = 0, layouts = 0
@@ -94,7 +104,7 @@ extension AppDelegate {
                             let expected = scroll.contentView.bounds.width - ChatMetrics.horizontalInset * 2
                             let visible = model.threads.filter { model.resizeFrame($0.id)?.intersects(scroll.contentView.bounds) == true }
                             for row in visible {
-                                smokeCheck(SlackResizeSmoke.renderedHolds[row.id] == false,
+                                smokeCheck(SlackResizeSmoke.rowStaysLive(row.id, model: model),
                                            "Visible row stays live during resizing: \(row.id), step=\(step)")
                                 smokeCheck(abs((model.rowGeometry[row.id]?.width ?? -1) - expected) <= 0.5,
                                            "Visible row uses current width: \(row.id), step=\(step)")

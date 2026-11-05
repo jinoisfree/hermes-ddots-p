@@ -202,7 +202,7 @@ extension AppDelegate {
         let firstFrames = destination.appendingPathComponent("entry-first-visible.txt")
         let oldVisible = model.onEntryViewportVisible, oldFrame = model.onEntryViewportFrame, oldTick = pet.onAnimationTick
         var frameLog = "event\troom\trequest\tcontent\ttarget\toffset\terror\tdocument\ttargetFrame\tbottomFrame\n"
-        var recordedFrames = Set<String>(), entryExposures = 0, visibleFrames = 0
+        var recordedFrames = Set<String>(), roomsShownWithThreads = Set<String>(), entryExposures = 0, visibleFrames = 0
         var maximumError: CGFloat = 0
         func sampleEntry(_ event: String) {
             guard model.source == .slack, model.entryHolds, let scroll = model.scrollView,
@@ -219,13 +219,19 @@ extension AppDelegate {
             }
             let expected = min(max(wanted, document.bounds.minY), max(document.bounds.minY, document.bounds.maxY - bounds.height))
             let error = abs(bounds.minY - expected)
-            maximumError = max(maximumError, error)
+            // The first picture of an entry must already be at its place. Once an entry has been shown with threads in it, content that
+            // arrives for it (a late reply making its thread taller) may wait on screen while the view settles again, never blanking
+            // it (`EntryViewport.revealed`); such a frame is allowed to be pending, and any frame that is not pending must be right.
+            // A room shown while it still had no thread has not had its first picture: its first threads must wait for their place too.
+            if !model.entryViewportPending && !model.threads.isEmpty { roomsShownWithThreads.insert(stamp.room ?? "nil") }
+            let settling = model.entryViewportPending && model.entryViewportRevealed && roomsShownWithThreads.contains(stamp.room ?? "nil")
+            if !settling { maximumError = max(maximumError, error) }
             if event == "expose" { entryExposures += 1 } else { visibleFrames += 1 }
             let key = "\(event):\(stamp.room ?? "nil"):\(stamp.request):\(stamp.content)"
             if recordedFrames.insert(key).inserted || error > 2 {
                 frameLog += "\(event)\t\(stamp.room ?? "nil")\t\(stamp.request)\t\(stamp.content)\t\(target)\t\(bounds.minY)\t\(error)\t\(document.bounds)\t\(String(describing: model.rowFrame(target)))\t\(String(describing: model.rowFrame("slack-bottom")))\n"
             }
-            if model.entryViewportPending || error > 2 || (target != "slack-bottom" && !model.threads.isEmpty && !shown(model.newestThread?.id)) {
+            if (model.entryViewportPending && !settling) || (error > 2 && !settling) || (target != "slack-bottom" && !model.threads.isEmpty && !shown(model.newestThread?.id) && !settling) {
                 try? frameLog.write(to: firstFrames, atomically: true, encoding: .utf8)
                 check(false, "Every first visible entry and following frame is already at the newest conversation: event=\(event), pending=\(model.entryViewportPending), error=\(error), \(place())")
             }
@@ -299,7 +305,15 @@ extension AppDelegate {
         await clickRoom("CLONGA"); await settle(1.2)
         check(model.selected == "CLONGA" && model.draft == "긴방A에서 쓰던 글", "The draft comes back with its room: \(model.draft.debugDescription)")
         check(newestA.map { model.open.contains($0) } ?? false && shown(newestA), "Returning shows the opened card again: open=\(model.open), \(place())")
+        // Letting the thread go (a click on empty space, folding all) puts its unsent words away with it, where they wait
+        // until it is picked again (docs/검증.md, 초안 자리). Picking it again brings them back before the tab is clicked once more.
         model.foldAll(animated: false); await settle(0.4)
+        if let newestA, let card = model.threads.first(where: { $0.id == newestA }) {
+            let waiting = SlackDraftPlace(workspace: model.workspace, shown: "CLONGA", aim: SlackDraftPlace.thread(newestA))
+            check(model.draft.isEmpty && model.drafts.draft(at: waiting).text == "긴방A에서 쓰던 글", "Letting the thread go leaves its words waiting with it: draft=\(model.draft.debugDescription)")
+            model.pick(card, foldable: false); await settle(0.4)
+            check(model.draft == "긴방A에서 쓰던 글" && model.drafts.draft(at: waiting).isEmpty, "Picking the thread again brings its words back: draft=\(model.draft.debugDescription)")
+        }
 
         // The same tab again, after scrolling away by hand, goes back to the newest conversation.
         scrollByHand(toTop: false); await settle(0.5)
@@ -315,11 +329,21 @@ extension AppDelegate {
         scrollByHand(toTop: false); await settle(0.4)
         collapseChat(); await settle(0.7); showChat(); await settle(1.2)
         check(model.selected == "CLONGA" && shown(newestA), "Reopening brings the room's newest conversation into view: \(place())")
-        check(model.draft == "긴방A에서 쓰던 글" && model.attachments == [attachment],
-              "Reopening keeps the unsent draft and attachment")
+        // Folding the window lets the picked thread go, so its unsent words and file wait with it (see above); picking brings them back.
+        if let newestA, let card = model.threads.first(where: { $0.id == newestA }) {
+            let waiting = SlackDraftPlace(workspace: model.workspace, shown: "CLONGA", aim: SlackDraftPlace.thread(newestA))
+            let kept = model.drafts.draft(at: waiting)
+            check(model.draft.isEmpty && model.attachments.isEmpty && kept.text == "긴방A에서 쓰던 글" && kept.files == [attachment],
+                  "Reopening leaves the unsent draft and attachment waiting with their thread: draft=\(model.draft.debugDescription), kept=\(kept)")
+            model.pick(card, foldable: false); await settle(0.4)
+            check(model.draft == "긴방A에서 쓰던 글" && model.attachments == [attachment],
+                  "Picking the thread again brings the unsent draft and attachment back")
+        }
         scrollByHand(toTop: false); await settle(0.4)
         if IMessageFeature.enabled { model.source = .imessage; await settle(0.4); model.source = .slack }
-        else { model.select("CLONGA") }
+        // Without iMessage there is no other source to come back from; the room's own tab is what the user clicks (`choose`).
+        // `select` of the room already shown does nothing, so it cannot stand for coming back.
+        else { model.choose("CLONGA") }
         await settle(1.2)
         check(shown(newestA) && model.draft == "긴방A에서 쓰던 글" && model.attachments == [attachment],
               "Returning to Slack shows its newest conversation and retains the draft: \(place())")
@@ -387,6 +411,12 @@ extension AppDelegate {
 
         // A page held in place by 새우튀김's page button gives way to a click on the room it is in.
         await clickRoom("CLONGA"); await settle(1.2)
+        // The words went away with their thread when the window was folded (above); pick it again so this click is
+        // judged on what it does to them, not on where they were put.
+        if let newestA, model.draft.isEmpty, let card = model.threads.first(where: { $0.id == newestA }) {
+            model.pick(card, foldable: false); await settle(0.4)
+            check(model.draft == "긴방A에서 쓰던 글", "Picking the thread brings its words back before the page checks: draft=\(model.draft.debugDescription)")
+        }
         await until("새우튀김's page under post 15 is read") { model.threads.contains { $0.root.body.hasPrefix("긴방A 글 15.") && !$0.replies.isEmpty } }
         if let page = model.threads.first(where: { $0.room == "CLONGA" && $0.root.body.hasPrefix("긴방A 글 15.") }), let control = page.replies.first {
             // The page asked for is only noted; nothing is sent anywhere.

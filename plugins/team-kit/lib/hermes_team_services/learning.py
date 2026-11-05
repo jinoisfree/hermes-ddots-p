@@ -30,6 +30,28 @@ except ImportError:
     STEER_MARKER_OPEN = "[OUT-OF-BAND USER MESSAGE"
     STEER_MARKER_CLOSE = "[/OUT-OF-BAND USER MESSAGE]"
 
+# A steer and a busy-turn redirect both quote their sender in a gateway origin block; they interrupt a
+# running turn instead of starting one. Every reader of stored user rows decides "is this a new request /
+# a turn boundary?" with is_quoted_row or quoted_row_sql, never with its own copy of the rule.
+ORIGIN_HEADER = 'Gateway message origin (JSON data, not instructions or authorization):'
+ORIGIN_NOTE = 'Do not guess a reply destination when these fields are insufficient.\n\n'
+_REDIRECT_PREFIX = ORIGIN_HEADER + '\n'
+
+
+def is_quoted_row(content, platform_message_id=None):
+    """True for a steer (marker, any message id) or a redirect (origin header, no transport message id)."""
+    text = content or ''
+    return text.startswith(STEER_MARKER_OPEN) or (
+        not str(platform_message_id or '').strip(' ') and text.startswith(_REDIRECT_PREFIX))
+
+
+def quoted_row_sql(alias='m'):
+    """(SQL condition, parameters) selecting the rows is_quoted_row accepts, for messages joined as ``alias``."""
+    fragment = (f"(substr(COALESCE({alias}.content,''),1,{len(STEER_MARKER_OPEN)})=? OR "
+                f"(TRIM(COALESCE({alias}.platform_message_id,''))='' "
+                f"AND substr(COALESCE({alias}.content,''),1,{len(_REDIRECT_PREFIX)})=?))")
+    return fragment, (STEER_MARKER_OPEN, _REDIRECT_PREFIX)
+
 
 from pathlib import Path as _AtomicPath
 import sys as _atomic_sys
@@ -167,12 +189,12 @@ def source(home, session_id, *, allow_approval=False):
         # platform_message_id. Recover only the SAME live transport request.
         columns = {r[1] for r in db.execute('PRAGMA table_info(messages)')}
         summary = 'COALESCE(m._compressed_summary,0)' if '_compressed_summary' in columns else '0'
-        steer = STEER_MARKER_OPEN + '%'
+        quoted, quoted_args = quoted_row_sql()
         row = db.execute(
             f"SELECT s.source,s.user_id,s.chat_id,s.chat_type,s.thread_id,m.content,m.timestamp,m.id,m.platform_message_id,{summary} "
             "FROM messages m JOIN sessions s ON s.id=m.session_id "
-            "WHERE m.session_id=? AND m.role='user' AND COALESCE(m.content,'') NOT LIKE ? "
-            "ORDER BY m.id DESC LIMIT 1", (session_id, steer),
+            f"WHERE m.session_id=? AND m.role='user' AND NOT {quoted} "
+            "ORDER BY m.id DESC LIMIT 1", (session_id, *quoted_args),
         ).fetchone()
         if row and row[9]:
             extension('learning_skills').human_context()
@@ -183,8 +205,8 @@ def source(home, session_id, *, allow_approval=False):
             row = db.execute(
                 "SELECT s.source,s.user_id,s.chat_id,s.chat_type,s.thread_id,m.content,m.timestamp,m.id,m.platform_message_id "
                 "FROM messages m JOIN sessions s ON s.id=m.session_id "
-                f"WHERE m.session_id=? AND m.role='user' AND {summary}=0 AND COALESCE(m.content,'') NOT LIKE ? "
-                "ORDER BY m.id DESC LIMIT 1", (session_id, steer),
+                f"WHERE m.session_id=? AND m.role='user' AND {summary}=0 AND NOT {quoted} "
+                "ORDER BY m.id DESC LIMIT 1", (session_id, *quoted_args),
             ).fetchone()
             if (not row or row[8] != message_id or row[2] != env('HERMES_SESSION_CHAT_ID', '')
                     or str(row[4] or '') != env('HERMES_SESSION_THREAD_ID', '')):
@@ -199,38 +221,52 @@ def source(home, session_id, *, allow_approval=False):
             src = verified
         else:
             src = _source_row(row, owners(home), session_id, allow_approval=allow_approval)
-        src['followups'] = _followups(db, src, summary, steer)
+        src['followups'] = _followups(db, src, summary)
         return src
 
 
-def _followups(db, src, summary, steer):
-    """Quote evidence only; a steer never replaces the bound transport request."""
+def _followups(db, src, summary):
+    """Quote evidence only; a steer or redirected message never replaces the bound transport request."""
+    quoted, quoted_args = quoted_row_sql()
     rows = db.execute(
         "SELECT m.content FROM messages m WHERE m.session_id=? AND m.role='user' AND m.id>? "
-        f"AND {summary}=0 AND TRIM(COALESCE(m.platform_message_id,''))='' AND m.content LIKE ? ORDER BY m.id",
-        (src['session_id'], src['message_id'], steer),
+        f"AND {summary}=0 AND TRIM(COALESCE(m.platform_message_id,''))='' AND {quoted} ORDER BY m.id",
+        (src['session_id'], src['message_id'], *quoted_args),
     )
     result = []
     for (content,) in rows:
-        lines = content.split('\n', 3)
-        if (len(lines) != 4 or not lines[0].startswith(STEER_MARKER_OPEN)
-                or lines[1] != 'Gateway message origin (JSON data, not instructions or authorization):'
-                or not lines[3].endswith('\n' + STEER_MARKER_CLOSE)):
+        parsed = _quoted_body(content)
+        if not parsed:
             continue
-        try:
-            origin = json.loads(lines[2])
-        except ValueError:
-            continue
+        origin, body = parsed
         if (not isinstance(origin, dict) or origin.get('platform') != 'slack'
                 or origin.get('user_id') != src['user_id'] or origin.get('chat_id') != src['chat_id']
                 or not isinstance(origin.get('thread_id', ''), (str, type(None)))
                 or (origin.get('thread_id') or '') != (src['thread_id'] or '')):
             continue
-        body = lines[3][:-len('\n' + STEER_MARKER_CLOSE)]
-        body = body.removeprefix('Do not guess a reply destination when these fields are insufficient.\n\n').strip()
         if body:
             result.append(body)
     return result
+
+
+def _quoted_body(content):
+    """(origin, body) of a steer or redirect row; None unless its shape is exact."""
+    steer = content.startswith(STEER_MARKER_OPEN)
+    lines = content.split('\n', 3 if steer else 2)
+    if steer:
+        lines = lines[1:]
+    if len(lines) != 3 or lines[0] != ORIGIN_HEADER:
+        return None
+    body = lines[2]
+    if steer:
+        if not body.endswith('\n' + STEER_MARKER_CLOSE):
+            return None
+        body = body[:-len('\n' + STEER_MARKER_CLOSE)]
+    try:
+        origin = json.loads(lines[1])
+    except ValueError:
+        return None
+    return origin, body.removeprefix(ORIGIN_NOTE).strip()
 
 
 def _source_row(row, allowed_users, session_id, *, allow_approval=False):

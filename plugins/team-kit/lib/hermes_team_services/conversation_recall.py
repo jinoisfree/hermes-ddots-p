@@ -24,6 +24,10 @@ import threading
 import time
 from zoneinfo import ZoneInfo
 import importlib.util as _ilu, pathlib as _pl, sys as _sys
+_library = str(Path(__file__).resolve().parent.parent)
+if _library not in _sys.path:
+    _sys.path.insert(0, _library)
+from hermes_team_services.learning import is_quoted_row, quoted_row_sql
 team = _sys.modules.get('hermes_team_registry')
 if team is None:
     _spec = _ilu.spec_from_file_location('hermes_team_registry', _pl.Path(__file__).with_name('team_registry.py'))
@@ -115,11 +119,11 @@ def safe_rows(db, sid, excluded, deadline, bounds=None):
                       and not compact(r) and not (private and r['role'] == 'assistant'))
     where = ' AND id>=? AND id<?' if bounds else ''
     args = (sid, *bounds) if bounds else (sid,)
-    for row in db.execute('SELECT id,session_id,role,content,tool_name,tool_calls,timestamp,_compressed_summary '
-                          'FROM messages WHERE session_id=?' + where + ' ORDER BY id', args):
+    for row in db.execute('SELECT id,session_id,role,content,tool_name,tool_calls,timestamp,_compressed_summary,'
+                          'platform_message_id FROM messages WHERE session_id=?' + where + ' ORDER BY id', args):
         check(deadline)
         r = dict(row)
-        if r['role'] == 'user' and not compact(r):
+        if r['role'] == 'user' and not compact(r) and not is_quoted_row(r['content'], r['platform_message_id']):
             flush()
             turn, private = [], False
         if r['tool_name'] in excluded:
@@ -153,13 +157,15 @@ def candidate_rows(db, sid, ids, excluded, deadline):
     if not assistants:
         return
     # Only IDs cross SQLite/Python here; large user attachments are never materialized.
+    # A steer or redirect interrupts the running turn: it must not open a new (public) turn.
+    quoted, quoted_args = quoted_row_sql()
     starts = [r[0] for r in db.execute(
-        "SELECT id FROM messages WHERE session_id=? AND role='user' "
-        "AND COALESCE(_compressed_summary,0)=0 "
-        "AND ltrim(COALESCE(content,'')) NOT LIKE '[CONTEXT COMPACTION%' "
-        "AND ltrim(COALESCE(content,'')) NOT LIKE '[CONTEXT SUMMARY]:%' "
-        "AND instr(COALESCE(content,''),'[END OF PRIOR CONTEXT — COMPACTION SUMMARY BELOW]')=0 ORDER BY id",
-        (sid,))]
+        "SELECT m.id FROM messages m WHERE m.session_id=? AND m.role='user' "
+        "AND COALESCE(m._compressed_summary,0)=0 "
+        "AND ltrim(COALESCE(m.content,'')) NOT LIKE '[CONTEXT COMPACTION%' "
+        "AND ltrim(COALESCE(m.content,'')) NOT LIKE '[CONTEXT SUMMARY]:%' "
+        f"AND instr(COALESCE(m.content,''),'[END OF PRIOR CONTEXT — COMPACTION SUMMARY BELOW]')=0 AND NOT {quoted} ORDER BY m.id",
+        (sid, *quoted_args))]
     starts = [0, *starts, 2**63-1]
     privacy = {}
     for row in assistants:

@@ -543,6 +543,8 @@ final class NativeThreadCard: NSTableCellView, NSTextViewDelegate {
     private var buttons: [Button] = []
     private let bell = Button()
     private(set) var value: Layout?
+    /// The hosted pieces by their ids, read only.
+    var diagnosticHosts: [String: Host] { hosts }
     var hostedSizeChanged: (() -> Void)?
     /// Lets scrolling and checks find a message's words and the card itself, as the SwiftUI probes did.
     var register: ((String, NSView) -> Void)?

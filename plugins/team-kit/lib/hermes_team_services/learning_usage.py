@@ -279,10 +279,12 @@ def prompt(home, learning, turn):
     if turn["phase"] != "interpret" or turn.get("feedback_checked"):
         return ""
     turn["feedback_checked"] = True
-    # Only the immediately previous human request, never an older assessed request across intervening work.
+    # Only the immediately previous human request (a steer or redirect is not one), never an older assessed request across intervening work.
+    quoted, quoted_args = learning.quoted_row_sql()
     with sqlite3.connect(f"file:{Path(home) / 'state.db'}?mode=ro", uri=True, timeout=2) as db:
-        previous = db.execute("SELECT id FROM messages WHERE session_id=? AND role='user' AND id<? ORDER BY id DESC LIMIT 1",
-                              (src["session_id"], src["message_id"])).fetchone()
+        previous = db.execute("SELECT m.id FROM messages m WHERE m.session_id=? AND m.role='user' AND m.id<? "
+                              f"AND NOT {quoted} ORDER BY m.id DESC LIMIT 1",
+                              (src["session_id"], src["message_id"], *quoted_args)).fetchone()
     if not previous:
         return ""
     old = state["cases"].get(case_id({**src, "message_id": previous[0]}, skills), {})

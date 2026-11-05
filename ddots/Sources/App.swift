@@ -493,6 +493,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         if CommandLine.arguments.contains("--show-calendar") { showCalendar() }
         if let index = CommandLine.arguments.firstIndex(of: "--ui-smoke"), CommandLine.arguments.count > index + 1 {
             let destination = URL(fileURLWithPath: CommandLine.arguments[index + 1])
+            ThreadLayoutRecorder.folder = destination.appendingPathComponent("diagnostics")
             recordDisabledIMessageChecks(destination: destination)
             showDashboard()
             pet.headline = "헤이헤이 일끝났어"
@@ -576,6 +577,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
                 else if CommandLine.arguments.contains("--ui-smoke-portraits") { self.verifyRelayPortraits(destination: destination) }
                 else if CommandLine.arguments.contains("--ui-smoke-selection") { self.verifySlackSelection(destination: destination) }
                 else if CommandLine.arguments.contains("--ui-smoke-resize") { self.verifySlackResize(destination: destination) }
+                else if CommandLine.arguments.contains("--ui-smoke-overlap") { Task { @MainActor in await self.verifyThreadOverlap(destination: destination); NSApp.terminate(nil) } }
                 else if CommandLine.arguments.contains("--ui-smoke-room") { self.verifySlackRoom(destination: destination) }
                 else if CommandLine.arguments.contains("--ui-smoke-input") { self.verifySlackInput(destination: destination) { NSApp.terminate(nil) } }
                 else if CommandLine.arguments.contains("--ui-smoke-calendar") { self.verifyCalendar(destination: destination) }
@@ -1295,11 +1297,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         let versionItem = NSMenuItem(title: "ddots \(version) (빌드 \(build))", action: nil, keyEquivalent: "")
         versionItem.isEnabled = false
         menu.addItem(versionItem)
+        addMenu("화면 상태 기록", #selector(recordThreadLayout))
         addMenu("업데이트 확인…", #selector(checkAppUpdate))
         menu.addItem(.separator())
         addMenu("ddots 종료", #selector(quit))
         menu.items.last?.keyEquivalent = "q"
         statusItem.menu = menu
+    }
+    /// Writes how the Slack list is laid out right now (ids, numbers and view classes only) and shows the file.
+    @MainActor @objc func recordThreadLayout() {
+        guard let coordinator = slack.model.nativeGeometry as? NativeThreadList.Coordinator else { NSSound.beep(); return }
+        guard let url = ThreadLayoutRecorder.write(ThreadLayoutAudit.snapshot(coordinator, kind: "manual"), manual: true) else { NSSound.beep(); return }
+        NSWorkspace.shared.activateFileViewerSelecting([url])
     }
     @MainActor @objc func checkAppUpdate() { appUpdate?.checkNow() }
     @MainActor @objc func connectAppUpdate() { appUpdate?.connect() }

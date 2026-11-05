@@ -112,6 +112,8 @@ struct NativeThreadList: NSViewRepresentable {
         private var rowCreated = 0, rowReused = 0, textCreated = 0, textReused = 0
         private var inputMonitor: Any?
         private var observers: [NSObjectProtocol] = []
+        /// Looks at the finished layout now and then and writes a record when it is wrong for good.
+        private let watch = ThreadLayoutWatch()
         init(model: SlackModel) { self.model = model }
         deinit { disconnect() }
 
@@ -187,6 +189,18 @@ struct NativeThreadList: NSViewRepresentable {
                 self.scheduleHeightCheck(cell, id: item.id)
             }
             return cell
+        }
+        /// What the list holds, read only: for the layout record and the checks that read it.
+        struct Diagnostics {
+            var rowIDs: [String]
+            var heights: [String: CGFloat]
+            var cardHeights: [String: CGFloat]
+            var updating: Bool, queued: Bool, remeasuring: Int, ready: Bool
+        }
+        var diagnostics: Diagnostics {
+            Diagnostics(rowIDs: rows.map(\.id), heights: heights, cardHeights: textLayouts.mapValues(\.height),
+                        updating: updating, queued: queued, remeasuring: remeasuring.count,
+                        ready: stamp.map { isReady(stamp: $0) } ?? false)
         }
         var cardCounts: [String: Int] { ["row_created": rowCreated, "row_reused": rowReused, "text_created": textCreated, "text_reused": textReused, "appkit": textLayouts.count, "hosted": rows.filter { $0.inputs != nil && $0.card == nil }.count] }
         private var cardWidth: CGFloat { max(1, width - 2 * ChatMetrics.horizontalInset) }
@@ -311,6 +325,7 @@ struct NativeThreadList: NSViewRepresentable {
                     model.prepareEntryViewport()
                     self.performScroll()
                 }
+                self.watch.layoutFinished(self)
             }
         }
         /// What the SwiftUI card read back from its own geometry: the opened thread's height, a long post's height.
@@ -433,6 +448,7 @@ struct NativeThreadList: NSViewRepresentable {
             if let inputMonitor { NSEvent.removeMonitor(inputMonitor) }; inputMonitor = nil
             for observer in observers { NotificationCenter.default.removeObserver(observer) }; observers = []
             table.afterLayout = nil; table.beforeDraw = nil
+            watch.stop()
         }
     }
 }

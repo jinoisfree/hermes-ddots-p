@@ -66,6 +66,14 @@ def handle(config, home, name, args, *, kind, session_id='', turn_id='', files_c
         schema = target.SCHEMAS[name]['parameters']
         if not isinstance(args, dict) or set(args) - set(schema['properties']) or set(schema.get('required', [])) - set(args):
             raise ValueError('invalid_review_arguments')
+        if name in {'work_crosscheck', 'store_guidance_check'} and not turn_id:
+            # The host passes task/session ids to handlers but not the turn id that the read receipts
+            # are keyed by; it is bound in the approval context for the duration of the tool call.
+            try:
+                from tools.approval_context import _approval_turn_id
+                turn_id = _approval_turn_id.get() or ''
+            except Exception:
+                turn_id = ''
         evidence = module('review_evidence').snapshot(home, session_id, turn_id) if name in {'work_crosscheck', 'store_guidance_check'} else None
         result = target.handle(name, args, home=Path(home), session_id=session_id, files_config=files_config, evidence=evidence)
         return json.dumps(result, ensure_ascii=False, default=str, allow_nan=False)

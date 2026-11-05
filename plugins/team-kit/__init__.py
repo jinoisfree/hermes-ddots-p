@@ -92,6 +92,8 @@ def _one_line(text: str) -> str:
 def recent_context(db_path: Path, session_id: str, *, now: float, hours: float,
                    max_messages: int, max_chars: int, exclude_tools=None) -> str:
     """What this profile said and heard in its other chat sessions since this one last replied."""
+    from hermes_team_services.learning import is_quoted_row, quoted_row_sql
+    quoted, quoted_args = quoted_row_sql()
     conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=0.2)
     try:
         row = conn.execute("SELECT session_key FROM sessions WHERE id = ?", (session_id,)).fetchone()
@@ -123,10 +125,12 @@ def recent_context(db_path: Path, session_id: str, *, now: float, hours: float,
                     rows.extend((ts, src, role, content) for ts, src, role, content in turn
                                 if ts > since and role in ('user', 'assistant')
                                 and str(content or '').strip() and not (private and role == 'assistant'))
-                for ts, src, role, content, tool_name, tool_calls in conn.execute(
-                    "SELECT m.timestamp,s.source,m.role,m.content,m.tool_name,m.tool_calls "
+                for ts, src, role, content, tool_name, tool_calls, message_id in conn.execute(
+                    "SELECT m.timestamp,s.source,m.role,m.content,m.tool_name,m.tool_calls,m.platform_message_id "
                     "FROM messages m JOIN sessions s ON s.id=m.session_id WHERE m.session_id=? ORDER BY m.id", (sid,)
                 ):
+                    if role == 'user' and is_quoted_row(content, message_id):
+                        continue  # interrupts the running turn: no boundary, and its origin JSON is not speech
                     if role == 'user':
                         flush()
                         turn, private = [], False
@@ -147,9 +151,9 @@ def recent_context(db_path: Path, session_id: str, *, now: float, hours: float,
                 f"SELECT m.timestamp, s.source, m.role, m.content FROM messages m "
                 f"JOIN sessions s ON s.id = m.session_id "
                 f"WHERE s.source IN ({marks}) AND NOT ({own}) AND m.role IN ('user', 'assistant') "
-                f"AND m.timestamp > ? AND TRIM(COALESCE(m.content, '')) != '' "
+                f"AND m.timestamp > ? AND TRIM(COALESCE(m.content, '')) != '' AND NOT {quoted} "
                 f"ORDER BY m.timestamp DESC LIMIT ?",
-                (*CHAT_SOURCES, own_arg, since, max_messages),
+                (*CHAT_SOURCES, own_arg, since, *quoted_args, max_messages),
             ).fetchall()
     finally:
         conn.close()

@@ -7,6 +7,7 @@ _owner_library = str((_OwnerPath(__file__).resolve().parent / '..').resolve())
 if _owner_library not in _owner_sys.path:
     _owner_sys.path.insert(0, _owner_library)
 from hermes_facility.owner_text import render as _owner_text
+from hermes_team_services.learning import quoted_row_sql
 
 from pathlib import Path
 import re
@@ -40,12 +41,15 @@ MAIL_LEGEND = '메모 = 개인(Obsidian 메모), 메모+노션 = 공용(노션+O
 MAIL_CHOICES = {':hp-memo: 메모':'lv1', ':hp-notion: 메모+노션':'lv2', ':hp-check: 확인':'확인', '메모+노션':'lv2'}
 
 def mail_thread(home, session_id):
-    """Only the latest inbound's bounded transport thread context supplies bare-word meaning."""
+    """Only the latest inbound's bounded transport thread context supplies bare-word meaning; a steer or
+    redirect that interrupted its turn is not an inbound."""
     if not team.home_has_role(home, 'work') or not session_id:
         return False
     try:
+        quoted, quoted_args = quoted_row_sql()
         with sqlite3.connect((Path(home)/'state.db').as_uri()+'?mode=ro', uri=True) as db:
-            row = db.execute("SELECT content FROM messages WHERE session_id=? AND role='user' AND content IS NOT NULL ORDER BY id DESC LIMIT 1", (session_id,)).fetchone()
+            row = db.execute("SELECT m.content FROM messages m WHERE m.session_id=? AND m.role='user' AND m.content IS NOT NULL "
+                             f"AND NOT {quoted} ORDER BY m.id DESC LIMIT 1", (session_id, *quoted_args)).fetchone()
         text = str(row[0] or '') if row else ''
         if not text.startswith('[Thread context') or '[End of thread context]' not in text:
             return False

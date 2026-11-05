@@ -218,15 +218,18 @@ def plan_documents(home, name, operations, learning):
 def experience(home, session_id, quote, *, after_message=None):
     if not isinstance(quote, str) or not 16 <= len(quote) <= 1500:
         raise ValueError("Experience learning needs a 16–1500 character exact tool-result quote.")
+    learning = learning_module()
     with sqlite3.connect(f"file:{Path(home) / 'state.db'}?mode=ro", uri=True, timeout=2) as db:
         columns = {row[1] for row in db.execute("PRAGMA table_info(messages)")}
         call_column = "tool_call_id" if "tool_call_id" in columns else "NULL"
-        until = db.execute("SELECT MIN(id) FROM messages WHERE session_id=? AND role='user' AND id>?",
-                           (session_id, after_message or 0)).fetchone()[0] if after_message is not None else None
+        # A steer or redirect interrupts the same request; only the next real user message ends its evidence.
+        quoted, quoted_args = learning.quoted_row_sql()
+        until = db.execute("SELECT MIN(m.id) FROM messages m WHERE m.session_id=? AND m.role='user' AND m.id>? "
+                           f"AND NOT {quoted}", (session_id, after_message or 0, *quoted_args)).fetchone()[0] if after_message is not None else None
         rows = db.execute(f"SELECT id,tool_name,content,{call_column} FROM messages WHERE session_id=? AND role='tool' "
                           "AND id>? AND id<? ORDER BY id DESC LIMIT 100",
                           (session_id, after_message or 0, until or 2**63 - 1)).fetchall()
-    verifier = learning_module().extension("learning_evidence")
+    verifier = learning.extension("learning_evidence")
     for row_id, name, content, call_id in rows:
         if name not in verifier.TOOLS or verifier.classify(name, content) != "success":
             continue

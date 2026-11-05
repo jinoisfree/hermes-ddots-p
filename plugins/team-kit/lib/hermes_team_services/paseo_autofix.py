@@ -492,6 +492,31 @@ def paint(home, job, status, note):
         print(f'autofix repaint failed ({type(exc).__name__})', file=sys.stderr)
 
 
+def paint_origin(home, job, status, note):
+    """Repaint the morning report this 새벽 작업 answers (its thread's first message)."""
+    try:
+        L.extension('report_status').mark(lambda method, body: R.slack(home, method, body), job['channel'], job['thread_ts'], status, note)
+    except Exception as exc:
+        print(f'autofix origin repaint failed ({type(exc).__name__})', file=sys.stderr)
+
+
+def needs_decision(job):
+    return job['status'] in NEEDS_DECISION or (job['status'] == 'nothing' and any(r.get('remaining') for r in job.get('analysis') or []))
+
+
+def settle_origin(home, job):
+    """Once every 새벽 작업 of a morning report has its result, green only when nothing is left to decide (2026-11-05).
+
+    Returns False while another job of the same report is still running: try again on a later tick."""
+    jobs = dict(load(home)['jobs'], **{job['key']: job})
+    same = [j for j in jobs.values() if j.get('kind') == 'night' and j.get('thread_ts') == job['thread_ts'] and j.get('channel') == job['channel']]
+    if any(j['status'] in IN_FLIGHT for j in same):
+        return False
+    if not any(needs_decision(j) for j in same):
+        paint_origin(home, job, 'done', '결정할 것 없음')
+    return True
+
+
 def short(sha):
     return sha[:7]
 
@@ -550,6 +575,8 @@ def result_report(job):
                      '*되돌리기*를 누르면 되돌림 커밋을 만들고 실제 파일을 되돌린 뒤 필요하면 게이트웨이를 재시작한다. '
                      '원본이 이미 원격에 있으면 되돌림 커밋도 올린다.'))
         return '\n'.join(lines) + '\n[[버튼: 확인 | 되돌리기]]'
+    if job.get('status') == HELD:
+        return '\n'.join(lines) + '\n' + HELD_LEGEND + '\n[[버튼: 확인 | 의견]]'
     return '\n'.join(lines) + '\n[[버튼: 확인]]'
 
 
@@ -628,6 +655,11 @@ CAP_ANSWERS = CAP_CHOICES + CAP_LEGACY
 # The result report's buttons (owner, 2026-10-31): 확인 = push approval, 되돌리기 = the former 롤백.
 UNDO = ('되돌리기', '롤백')
 WAITING_OWNER = 'awaiting_owner'
+# Only holds, with a remaining problem: the owner confirms the hold or says what to do instead (2026-11-05).
+HELD = 'held'
+HELD_LEGEND = '*확인* = 보류 판단을 받아들이고 종결(푸시 없음), *의견* = 다르게 할 일을 직접 지시'
+NEEDS_DECISION = ('reported', 'failed', HELD)
+IN_FLIGHT = ('queued', 'analyzing', 'implementing', 'confirming', 'rolling_back')
 
 
 def cap_question(job, cap):
@@ -719,7 +751,7 @@ def report_job(home, report_key):
     """The 조직개편안 job a 확인/롤백 in that report's thread is for: the latest one with a result."""
     jobs = load(home)['jobs']
     keys = [k for k in jobs if k == report_key or k.startswith(report_key + '#')]
-    done = [k for k in keys if jobs[k]['status'] in ('reported', 'failed')]
+    done = [k for k in keys if jobs[k]['status'] in NEEDS_DECISION]
     pick = done or keys
     return max(pick, key=lambda k: jobs[k].get('queued_at', 0)) if pick else report_key
 
@@ -750,14 +782,27 @@ def request(home, key, action, ts):
             return None
         if job['status'] == 'confirming':
             return '확인 처리 중이야. 끝나면 결과를 알릴게.'
-        if job['status'] not in ('reported', 'failed'):
+        if job['status'] == HELD:
+            if action == '롤백':
+                return '바뀐 것이 없어 되돌릴 것이 없어.'
+            # 확인 accepts the hold and closes the job; nothing is pushed.
+            job['status'] = 'nothing'
+            job['held_confirmed_ts'] = ts
+            L.save(state_path(home), state)
+            closed = dict(job)
+        elif job['status'] not in ('reported', 'failed'):
             return '아직 자동개편이 끝나지 않았어. 결과 보고 뒤에 눌러 줘.' if job['status'] not in ('confirmed', 'rolled_back', 'nothing') else '이미 처리된 작업이야.'
-        if action == '롤백' and not any((job.get('commits') or {}).values()):
-            action = '확인'
-        job['action'] = {'kind': action, 'ts': ts}
-        job['receipt_source'] = ts
-        job.pop('receipt_ts', None)
-        L.save(state_path(home), state)
+        else:
+            if action == '롤백' and not any((job.get('commits') or {}).values()):
+                action = '확인'
+            job['action'] = {'kind': action, 'ts': ts}
+            job['receipt_source'] = ts
+            job.pop('receipt_ts', None)
+            L.save(state_path(home), state)
+            closed = None
+    if closed:
+        paint(home, closed, 'done', '확인')
+        return '확인했어. 보류 판단대로 종결할게.'
     return '확인 접수. 원격에 올린 뒤 결과를 알릴게.' if action == '확인' else '되돌리기 접수. 되돌린 뒤 결과를 알릴게.'
 
 
@@ -796,6 +841,8 @@ def agent_status(job):
 def finish_report(home, job, status):
     job['status'] = status
     job['report_ts'] = say(home, job, result_report(job), role='report')
+    if job.get('kind') == 'night':
+        job['origin_pending'] = True
 
 
 def fail(home, job, error):
@@ -860,10 +907,16 @@ def advance(home, job):
             numbers = [row['n'] for row in analysis if row['decision'] == '진행']
             if not numbers:
                 job['commits'] = {'setting': [], 'agent': []}
-                job['status'] = 'nothing'
-                report = result_report(job).replace('\n[[버튼: 확인]]', '')
-                report = report.replace('🔴', '🟡' if any(r.get('remaining') for r in analysis) else '🟢', 1)
+                if any(r.get('remaining') for r in analysis):
+                    # A problem remains: the owner confirms the hold or gives another instruction (2026-11-05).
+                    job['status'] = HELD
+                    report = result_report(job)
+                else:
+                    job['status'] = 'nothing'
+                    report = result_report(job).replace('\n[[버튼: 확인]]', '').replace('🔴', '🟢', 1)
                 job['report_ts'] = say(home, job, report, role='report')
+                if job.get('kind') == 'night':
+                    job['origin_pending'] = True
                 return False
             sh([PASEO, 'send', job['agent_id'], '--no-wait', '--prompt', implement_prompt(key, numbers, folder / 'result.json', analysis)])
             job.update(status='implementing', phase_at=time.time())
@@ -1035,10 +1088,17 @@ def tick(home=HOME):
                     job.pop('receipt_ts', None)
                 if latest.get('receipt_source') == job.get('receipt_source') and latest.get('receipt_ts'):
                     job['receipt_ts'] = latest['receipt_ts']
+                if job.get('status') == HELD and latest.get('held_confirmed_ts'):
+                    job.update(status=latest['status'], held_confirmed_ts=latest['held_confirmed_ts'])  # confirmed meanwhile
                 if latest.get('thread_ts') and not job.get('thread_ts'):
                     job.update(channel=latest['channel'], thread_ts=latest['thread_ts'])  # attached by the morning report
                 state['jobs'][key] = job
                 save(home, state)
+            if job.get('origin_pending') and job.get('thread_ts') and not job.get('held') and settle_origin(home, job):
+                with L.locked(state_path(home)):
+                    state = load(home)
+                    state['jobs'][key].pop('origin_pending', None)
+                    save(home, state)
             if holding:
                 return
 

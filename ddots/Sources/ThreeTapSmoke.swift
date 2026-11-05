@@ -131,8 +131,8 @@ extension AppDelegate {
         }
         try? lines.map(\.0).joined(separator: "\n").write(to: destination.appendingPathComponent("menu.txt"), atomically: true, encoding: .utf8)
         let top = menu.items.filter { !$0.isHidden && !$0.isSeparatorItem }.count
-        smokeCheck(top == 9, "The top level keeps eight actions and a version label: \(top)")
-        for title in ["대화 열기", "작업 목록", "내 캘린더", "설정…", "업데이트 확인…", "ddots 종료"] {
+        smokeCheck(top == 10, "The top level keeps nine actions and a version label: \(top)")
+        for title in ["대화 열기", "작업 목록", "내 캘린더", "설정…", "화면 상태 기록", "업데이트 확인…", "ddots 종료"] {
             smokeCheck(menuItem(titled: title)?.action != nil, "Menu keeps " + title)
         }
         smokeCheck(menuItem(titled: "설정…")?.keyEquivalent == ",", "Settings shortcut")

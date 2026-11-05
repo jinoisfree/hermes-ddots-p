@@ -1553,6 +1553,9 @@ final class SlackModel: ObservableObject {
         /// Shown once at its place. Hiding is only for the first picture; afterwards a moment of waiting
         /// (a resize, a late table layout) keeps what is on screen instead of blanking it for a frame.
         var revealed = false
+        /// What was shown had no thread in it (a room still waiting for its listing). The first threads that come are
+        /// then the first picture of the conversation: it waits hidden for its place rather than showing at the top.
+        var showedNothing = false
     }
     /// How often a revealed entry would have been hidden again; read by the pet-drag check.
     private(set) var entryRehides = 0
@@ -1565,6 +1568,8 @@ final class SlackModel: ObservableObject {
     }
     private var preparingEntryViewport = false
     var entryViewportPending: Bool { entryViewport.map { !$0.ready } ?? false }
+    /// Whether the entry has been shown at its place (with threads in it) and so stays on screen while new content settles.
+    var entryViewportRevealed: Bool { entryViewport?.revealed ?? false }
     /// UI checks observe the instant content becomes visible; waiting a second after entry misses a visible jump.
     var onEntryViewportVisible: (() -> Void)?
     var onEntryViewportFrame: (() -> Void)?
@@ -1572,8 +1577,9 @@ final class SlackModel: ObservableObject {
         guard entryHolds, requestScrolls == userScrolls, source == .slack, pageHold == nil else { return }
         // New content in the room already on screen keeps it on screen while it settles at its place again;
         // only a first picture (a room entered, the window opened) waits hidden.
-        let shown = entryViewport.map { $0.revealed && $0.stamp.room == entryViewportStamp.room } ?? false
-        entryViewport = EntryViewport(stamp: entryViewportStamp, target: entryTarget, scrolls: userScrolls, revealed: shown)
+        let shown = entryViewport.map { $0.revealed && $0.stamp.room == entryViewportStamp.room && !($0.showedNothing && !threads.isEmpty) } ?? false
+        entryViewport = EntryViewport(stamp: entryViewportStamp, target: entryTarget, scrolls: userScrolls, revealed: shown,
+                                      showedNothing: shown && threads.isEmpty)
         entryRowStamps.removeAll(keepingCapacity: true)
         if !shown { scrollView?.alphaValue = 0 }
         scrollView?.needsLayout = true
@@ -1646,6 +1652,7 @@ final class SlackModel: ObservableObject {
         }
         entryViewport?.ready = true
         entryViewport?.revealed = true
+        entryViewport?.showedNothing = threads.isEmpty
         scrolledRevision = entry.stamp.request
         scroll.alphaValue = 1
         if !entry.ready { onEntryViewportVisible?() }

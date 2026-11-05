@@ -101,7 +101,7 @@ def render_nights(nights):
         if night.get('job'):
             bad = True
             lines.append('*새벽 자동 수정*\n' + '\n'.join(f'  • {R.layout.excerpt(t, 90)}' for t in night.get('items') or [])
-                         + f"\n  ↳ Paseo `{night['job']}` — 결과와 확인·되돌리기 버튼은 이 글의 스레드에 올린다. 푸시는 확인 뒤다.")
+                         + f"\n  ↳ Paseo `{night['job']}` — 결과는 이 글의 스레드에 올린다. 커밋이 생기면 확인·되돌리기, 보류만 있으면 확인·의견 버튼으로 결정한다. 푸시는 확인 뒤다.")
         if night.get('check_error'):
             lines.append(f"  • 새벽 점검 읽기 실패: `{night['check_error']}`")
         if night.get('enqueue_error'):
@@ -131,7 +131,7 @@ def render(doctor, errors, notices, nights=()):
     if owner_rows:
         lines.append('*소유자가 할 일*\n' + '\n'.join('  • ' + R.layout.excerpt(row.get('short', ''), 400) for row in owner_rows))
     elif any(n.get('job') for n in nights):
-        lines.append('*처리 상태*\n자동 수정 결과는 이 스레드에 이어진다. 완료 보고의 확인·되돌리기 버튼에서 결정해 줘.')
+        lines.append('*처리 상태*\n자동 수정 결과는 이 스레드에 이어진다. 커밋이 생기면 확인·되돌리기, 보류만 있으면 확인·의견 버튼에서 결정해 줘.')
     lines.extend(night_lines)
     if broken or recovered:
         lines.append('*매일 점검*')

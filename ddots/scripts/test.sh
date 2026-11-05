@@ -20,6 +20,8 @@ xcrun swiftc -swift-version 5 "$ROOT/Sources/OptionsLayout.swift" "$ROOT/Tests/O
 "$ROOT/.build/OptionsLayoutTests"
 xcrun swiftc -swift-version 5 "$ROOT/Sources/UpdateIdlePolicy.swift" "$ROOT/Sources/UpdateReminder.swift" "$ROOT/Tests/UpdateIdlePolicyTests.swift" -o "$ROOT/.build/UpdateIdlePolicyTests"
 "$ROOT/.build/UpdateIdlePolicyTests"
+xcrun swiftc -swift-version 5 "$ROOT/Sources/ThreadLayoutDiagnosticsPolicy.swift" "$ROOT/Tests/ThreadLayoutDiagnosticsPolicyTests.swift" -o "$ROOT/.build/ThreadLayoutDiagnosticsPolicyTests"
+"$ROOT/.build/ThreadLayoutDiagnosticsPolicyTests"
 xcrun swiftc -swift-version 5 "$ROOT/Sources/HermesRouting.swift" "$ROOT/Tests/RoutingContractTests.swift" -o "$ROOT/.build/RoutingContractTests"
 "$ROOT/.build/RoutingContractTests" "$ROOT/Tests/Fixtures/routing.json"
 xcrun swiftc -swift-version 5 "$ROOT/Sources/HermesRouting.swift" "$ROOT/Sources/DdotsConfig.swift" "$ROOT/Sources/HermesLocator.swift" "$ROOT/Tests/ConfigTests.swift" -o "$ROOT/.build/ConfigTests"
