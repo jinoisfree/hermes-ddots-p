@@ -818,10 +818,12 @@ final class SlackModel: ObservableObject {
         }
         onSend?(SlackNotice.answerText(thread, approve: approve), thread.room, thread, [])
     }
-    func answerHermes(_ thread: SlackThread, label: String) {
+    func answerHermes(_ thread: SlackThread, label: String, post: ChatMessage? = nil) {
         // 의견 opens the draft on the thread instead of sending the word (owner, 2026-10-31).
-        if label == SlackNotice.reviseText && SlackNotice.hermesAnswer(thread, label: label) != nil { opinion(thread); return }
-        guard let text = SlackNotice.hermesAnswer(thread, label: label) else { return }
+        if label == SlackNotice.reviseText && SlackNotice.hermesAnswer(thread, label: label, post: post) != nil { opinion(thread); return }
+        guard let text = SlackNotice.hermesAnswer(thread, label: label, post: post) else { return }
+        // A post among several items is named, so Hermes handles that item only; a lone request goes as the bare word.
+        if let ts = post?.slackTS, let send = onClickSend { send(text, thread.room, thread, ts); return }
         onSend?(text, thread.room, thread, [])
     }
     func skipHermesChecklist(_ thread: SlackThread) {
@@ -1206,6 +1208,8 @@ final class SlackModel: ObservableObject {
     var onOlder: (() -> Void)?
     /// The words go as typed; whoever sends works out what is added for the channel while the pressed face still stands.
     var onSend: ((_ text: String, _ room: String, _ thread: SlackThread?, _ files: [URL]) -> Void)?
+    /// A button answer that names the post it pressed (`hermes_click:<ts>`), for a reply with several items.
+    var onClickSend: ((_ text: String, _ room: String, _ thread: SlackThread, _ post: String) -> Void)?
     /// A post that was not sent, with why.
     var onRefuse: ((String) -> Void)?
 
@@ -2581,7 +2585,7 @@ extension ChatView {
         let displayed = SlackNotice.displayed(thread, confirmed: slack.confirmed)
         let _ = SlackInputSmoke.countThread()
         let expanded = slack.open.contains(thread.id)
-        let shown = SlackStack.visible(displayed, expanded: expanded)
+        let shown = SlackStack.visible(displayed, expanded: expanded, keeping: SlackNotice.waitingPostIDs(thread))
         // A character whose "생각 중" line is already in the thread is not shown writing twice.
         let thinkers = Set(thread.messages.filter { !$0.fromUser && (SlackText.isThinking($0.body) || $0.streaming) }.map(\.profile))
         let writing = (slack.typing[thread.id] ?? []).filter { !thinkers.contains($0.profile) }
@@ -2595,6 +2599,8 @@ extension ChatView {
         let tone = SlackNotice.railColor(thread, pending: notice.pending, state: state).flatMap { Self.color(hex: $0) } ?? displayed.root.marks.lazy.compactMap { Self.color(hex: $0.color) }.first
         let foldable = thread.replyCount > SlackStack.inlineLimit || !thread.loaded
         let pending = notice.pending?.id
+        // One request, or one set of buttons under each post that waits when a reply carries several items.
+        let buttons = SlackNotice.buttonPosts(thread, pending: notice.pending)
         let vaultLayout = slack.vault.presentation(thread, active: slack.vaultSelections(thread), visible: Set([displayed.root.id] + shown.replies.map(\.id)), pending: pending)
         let mine = thread.root.fromUser
         // Text stays selectable when folded; a text click opens it without taking its drag gesture.
@@ -2620,13 +2626,13 @@ extension ChatView {
                     }
                 }.frame(maxWidth: .infinity, alignment: .leading)
             }
-            if pending == thread.root.id, !vaultLayout.hidden.contains(displayed.root.id), let parts = buttonSplit(displayed.root) {
+            if buttons.ids.contains(thread.root.id), !vaultLayout.hidden.contains(displayed.root.id), let parts = buttonSplit(displayed.root) {
                 // What to do, its buttons, then the details (owner, 2026-10-31).
                 slackLine(parts.head, selectable: selectable, textClick: textClick).id(thread.root.id == thread.id ? "slack-root:" + thread.id : thread.root.id)
-                slackApproval(thread)
+                slackApproval(thread, post: buttons.perPost ? displayed.root : nil)
                 slackLine(parts.detail, selectable: selectable, textClick: textClick)
             } else if !vaultLayout.hidden.contains(displayed.root.id) { slackLine(displayed.root, selectable: selectable, textClick: textClick).id(thread.root.id == thread.id ? "slack-root:" + thread.id : thread.root.id) }
-            if pending == thread.root.id && (vaultLayout.hidden.contains(displayed.root.id) || buttonSplit(displayed.root) == nil) { slackApproval(thread) }
+            if buttons.ids.contains(thread.root.id) && (vaultLayout.hidden.contains(displayed.root.id) || buttonSplit(displayed.root) == nil) { slackApproval(thread, post: buttons.perPost ? displayed.root : nil) }
             if let selection = vaultLayout.anchors[displayed.root.id] {
                 vaultButtons(thread, selection: selection)
             }
@@ -2635,13 +2641,13 @@ extension ChatView {
                 VStack(alignment: .leading, spacing: 6) {
                     if shown.hidden > 0 { slackStack(thread, hidden: shown.hidden, expanded: expanded).padding(.leading, ChatMetrics.avatar + 9).transition(.opacity) }
                     ForEach(shown.replies) { reply in
-                        if pending == reply.id, !vaultLayout.hidden.contains(reply.id), let parts = buttonSplit(reply) {
+                        if buttons.ids.contains(reply.id), !vaultLayout.hidden.contains(reply.id), let parts = buttonSplit(reply) {
                             slackLine(parts.head, selectable: selectable, textClick: textClick, conversational: true).id(reply.id).transition(.opacity)
-                            slackApproval(thread).transition(.opacity)
+                            slackApproval(thread, post: buttons.perPost ? reply : nil).transition(.opacity)
                             slackLine(parts.detail, selectable: selectable, textClick: textClick, conversational: true).transition(.opacity)
                         } else {
                             if !vaultLayout.hidden.contains(reply.id) { slackLine(reply, selectable: selectable, textClick: textClick, conversational: true).id(reply.id).transition(.opacity) }
-                            if pending == reply.id { slackApproval(thread).transition(.opacity) }
+                            if buttons.ids.contains(reply.id) { slackApproval(thread, post: buttons.perPost ? reply : nil).transition(.opacity) }
                         }
                         if let selection = vaultLayout.anchors[reply.id] {
                             vaultButtons(thread, selection: selection)
@@ -2797,14 +2803,14 @@ extension ChatView {
     }
 
     /// Under an approval request: answer it, write an opinion, or confirm it without sending.
-    func slackApproval(_ thread: SlackThread) -> some View {
+    func slackApproval(_ thread: SlackThread, post: ChatMessage? = nil) -> some View {
         Group {
-            if SlackResizeSmoke.without("fitting") { slackApproval(thread, compact: false) }
+            if SlackResizeSmoke.without("fitting") { slackApproval(thread, post: post, compact: false) }
             else {
                 // The answer buttons always show their picture and word; a narrow card scrolls them sideways.
                 ViewThatFits(in: .horizontal) {
-                    slackApproval(thread, compact: false)
-                    ScrollView(.horizontal, showsIndicators: false) { slackApproval(thread, compact: true) }
+                    slackApproval(thread, post: post, compact: false)
+                    ScrollView(.horizontal, showsIndicators: false) { slackApproval(thread, post: post, compact: true) }
                 }
             }
         }.threadControls().padding(.leading, ChatMetrics.avatar + 9).padding(.top, 2)
@@ -2877,13 +2883,15 @@ extension ChatView {
             }.threadControls().padding(.top, 4).padding(.leading, ChatMetrics.avatar + 9)
         }
     }
-    private func slackApproval(_ thread: SlackThread, compact: Bool) -> some View {
+    /// `post` is set when a reply carries several items: these are that post's own buttons and a click names it.
+    private func slackApproval(_ thread: SlackThread, post: ChatMessage?, compact: Bool) -> some View {
         // Every request shows the same four words (owner decision 2026-10-31); what each sends stays as before for its kind.
         let approve = "승인", deny = "거절", revise = "의견"
-        let labels = SlackNotice.replyLabels(thread)
-        let request = SlackNotice.pendingApproval(thread)
+        let labels = post?.hermesButtons ?? SlackNotice.replyLabels(thread)
+        let request = post ?? SlackNotice.pendingApproval(thread)
+        let scope = post.map { thread.id + ":" + $0.id } ?? thread.id
         let pressable = request.map { ReplyButtonPolicy.pressable(labels, message: $0) } ?? false
-        let checklist = SlackNotice.checklistLabels(thread)
+        let checklist = post == nil ? SlackNotice.checklistLabels(thread) : []
         return HStack(spacing: 8) {
             if !checklist.isEmpty {
                 HermesReplyChecklist(labels: checklist, initialSelection: Set(SlackNotice.pendingApproval(thread)?.hermesChecklistSelected ?? []),
@@ -2895,14 +2903,14 @@ extension ChatView {
                     HStack(spacing: 8) {
                         ForEach(Array(labels.enumerated()), id: \.offset) { index, label in
                             let word = ReplyButtonPolicy.word(label)
-                            Button { slack.pickByButton(thread); slack.answerHermes(thread, label: label) } label: {
+                            Button { slack.pickByButton(thread); slack.answerHermes(thread, label: label, post: post) } label: {
                                 ReplyActionLabel(word: word, symbol: ReplyButtonPolicy.symbol(label))
                             }
                                 .disabled(!pressable)
                                 .help(pressable ? word : "정해진 버튼이 아니라 누를 수 없어요. 이 스레드에 글로 답해 주세요.")
-                                .accessibilityIdentifier("hermes-reply-" + thread.id + "-" + String(index))
+                                .accessibilityIdentifier("hermes-reply-" + scope + "-" + String(index))
                                 .accessibilityLabel(word)
-                                .chatMeasure("hermes-reply-" + thread.id + "-" + String(index), model: model)
+                                .chatMeasure("hermes-reply-" + scope + "-" + String(index), model: model)
                         }
                     }
                 }.frame(width: 320)

@@ -274,6 +274,16 @@ def _lead_file_policy(services) -> str:
 def _personal_direct_llm_request(services, request: dict[str, Any], **context: Any) -> dict[str, Any] | None:
     profile = (services.get_session_env("HERMES_SESSION_PROFILE", "") or os.environ.get("HERMES_PROFILE") or services._home_profile() or "").strip()
     platform = (services.get_session_env("HERMES_SESSION_PLATFORM", "") or "").strip().lower()
+    if (services.team.has_role(profile, 'doctor') or services.team.has_role(
+            str(getattr(services._PLUGIN_CONTEXT, 'profile_name', '') or ''), 'doctor')):
+        from . import paseo_authority
+        try:
+            paseo_authority.require(**context)
+        except Exception:
+            if 'tools' in request:
+                return {'request': {**request, 'tools': [tool for tool in request['tools']
+                    if services._tool_schema_name(tool) != 'paseo']}}
+        return None
     if services.team.has_role(profile, 'work', 'personal'):
         request = services.request_approvals.schemas(services._append_request_policy(request, services.request_approvals.NOTE) or request)
     if services.personal_roles.enabled(services.host) and services.team.has_role(profile, 'personal'):
@@ -722,14 +732,21 @@ def _artifact_generate(services, engine: str, args: dict[str, Any], **_: Any) ->
     configured = services._PLUGIN_CONTEXT.get_config("artifact_tools", {}) if services._PLUGIN_CONTEXT else {}
     return services.artifact_tools.generate(engine, args, configured if isinstance(configured, dict) else {})
 
-def _paseo(services, args: dict[str, Any], **_: Any) -> str:
+def _paseo(services, args: dict[str, Any], **context: Any) -> str:
     profile = (services.get_session_env("HERMES_SESSION_PROFILE", "") or os.environ.get("HERMES_PROFILE")
                or services._home_profile() or "").strip()
     unattended = bool(os.environ.get("HERMES_KANBAN_TASK")) or any(
         str(services.get_session_env(key, "")).strip().lower() in {"1", "true", "yes", "on"}
         for key in ("HERMES_CRON_SESSION", "HERMES_SINGLE_QUERY_SESSION")
     )
-    if not services.team.has_role(profile, 'personal') or unattended:
+    if (services.team.has_role(profile, 'doctor') or services.team.has_role(
+            str(getattr(services._PLUGIN_CONTEXT, 'profile_name', '') or ''), 'doctor')):
+        from . import paseo_authority
+        try:
+            paseo_authority.require(**context)
+        except Exception:
+            return services._error('Paseo requires the current authenticated owner request; background and read-only diagnosis without a direct request are refused.')
+    elif not services.team.has_role(profile, 'personal') or unattended:
         return services._error(f"Paseo is available only in a human chat with {services.team.first_with('personal')}")
     configured = services._PLUGIN_CONTEXT.get_config("paseo", {}) if services._PLUGIN_CONTEXT else {}
     return services.paseo_tools.call(args, configured if isinstance(configured, dict) else {})

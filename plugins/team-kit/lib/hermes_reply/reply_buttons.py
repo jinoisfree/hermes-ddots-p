@@ -346,6 +346,17 @@ def with_buttons(blocks: Optional[list], text: str, labels: List[str], *, checkl
     return place_controls(base, controls)
 
 
+def _pressed_text(message: dict) -> str:
+    """The pressed post's words: Slack's ``text`` (the whole body we posted), else its Block Kit sections."""
+    text = str(message.get("text") or "").strip()
+    if text:
+        return text
+    blocks = list(message.get("blocks") or []) + [
+        b for a in message.get("attachments") or [] for b in a.get("blocks") or []]
+    return "\n".join(str((b.get("text") or {}).get("text") or "") for b in blocks
+                     if b.get("type") == "section" and isinstance(b.get("text"), dict)).strip()
+
+
 def synthetic_event(body: dict, action: dict) -> Optional[dict]:
     """Message-shaped event for a click: the clicking user 'types' the label in the report thread."""
     user = (body.get("user") or {}).get("id")
@@ -370,11 +381,32 @@ def synthetic_event(body: dict, action: dict) -> Optional[dict]:
              "channel_type": "im" if channel.startswith("D") else "channel",
              "ts": str(action.get("action_ts") or body.get("action_ts") or f"button-{root}-{label}"),
              "thread_ts": root, "_hermes_force_process": True,
-             "_hermes_button": {"label": label, "message_ts": message.get("ts")}}
+             "_hermes_button": {"label": label, "message_ts": message.get("ts"),
+                                "message_text": _pressed_text(message)}}
     team = (body.get("team") or {}).get("id") or (body.get("user") or {}).get("team_id")
     if team:
         event["team"] = team
     return event
+
+
+_CLICKED_HEAD = 2500
+_CLICKED_TAIL = 1500
+
+
+def clicked_context(button) -> str:
+    """The turn's leading context for a click: which message the owner pressed, so the agent handles that
+    item only. Same ``[Thread context …]`` shape the gateway uses for thread history, so every reader of
+    a turn's first lines (mail legend, current-message split on ``[New message]``) treats it the same way.
+    A long post keeps its start and its end (the mail legend sits at the end)."""
+    text = str((button or {}).get("message_text") or "").strip()
+    ts = (button or {}).get("message_ts")
+    if not (text and ts):
+        return ""
+    if len(text) > _CLICKED_HEAD + _CLICKED_TAIL:
+        text = text[:_CLICKED_HEAD].rstrip() + "\n…(중략)…\n" + text[-_CLICKED_TAIL:].lstrip()
+    return ("[Thread context — the message the owner just pressed a button on (Slack ts " + str(ts) + "). "
+            "The click answers only this message's item; other messages in the thread are other items:]\n"
+            "[pressed message] " + text + "\n[End of thread context]\n\n")
 
 
 def _section(text: str) -> dict:
@@ -629,6 +661,76 @@ def note_typed_answer(adapter, *, channel_id: str, team_id: str, root_ts: str, u
         asyncio.get_running_loop().create_task(repaint())
     except RuntimeError:
         checked.pop(key, None)
+
+
+# ddots answers a button post by sending the owner's label with this block id (``hermes_click:<ts>`` of the
+# post it pressed); the block shows as the label and is invisible otherwise. A Slack click carries the
+# pressed message in its payload; this is the same click arriving as an ordinary message event.
+CLICK_BLOCK_PREFIX = "hermes_click:"
+
+
+def click_target(event: dict) -> Optional[str]:
+    for block in (event or {}).get("blocks") or []:
+        block_id = str(block.get("block_id") or "") if isinstance(block, dict) else ""
+        if block_id.startswith(CLICK_BLOCK_PREFIX) and block_id[len(CLICK_BLOCK_PREFIX):]:
+            return block_id[len(CLICK_BLOCK_PREFIX):]
+    return None
+
+
+def _buttons_of(message: dict) -> List[dict]:
+    blocks = list(message.get("blocks") or []) + [
+        b for a in message.get("attachments") or [] for b in a.get("blocks") or []]
+    return [e for b in blocks if b.get("block_id") == BLOCK_ID for e in b.get("elements") or []
+            if e.get("type") == "button" and ACTION_RE.fullmatch(e.get("action_id", ""))]
+
+
+def _sender_allowed(adapter, user: str, channel: str) -> bool:
+    """True only when the adapter's own authorization chain says yes (injected profile check, then the
+    runner's). No answer is not a yes: an unknown sender's message stays an ordinary message."""
+    chat_type = "dm" if channel.startswith("D") else "group"
+    decision = None
+    if getattr(adapter, "_authorization_check", None) is not None:
+        decision = adapter._is_sender_authorized(user, chat_type, channel)
+    auth_fn = adapter._runner_auth_fn()
+    if decision is None and callable(auth_fn):
+        source = adapter.build_source(chat_id=channel, chat_name="", chat_type=chat_type, user_id=user, user_name="")
+        decision = bool(auth_fn(source))
+    return decision is True
+
+
+async def adopt_click(adapter, event: dict) -> dict:
+    """An owner message that names a button post and says one of that post's labels is a click on it:
+    the event becomes the same synthetic click ``synthetic_event`` builds (label as text, pressed message
+    in ``_hermes_button``), and the pressed post turns yellow. Anything else (a stale click, a sender not
+    confirmed as allowed, an unknown bot id) comes back unchanged and is an ordinary message."""
+    ts = click_target(event)
+    user, channel, root = event.get("user"), event.get("channel"), event.get("thread_ts")
+    label = str(event.get("text") or "").strip()
+    if not (ts and user and channel and root and root != event.get("ts") and label):
+        return event
+    team = str(event.get("team") or event.get("team_id") or "")
+    try:
+        if not _sender_allowed(adapter, user, channel):
+            return event
+        bot = adapter._team_bot_user_ids.get(team, adapter._bot_user_id)
+        if not bot:
+            return event
+        client = adapter._get_client(channel, team_id=team)
+        data = await client.conversations_replies(channel=channel, ts=root, oldest=ts, inclusive=True, limit=2)
+        message = next((m for m in data.get("messages") or [] if m.get("ts") == ts), None)
+        pressed = next((e for e in _buttons_of(message or {}) if e.get("value") == label), None)
+        if not message or not pressed or message.get("user") != bot:
+            return event
+        await _update_status(adapter, client, channel, ts, answered_message(message, user, label, pressed["action_id"]))
+        remember_working(adapter, team, channel, root, ts)
+        logger.info("[Slack] question %s in %s answered from ddots; marked yellow", ts, channel)
+    except Exception as exc:
+        logger.warning("[Slack] ddots click not adopted (%s)", type(exc).__name__)
+        return event
+    clicked = {k: v for k, v in event.items() if k != "blocks"}
+    clicked.update(text=label, _hermes_force_process=True,
+                   _hermes_button={"label": label, "message_ts": ts, "message_text": _pressed_text(message)})
+    return clicked
 
 
 def register(adapter, app) -> None:

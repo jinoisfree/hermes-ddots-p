@@ -24,6 +24,8 @@ final class FakeSlack {
     var pageLog: [String] = []
     var answering: (() -> Void)?
     var posted: [[String: String]] = []
+    /// Slack refusing a message that carries blocks.
+    var refuseBlocks = false
     var log: [String] = []
     var replyLog: [String] = []
     var historyLog: [String] = []
@@ -125,6 +127,10 @@ final class FakeSlack {
                 self.posted.append(parameters)
                 var message: [String: Any] = ["ts": "900.000001", "user": "UME", "text": parameters["text"] ?? ""]
                 if let thread = parameters["thread_ts"] { message["thread_ts"] = thread }
+                if let blocks = parameters["blocks"] {
+                    if self.refuseBlocks { return .success((try? JSONSerialization.data(withJSONObject: ["ok": false, "error": "invalid_blocks"])) ?? Data()) }
+                    message["blocks"] = (try? JSONSerialization.jsonObject(with: Data(blocks.utf8))) ?? []
+                }
                 body["message"] = message
             default: body = ["ok": false, "error": "unknown_method"]
             }
@@ -947,6 +953,87 @@ final class FakeSlack {
         check(!fm.fileExists(atPath: fresh!.path), "this run's own folder goes when it is done with")
     }
 
+    /// A reply with several button posts: each draws its own buttons, and an answer names the post it presses (owner, 2026-11-06).
+    static func itemButtons() {
+        var store = SlackState(); store.me = "UME"
+        func buttons(_ labels: [String]) -> [String: Any] {
+            ["type": "actions", "block_id": "hermes_reply_buttons", "elements": labels.enumerated().map { index, label in
+                ["type": "button", "action_id": "hermes_reply_button_\(index)", "value": label, "text": ["type": "plain_text", "text": label]] as [String: Any] }]
+        }
+        func post(_ ts: String, _ text: String, labels: [String] = [], working: Bool = false) -> [String: Any] {
+            var blocks: [[String: Any]] = [["type": "section", "text": ["type": "mrkdwn", "text": text]]]
+            if !labels.isEmpty { blocks.append(buttons(labels)) }
+            if working { blocks.append(["type": "context", "block_id": "hermes_report_status", "elements": [["type": "mrkdwn", "text": "⏳ 답변 받음 · 처리 중"]]]) }
+            return ["ts": ts, "thread_ts": "100.0", "user": "UCOWBOT", "text": text, "blocks": blocks, "bot_profile": ["name": "SNS담당"]]
+        }
+        func owner(_ ts: String, _ text: String, clicked: String? = nil) -> [String: Any] {
+            var raw: [String: Any] = ["ts": ts, "thread_ts": "100.0", "user": "UME", "text": text]
+            if let clicked { raw["blocks"] = SlackNotice.clickBlocks(label: text, target: clicked) }
+            return raw
+        }
+        func thread(_ raws: [[String: Any]]) -> SlackThread {
+            let root = store.chat(SlackMessage(json: ["ts": "100.0", "user": "UME", "text": "남은 메일과 일정 확인해줘"])!, room: "CCOW", characters: [])
+            return SlackThread(id: root.id, room: "CCOW", ts: "100.0", root: root, replies: raws.map { store.chat(SlackMessage(json: $0)!, room: "CCOW", characters: []) },
+                               replyCount: raws.count, loaded: true, latest: 200, latestFromUser: false)
+        }
+        let summary = post("101.0", "남은 일 요약")
+        let mailA = post("102.0", "메일 A", labels: ["승인", "거절"]), eventB = post("103.0", "일정 B", labels: ["승인", "거절"])
+
+        // T-09 display: every unanswered button post draws its own buttons; an answered one does not.
+        let both = thread([summary, mailA, eventB])
+        let shown = SlackNotice.buttonPosts(both, pending: SlackNotice.pendingApproval(both))
+        check(shown.perPost && shown.ids == ["slack:CCOW:102.0", "slack:CCOW:103.0"], "each waiting button post draws its own buttons: \(shown)")
+        let aClicked = thread([summary, mailA, eventB, owner("110.0", "승인", clicked: "102.0")])
+        let remaining = SlackNotice.buttonPosts(aClicked, pending: SlackNotice.pendingApproval(aClicked))
+        check(remaining.ids == ["slack:CCOW:103.0"] && !remaining.perPost && SlackNotice.pendingApproval(aClicked)?.id == "slack:CCOW:103.0",
+              "a click answers only the post it names: \(remaining)")
+        let bClicked = thread([summary, mailA, eventB, owner("110.0", "승인", clicked: "103.0")])
+        check(SlackNotice.pendingApproval(bClicked)?.id == "slack:CCOW:102.0" && SlackNotice.buttonPosts(bClicked, pending: SlackNotice.pendingApproval(bClicked)).ids == ["slack:CCOW:102.0"],
+              "answering the last post leaves the earlier one waiting")
+        let typed = thread([summary, mailA, eventB, owner("110.0", "둘 다 내일로 미뤄줘")])
+        check(SlackNotice.pendingPosts(typed).isEmpty && SlackNotice.pendingApproval(typed) == nil, "a typed reply answers every post before it, as before")
+        let both2 = thread([mailA, eventB, owner("110.0", "승인", clicked: "102.0"), owner("111.0", "거절", clicked: "103.0")])
+        check(SlackNotice.pendingPosts(both2).isEmpty, "both posts answered by their own clicks")
+        let painted = thread([summary, post("102.0", "메일 A", working: true), eventB])
+        check(SlackNotice.pendingPosts(painted).map(\.id) == ["slack:CCOW:103.0"] && !SlackNotice.buttonPosts(painted, pending: SlackNotice.pendingApproval(painted)).perPost,
+              "a post Slack already shows as answered (no buttons, working) is not drawn with buttons")
+        check(SlackNotice.hermesAnswer(both, label: "승인") == "승인", "the thread's own labels still answer when no post is named")
+        let lone = thread([summary, mailA])
+        check(!SlackNotice.buttonPosts(lone, pending: SlackNotice.pendingApproval(lone)).perPost && SlackNotice.buttonPosts(lone, pending: SlackNotice.pendingApproval(lone)).ids == ["slack:CCOW:102.0"],
+              "a single button post is the thread's one request, drawn as before")
+
+        // T-10 sending: the answer is the bare label plus a block naming the pressed post.
+        let fake = FakeSlack(), bridge = SlackBridge(api: fake.api)
+        check(bridge.post(room: "CCOW", thread: "100.0", text: "승인", clickedPost: "103.0") == nil, "a named answer is posted")
+        let sent = fake.posted.last ?? [:]
+        let blocks = (try? JSONSerialization.jsonObject(with: Data((sent["blocks"] ?? "[]").utf8))) as? [[String: Any]] ?? []
+        check(sent["text"] == "승인" && sent["thread_ts"] == "100.0" && SlackNotice.clickTarget(in: blocks) == "103.0"
+              && (blocks.first?["text"] as? [String: Any])?["text"] as? String == "승인", "the named answer shows the label and carries the pressed post's ts: \(sent)")
+        let readBack = SlackMessage(json: ["ts": "900.1", "thread_ts": "100.0", "user": "UME", "text": "승인", "blocks": blocks])
+        check(readBack?.text == "승인" && readBack?.clickTarget == "103.0" && store.chat(readBack!, room: "CCOW", characters: []).slackClickTarget == "103.0",
+              "the answer read back from Slack still names its post and reads as the label")
+        check(bridge.post(room: "CCOW", thread: "100.0", text: "보류") == nil && fake.posted.last?["blocks"] == nil, "an unnamed answer carries no blocks")
+        fake.refuseBlocks = true
+        let before = fake.posted.count
+        check(bridge.post(room: "CCOW", thread: "100.0", text: "확인", clickedPost: "103.0") == nil && fake.posted.count == before + 2 && fake.posted[before]["blocks"] != nil && fake.posted.last?["blocks"] == nil && fake.posted.last?["text"] == "확인",
+              "if Slack refuses the blocks the bare word goes out as before")
+
+        // A folded thread keeps every post that waits for an answer in view, plus its newest reply.
+        let long = thread([summary, mailA, eventB, post("104.0", "메일 C", labels: ["승인", "거절"]), post("105.0", "맺음 글")])
+        let folded = SlackStack.visible(long, expanded: false, keeping: SlackNotice.waitingPostIDs(long))
+        check(folded.replies.map(\.id) == ["slack:CCOW:102.0", "slack:CCOW:103.0", "slack:CCOW:104.0", "slack:CCOW:105.0"] && folded.hidden == 1,
+              "the waiting button posts stay visible when the thread is folded: \(folded.replies.map(\.id))")
+        check(SlackStack.visible(long, expanded: false).replies.count == 1 && SlackStack.visible(long, expanded: false).hidden == 4, "a fold without waiting posts is as before")
+        let answeredA = thread([summary, mailA, eventB, owner("110.0", "승인", clicked: "102.0")])
+        check(SlackStack.visible(answeredA, expanded: false, keeping: SlackNotice.waitingPostIDs(answeredA)).replies.map(\.id) == ["slack:CCOW:103.0", "slack:CCOW:110.0"],
+              "the one post still waiting stays in view beside the newest reply")
+
+        // T-11 compatibility: a lone request, a checklist and an answer from an older ddots behave as they did.
+        let oldAnswer = thread([summary, mailA, owner("110.0", "승인")])
+        check(SlackNotice.pendingApproval(oldAnswer) == nil && SlackNotice.pendingPosts(oldAnswer).isEmpty, "a bare label from an older ddots answers the post before it")
+        print("PASS: item buttons per post, named answers, refused blocks and older answers")
+    }
+
     static func hermesReplies() {
         let file = URL(fileURLWithPath: #filePath).deletingLastPathComponent().appendingPathComponent("Fixtures/hermes-reply-states.json")
         let fixtures = try! JSONSerialization.jsonObject(with: Data(contentsOf: file)) as! [String: [String: Any]]
@@ -1143,6 +1230,7 @@ final class FakeSlack {
         let attachment = ChatMark(color: "#2EB67D", text: "실제 첨부 내용 · 답변 완료 후 보관")
         precondition(SlackNotice.visibleMarks([generatedStatusMark, attachment]) == [attachment], "Hide exact generated status labels while preserving attachment prose")
         hermesReplies()
+        itemButtons()
         if CommandLine.arguments.contains("--hermes-replies-only") { print("PASS: Hermes states, labels, pet, legacy and chat.update refresh"); return }
         var memo = SlackThinkingMemo()
         let original = memo.value(ts: "1", text: "생각 중")

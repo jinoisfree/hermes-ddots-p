@@ -90,6 +90,30 @@ extension AppDelegate {
             model.threads = fixtures; model.typing = [:]; model.hasOlder = false
             model.open = [active.id]; model.reply(active); model.draft = ""
             let view = ChatView(model: chat, slack: model, web: web)
+            // A reply with several items (owner, 2026-11-06): every unanswered button post carries its own buttons,
+            // and an answer that names one post closes only that post's buttons.
+            do {
+                func item(_ ts: String, _ text: String) -> ChatMessage {
+                    var post = ChatMessage(id: "slack:\(room):\(ts)", fromUser: false, speaker: "업무비서", body: text, date: date.addingTimeInterval(Double(ts) ?? 0), profile: "work-assistant")
+                    post.hermesReplyState = .asking; post.hermesButtons = ["승인", "거절"]
+                    return post
+                }
+                var made = 0
+                func buttonPosts(_ replies: [ChatMessage]) -> [String] {
+                    made += 1  // a new thread each time: the notice memo is keyed by thread
+                    let thread = SlackThread(id: "slack:\(room):items\(made)", room: room, ts: "items\(made)", root: message("slack:\(room):items\(made)", "남은 메일과 일정 확인해줘", "나", mine: true),
+                                             replies: replies, replyCount: replies.count, loaded: true, latest: 1, latestFromUser: false)
+                    let inputs = model.rowInputs(model.renderedThreads[0], chat: chat, dark: false, reduceMotion: true, target: false)
+                    let card = view.nativeThreadContent(thread, inputs: inputs, target: false)
+                    return (card.replies ?? []).compactMap { piece -> String? in
+                        if case .hosted(let id, _) = piece, id.hasPrefix("approval:") { return String(id.dropFirst("approval:".count)) }; return nil
+                    }
+                }
+                var answer = message("slack:\(room):90", "승인", "나", mine: true); answer.slackClickTarget = "10"
+                check(buttonPosts([item("10", "메일 A"), item("20", "일정 B")]) == ["slack:\(room):10", "slack:\(room):20"], "Each unanswered item post has its own buttons")
+                check(buttonPosts([item("10", "메일 A"), item("20", "일정 B"), answer]) == ["slack:\(room):20"], "An answer naming one post closes only that post's buttons")
+                check(buttonPosts([item("10", "메일 A")]) == ["slack:\(room):10"], "A lone request keeps its one set of buttons")
+            }
             for dark in [true, false] {
                 panel.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
                 for (i, item) in fixtures.enumerated() {

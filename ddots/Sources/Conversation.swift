@@ -112,6 +112,10 @@ struct ChatMessage: Identifiable, Equatable {
     var hermesChecklistCanSkip = false
     var slackUserID = ""
     var slackBroadcast = false
+    /// Set on an answer ddots sent for one button post: the ts of the post it pressed (the `hermes_click:` block id).
+    var slackClickTarget: String?
+    /// The Slack ts of a post read from Slack (`slack:<room>:<ts>`).
+    var slackTS: String? { id.hasPrefix("slack:") ? id.split(separator: ":").last.map(String.init) : nil }
     /// Colours of the bars beside the last stretches of first-level quoted lines, one per stretch in order;
     /// "" (or no entry) is the usual grey quote bar.
     var quoteColors: [String] = []

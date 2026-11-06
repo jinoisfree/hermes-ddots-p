@@ -32,6 +32,8 @@ struct SlackMessage: Equatable, Codable {
     var hermesChecklist: [String]?
     var hermesChecklistSelected: [String]?
     var hermesChecklistCanSkip: Bool?
+    /// The post this message answers when ddots sent it as a button click (block id `hermes_click:<ts>`).
+    var clickTarget: String?
     /// Colour of the bar beside each block attachment's quoted lines, in order, as Slack draws it; "" for grey.
     var quoteColors: [String]?
     var time: Double { Double(ts) ?? 0 }
@@ -62,6 +64,7 @@ struct SlackMessage: Equatable, Codable {
         let attachments = (json["attachments"] as? [[String: Any]] ?? []).filter { $0["blocks"] is [[String: Any]] }
         let allBlocks = (json["blocks"] as? [[String: Any]] ?? []) + attachments.flatMap { $0["blocks"] as? [[String: Any]] ?? [] }
         let statuses = allBlocks.filter { $0["block_id"] as? String == "hermes_report_status" }
+        clickTarget = SlackNotice.clickTarget(in: allBlocks)
         let statusText = statuses.flatMap { $0["elements"] as? [[String: Any]] ?? [] }.compactMap { $0["text"] as? String }.joined(separator: " ")
         let buttons = allBlocks.filter { $0["block_id"] as? String == "hermes_reply_buttons" }
         hermesButtons = buttons.flatMap { $0["elements"] as? [[String: Any]] ?? [] }.compactMap {
@@ -513,11 +516,59 @@ enum SlackNotice {
 
     static var approvedColor: String { rules.color("approvedColor") }
     private static var yes: Set<String> { Set(rules.list("yes").map { $0.lowercased() }) }
+    /// The post a ddots-sent button answer names, from its `hermes_click:<ts>` block (the block shows as the label).
+    static let clickBlockPrefix = "hermes_click:"
+    static func clickTarget(in blocks: [[String: Any]]) -> String? {
+        blocks.lazy.compactMap { ($0["block_id"] as? String).flatMap { $0.hasPrefix(clickBlockPrefix) ? String($0.dropFirst(clickBlockPrefix.count)) : nil } }
+            .first { !$0.isEmpty }
+    }
+    /// Blocks for an owner message that answers one button post: the label, tagged with the post it pressed.
+    static func clickBlocks(label: String, target: String) -> [[String: Any]] {
+        [["type": "section", "block_id": clickBlockPrefix + target, "text": ["type": "mrkdwn", "text": label]]]
+    }
+    /// Whether a message from the owner answers `post`: a typed reply does; a click names the one post it pressed.
+    private static func answers(_ message: ChatMessage, _ post: ChatMessage) -> Bool {
+        message.fromUser && (message.slackClickTarget == nil || message.slackClickTarget == post.slackTS)
+    }
+    /// Posts whose own buttons still wait for an answer, oldest first. A thread can hold several (one per item).
+    static func pendingPosts(_ thread: SlackThread) -> [ChatMessage] {
+        guard thread.loaded else { return [] }
+        let spoken = thread.messages.filter { $0.fromUser || !SlackText.isThinking($0.body) }
+        return spoken.indices.compactMap { index in
+            let post = spoken[index]
+            guard !post.fromUser, !post.hermesButtons.isEmpty,
+                  post.effectiveHermesReplyState != .working, post.effectiveHermesReplyState != .closed,
+                  !spoken[(index + 1)...].contains(where: { answers($0, post) }) else { return nil }
+            return post
+        }
+    }
+    /// The posts that draw buttons under themselves. With two or more waiting, each gets its own and a click
+    /// names it (`perPost`); otherwise it is the thread's one pending request, as it always was.
+    static func buttonPosts(_ thread: SlackThread, pending: ChatMessage?) -> (ids: Set<String>, perPost: Bool) {
+        let waiting = itemPostIDs(thread)
+        if !waiting.isEmpty { return (waiting, true) }
+        return (pending.map { [$0.id] } ?? [], false)
+    }
+    /// The ids of the button posts of a reply with several items; empty when fewer than two wait.
+    static func itemPostIDs(_ thread: SlackThread) -> Set<String> {
+        let waiting = pendingPosts(thread)
+        return waiting.count >= 2 ? Set(waiting.map(\.id)) : []
+    }
+    /// A folded thread still shows every post that waits for an answer, whatever its place among the replies.
+    static func waitingPostIDs(_ thread: SlackThread) -> Set<String> { Set(pendingPosts(thread).map(\.id)) }
     private static func approvalExchange(_ thread: SlackThread) -> (request: ChatMessage, answer: ChatMessage?, finished: Bool)? {
         guard thread.loaded else { return nil }
         let spoken = thread.messages.filter { $0.fromUser || !SlackText.isThinking($0.body) }
-        guard let asked = spoken.lastIndex(where: { !$0.fromUser && ($0.effectiveHermesReplyState != nil || $0.body.contains("[[버튼:") || isLearningReport($0.body) || requestsApproval($0.body) || isMailDraft($0.body)) }) else { return nil }
-        let answered = spoken[(asked + 1)...].firstIndex(where: \.fromUser)
+        let asks = spoken.indices.filter { index in
+            let post = spoken[index]
+            return !post.fromUser && (post.effectiveHermesReplyState != nil || post.body.contains("[[버튼:") || isLearningReport(post.body) || requestsApproval(post.body) || isMailDraft(post.body))
+        }
+        guard let last = asks.last else { return nil }
+        func firstAnswer(after index: Int) -> Int? { ((index + 1)..<spoken.count).first { answers(spoken[$0], spoken[index]) } }
+        // The newest request is the one asked of the owner, unless it was answered and an earlier button post still waits.
+        let asked = firstAnswer(after: last) == nil ? last
+            : asks.reversed().first { firstAnswer(after: $0) == nil && !spoken[$0].hermesButtons.isEmpty } ?? last
+        let answered = firstAnswer(after: asked)
         let answer = answered.map { spoken[$0] }
         let said = answer?.body.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines.union(.punctuationCharacters)).lowercased() ?? ""
         let finished = yes.contains(said) && answered.map { index in
@@ -556,8 +607,8 @@ enum SlackNotice {
         guard !labels.isEmpty else { return nil }
         return rules.text("checklistPrefix") + (labels.contains(rules.text("checklistAll")) ? rules.text("checklistAll") : labels.joined(separator: ", "))
     }
-    static func hermesAnswer(_ thread: SlackThread, label: String) -> String? {
-        replyLabels(thread).contains(label) ? label : nil
+    static func hermesAnswer(_ thread: SlackThread, label: String, post: ChatMessage? = nil) -> String? {
+        (post?.hermesButtons ?? replyLabels(thread)).contains(label) ? label : nil
     }
     /// Both decorations share the same approval request and answer lookup.
     /// A request the user marked as seen waits on nothing more, though no answer was written.
@@ -931,10 +982,13 @@ enum SlackCopy {
 enum SlackStack {
     static let inlineLimit = 2
     /// A short thread is shown whole; a long one keeps its newest reply and stacks the rest until opened.
-    static func visible(_ thread: SlackThread, expanded: Bool) -> (hidden: Int, replies: [ChatMessage]) {
+    /// `keeping` are posts that must stay in view when it is folded: the button posts of a reply with several items.
+    static func visible(_ thread: SlackThread, expanded: Bool, keeping: Set<String> = []) -> (hidden: Int, replies: [ChatMessage]) {
         guard thread.loaded else { return (thread.replyCount, []) }
         if expanded || thread.replies.count <= inlineLimit { return (0, thread.replies) }
-        return (thread.replies.count - 1, Array(thread.replies.suffix(1)))
+        let last = thread.replies.last?.id
+        let shown = thread.replies.filter { $0.id == last || keeping.contains($0.id) }
+        return (thread.replies.count - shown.count, shown)
     }
 }
 
@@ -1089,6 +1143,7 @@ struct SlackState: Codable {
         result.hermesChecklist = message.hermesChecklist ?? []
         result.hermesChecklistSelected = message.hermesChecklistSelected ?? []
         result.hermesChecklistCanSkip = message.hermesChecklistCanSkip ?? false
+        result.slackClickTarget = message.clickTarget
         result.quoteColors = message.quoteColors ?? []
         return result
     }

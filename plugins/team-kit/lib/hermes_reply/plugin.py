@@ -5,10 +5,28 @@ from contextvars import ContextVar
 from functools import wraps
 import inspect
 import logging
+import re
+import sys
 
 from . import reply_buttons as rb
 
 logger = logging.getLogger(__name__)
+
+# A reply that is several independent items (one owner-facing post per mail or event; scheduled reports
+# 2026-11-05, conversation replies 2026-11-06) puts this line between them. A send splits on it, at the
+# top level or in a thread: every piece then goes through the normal marker, policy and colour path as a
+# post of its own, so its buttons belong to that piece alone. Sends that cannot be several messages keep
+# one post and only lose the line (see ``splittable``).
+SPLIT_MARKER = '[[글 나누기]]'
+_SPLIT_LINE = re.compile(r'^[ \t]*' + re.escape(SPLIT_MARKER) + r'[ \t]*$\n?', re.M)
+
+
+def _without_split_lines(content):
+    return _SPLIT_LINE.sub('', content) if isinstance(content, str) and SPLIT_MARKER in content else content
+
+
+def _pieces(content):
+    return [piece.strip() for piece in _SPLIT_LINE.split(content) if piece.strip()]
 
 
 def register(ctx):
@@ -24,6 +42,7 @@ def register(ctx):
 
 
 def _plain(content):
+    content = _without_split_lines(content)
     text, checks = rb.extract_checklist(content)
     text, labels = rb.extract(text)
     return rb._refused(text, checks or labels) if checks or labels else text
@@ -96,6 +115,7 @@ def install(adapter, native=None):
         '_commit_stream', '_maybe_blocks', '_peer_bot_drop')}
 
     def controls(content):
+        content = _without_split_lines(content)
         text, checks = rb.extract_checklist(content)
         text, buttons = rb.extract(text)
         return text, checks or buttons, bool(checks)
@@ -109,13 +129,63 @@ def install(adapter, native=None):
             rb.close_working(adapter, channel_id=frame['chat'], team_id=frame['team'],
                              thread_ts=frame['thread'])
 
-    @wraps(original['send'])
-    async def send(chat_id, content, reply_to=None, metadata=None):
+    async def post(chat_id, content, reply_to, metadata):
         token = send_meta.set(metadata or {})
         try:
             return await original['send'](chat_id, content, reply_to, metadata)
         finally:
             send_meta.reset(token)
+
+    async def post_pieces(chat_id, pieces, reply_to, metadata):
+        """One post per piece (top level or in the thread), in order. A piece that fails does not stop the others (each is its
+        own item); a failure after something was posted is reported as a partial delivery so the caller
+        never re-sends the whole text."""
+        results = []
+        for piece in pieces:
+            try:
+                results.append(await post(chat_id, piece, reply_to, metadata))
+            except Exception as exc:
+                logger.error('reply split: piece %d of %d failed: %s', len(results) + 1, len(pieces), exc)
+                results.append(SendResult(success=False, error=str(exc)))
+        done = [r for r in results if r.success]
+        failed = [r for r in results if not r.success]
+        ids = tuple(r.message_id for r in done if r.message_id)
+        if not failed:
+            return SendResult(success=True, message_id=ids[-1] if ids else None, raw_response=done[-1].raw_response,
+                              continuation_message_ids=ids[:-1])
+        if not done:
+            return failed[0]
+        logger.error('reply split: %d of %d posts delivered, then failed: %s', len(done), len(pieces), failed[0].error)
+        return SendResult(success=False, message_id=ids[-1] if ids else None,
+                          error=f'{len(done)}/{len(pieces)} posts delivered: {failed[0].error}',
+                          raw_response={'partial_overflow': True, 'delivered_chunks': len(done),
+                                        'total_chunks': len(pieces)},
+                          continuation_message_ids=ids[:-1])
+
+    def splittable(chat_id, metadata):
+        """Split a reply into posts only where each piece can be its own message: not an interim or
+        editable send, not while a native stream is open (its text is edited in place), and never for a
+        slash reply (the first piece is private; the rest would be public)."""
+        md = metadata or {}
+        if md.get('_interim_send') or md.get('expect_edits'):
+            return False
+        slash = getattr(sys.modules.get(type(adapter).__module__), '_slash_user_id', None)
+        if slash is not None and slash.get():
+            return False
+        streams = getattr(adapter, '_active_streams', None)
+        key = adapter._stream_key(chat_id, md) if streams and callable(getattr(adapter, '_stream_key', None)) else None
+        stream = streams.get(key) if key else None
+        # The waiting placeholder is the first piece's message; a real native stream is not.
+        return not (stream and not stream.get('eager_response_animation'))
+
+    @wraps(original['send'])
+    async def send(chat_id, content, reply_to=None, metadata=None):
+        if isinstance(content, str) and SPLIT_MARKER in content:
+            pieces = _pieces(content)
+            if len(pieces) > 1 and splittable(chat_id, metadata):
+                return await post_pieces(chat_id, pieces, reply_to, metadata)
+            content = _without_split_lines(content)
+        return await post(chat_id, content, reply_to, metadata)
 
     @wraps(original['_post_chunks'])
     async def post_chunks(chat_id, team_id, content, formatted, thread_ts):
@@ -207,6 +277,31 @@ def install(adapter, native=None):
             rb.note_typed_answer(adapter, channel_id=channel_id, team_id=team_id,
                                  root_ts=str(root), user_id=user_id, bot_uid=bot_uid)
         return dropped
+
+    build_original = getattr(adapter, '_build_message_event', None)
+    if callable(build_original) and {'event', 'channel_context'}.issubset(inspect.signature(build_original).parameters):
+        @wraps(build_original)
+        async def build_message_event(event, **kwargs):
+            """A button click says which message it pressed: lead the turn with that message so the agent
+            handles that item only. The click text stays the bare label (script handlers read it)."""
+            message = await build_original(event, **kwargs)
+            pressed = rb.clicked_context(event.get('_hermes_button')) if isinstance(event, dict) else ''
+            if pressed:
+                message.channel_context = pressed + (message.channel_context or '')
+            return message
+        adapter._build_message_event = build_message_event
+    else:
+        logger.warning('reply buttons: adapter has no usable _build_message_event; clicks will not name their message')
+
+    prefilter_original = getattr(adapter, '_prefilter_inbound', None)
+    if callable(prefilter_original) and {'event', 'payload'}.issubset(inspect.signature(prefilter_original).parameters):
+        @wraps(prefilter_original)
+        async def prefilter_inbound(event, payload):
+            """A button answered from ddots arrives as an owner message naming the post it pressed."""
+            return await prefilter_original(await rb.adopt_click(adapter, event) if isinstance(event, dict) else event, payload)
+        adapter._prefilter_inbound = prefilter_inbound
+    else:
+        logger.warning('reply buttons: adapter has no usable _prefilter_inbound; ddots clicks stay ordinary messages')
 
     for name, wrapper in (('send', send), ('edit_message', edit), ('_post_chunks', post_chunks),
                           ('_call_with_block_fallback', call), ('_maybe_blocks', maybe_blocks),

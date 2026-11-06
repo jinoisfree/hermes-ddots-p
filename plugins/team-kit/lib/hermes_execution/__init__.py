@@ -2700,11 +2700,6 @@ def register(ctx) -> None:
             handler=_limit_report, description=_owner_text("<<doctor_name>> 새벽 처리 대기열에 못한 일 다섯 항목을 한 번 기록한다. Slack 보고는 보내지 않는다."),
             emoji="📩",
         )
-        register_tool(
-            name="paseo", toolset="team-delegation", schema=paseo_tools.SCHEMA,
-            handler=_paseo, description="Operate local Paseo conversations as instructed by the user.",
-            emoji="🛠️",
-        )
         for name, engine in (("claude_code_artifact", "claude"),):
             register_tool(
                 name=name, toolset="team-delegation", schema=artifact_tools.schema(name),
@@ -2712,6 +2707,12 @@ def register(ctx) -> None:
                 description="Generate one small standalone artifact; real development belongs in Paseo.",
                 emoji="🧩",
             )
+    if team.has_role(str(getattr(ctx, "profile_name", "") or "").strip(), 'personal', 'doctor'):
+        register_tool(
+            name="paseo", toolset="team-delegation", schema=paseo_tools.SCHEMA,
+            handler=_paseo, description="Operate local Paseo conversations as instructed by the user.",
+            emoji="🛠️",
+        )
     # Only the lead profile works with files in its readable folders.
     if team.has_role(str(getattr(ctx, "profile_name", "") or "").strip(), 'personal'):
         register_tool(

@@ -18,7 +18,7 @@ extension ChatView {
         let thread = slack.vault.hidingPageCommands(original)
         let displayed = SlackNotice.displayed(thread, confirmed: slack.confirmed)
         let expanded = slack.open.contains(thread.id)
-        let shown = SlackStack.visible(displayed, expanded: expanded)
+        let shown = SlackStack.visible(displayed, expanded: expanded, keeping: SlackNotice.waitingPostIDs(thread))
         // A character whose "생각 중" line is already in the thread is not shown writing twice.
         let thinkers = Set(thread.messages.filter { !$0.fromUser && (SlackText.isThinking($0.body) || $0.streaming) }.map(\.profile))
         let writing = (slack.typing[thread.id] ?? []).filter { !thinkers.contains($0.profile) }
@@ -31,6 +31,7 @@ extension ChatView {
         let edge = SlackOwner.color(SlackOwner.profile(thread, members: slack.ddotsMembers)).map(NSColor.init)
         let foldable = thread.replyCount > SlackStack.inlineLimit || !thread.loaded
         let pending = notice.pending?.id
+        let buttons = SlackNotice.buttonPosts(thread, pending: notice.pending)
         let vaultLayout = slack.vault.presentation(thread, active: slack.vaultSelections(thread), visible: Set([displayed.root.id] + shown.replies.map(\.id)), pending: pending)
         let mine = thread.root.fromUser
         let flash = slack.flash == thread.id
@@ -50,14 +51,14 @@ extension ChatView {
         func pieces(for message: ChatMessage) -> [NativeThreadCard.Piece] {
             var result: [NativeThreadCard.Piece] = []
             // A report asking for an answer: what to do, its buttons, then the details (owner, 2026-10-31).
-            if pending == message.id, !vaultLayout.hidden.contains(message.id), !message.fromUser,
+            if buttons.ids.contains(message.id), !vaultLayout.hidden.contains(message.id), !message.fromUser,
                let parts = ReplyButtonPolicy.split(message.body) {
                 var head = message; head.body = parts.head
                 var detail = message; detail.id = message.id + ":detail"; detail.body = parts.detail; detail.marks = []
                 if var first = nativePost(head, inputs: inputs, edge: edge), var rest = nativePost(detail, inputs: inputs, edge: edge) {
                     first.conversational = false; rest.conversational = false; rest.continuation = true
                     result.append(.post(first))
-                    result.append(host("approval:" + message.id) { slackApproval(thread) })
+                    result.append(host("approval:" + message.id) { slackApproval(thread, post: buttons.perPost ? message : nil) })
                     result.append(.post(rest))
                     nativeShown.insert(message.id); splitShown.insert(message.id)
                     return result
@@ -74,7 +75,7 @@ extension ChatView {
         }
         func extras(for message: ChatMessage) -> [NativeThreadCard.Piece] {
             var result: [NativeThreadCard.Piece] = []
-            if pending == message.id && !splitShown.contains(message.id) { result.append(host("approval:" + message.id) { slackApproval(thread) }) }
+            if buttons.ids.contains(message.id) && !splitShown.contains(message.id) { result.append(host("approval:" + message.id) { slackApproval(thread, post: buttons.perPost ? message : nil) }) }
             if let selection = vaultLayout.anchors[message.id] { result.append(host("vault:" + message.id) { vaultButtons(thread, selection: selection) }) }
             if !slack.driveItems(message).isEmpty { result.append(host("drive:" + message.id) { driveButtons(thread, message: message) }) }
             // A post drawn natively keeps its calendar buttons underneath, as the SwiftUI line has them.

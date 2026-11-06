@@ -14,19 +14,19 @@ import logging
 import os
 from pathlib import Path
 import re
-import threading
 import time
 import importlib.util as _ilu, pathlib as _pl, sys as _sys
 from hermes_facility import team_registry as team
+from hermes_governance import paseo_authority
 
 LOG = logging.getLogger('team_kit.diagnosis')
-_TURNS = OrderedDict()
+_TURNS = paseo_authority.DIAGNOSIS_TURNS
 _FOLLOWUPS = OrderedDict()
 FOLLOWUP_SECONDS = 30 * 60
 FOLLOWUP_LIMIT = 256
 EXIT_PATTERNS = (r'기억해', r'저장해', r'학습', r'배워', r'승인', r'고쳐', r'수정해', r'적용해', r'진행해')
 EFFICIENCY_PATTERN = r'토큰|비용|소요\s*시간|호출\s*수'
-_LOCK = threading.RLock()
+_LOCK = paseo_authority.DIAGNOSIS_LOCK
 READS = {'diagnosis_health_read', 'diagnosis_records_read', 'diagnosis_case_read', 'diagnosis_history_read', 'diagnosis_slack_read', 'diagnosis_logs_read', 'diagnosis_state_read', 'diagnosis_runs_read', 'diagnosis_code_read', 'session_search', 'skill_view', 'skills_list', 'request_usage_lookup', 'gateway_runtime_snapshot'}
 
 READS.add('diagnosis_shell_read')
@@ -93,8 +93,10 @@ def context(home, learning, *, session_id, turn_id='', sender_id='', user_messag
             _FOLLOWUPS.move_to_end(session_key)
             while len(_FOLLOWUPS) > FOLLOWUP_LIMIT:
                 _FOLLOWUPS.popitem(last=False)
+    from gateway.session_context import get_session_env
     with _LOCK:
-        _TURNS[key(home, turn_id)] = {'logged': False, 'recorded': False, 'read_called': False, 'followup': followup, 'requested': bool(os.environ.get('HERMES_DIAGNOSIS_REQUEST')), 'user_message': learning.extension('work_runtime').clean_request(user_message)}
+        _TURNS[key(home, turn_id)] = {'logged': False, 'recorded': False, 'read_called': False, 'followup': followup, 'requested': bool(os.environ.get('HERMES_DIAGNOSIS_REQUEST')), 'user_message': learning.extension('work_runtime').clean_request(user_message),
+                                   'paseo_event': tuple(get_session_env('HERMES_SESSION_'+name, '') for name in ('CHAT_ID','THREAD_ID','MESSAGE_ID'))}
         while len(_TURNS) > 256:
             _TURNS.popitem(last=False)
     LOG.info('diagnosis route model=claude-opus-5-5 effort=%s turn=%s followup=%s',
@@ -125,6 +127,8 @@ def request(home, learning, payload, *, turn_id='', **context):
     reads = READS - (learning.extension('org_review_authority').PRIVATE_READS if review else set())
     if os.environ.get('HERMES_DIAGNOSIS_REQUEST'):
         reads = reads - {'diagnosis_shell_read'}
+    if not review and paseo_authority.permitted(home, turn_id=turn_id, **context):
+        reads = reads | {'paseo'}
     if 'tools' in result:
         result['tools'] = [t for t in result['tools'] if t.get('function', {}).get('name', t.get('name')) in reads | (set() if review else BRIDGES)]
     with _LOCK:
@@ -136,7 +140,7 @@ def request(home, learning, payload, *, turn_id='', **context):
     return {'request': result}
 
 
-def guard(home, learning, *, tool_name, args=None, turn_id='', **_):
+def guard(home, learning, *, tool_name, args=None, turn_id='', **context):
     requested = bool(os.environ.get('HERMES_DIAGNOSIS_REQUEST'))
     review = bool(os.environ.get('HERMES_ORG_REVIEW_RUN'))
     if review:
@@ -158,6 +162,8 @@ def guard(home, learning, *, tool_name, args=None, turn_id='', **_):
     reads = READS - (learning.extension('org_review_authority').PRIVATE_READS if review else set())
     if requested:
         reads = reads - {'diagnosis_shell_read'}
+    if not review and paseo_authority.permitted(home, turn_id=turn_id, **context):
+        reads = reads | {'paseo'}
     if review and tool_name in BRIDGES:
         return {'action': 'block', 'message': '조직개편안은 노출된 읽기 도구만 직접 호출한다.'}
     allowed = tool_name in reads or tool_name in {'tool_search', 'tool_describe'}

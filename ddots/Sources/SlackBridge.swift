@@ -1546,11 +1546,21 @@ final class SlackBridge {
     private(set) var postedRootTS: String?
     private(set) var uploadedFileIDs = Set<String>()
     /// Returns a message for the user when the post failed.
-    func post(room: String, thread: String?, text: String) -> String? {
+    /// `clickedPost` is the ts of the button post this answers: the message then carries a block that names it, so Hermes
+    /// reads it as that post's click. If Slack refuses the blocks, the bare word goes out as before.
+    func post(room: String, thread: String?, text: String, clickedPost: String? = nil) -> String? {
         postedRootTS = nil
         var parameters = ["channel": room, "text": text]
         if let thread { parameters["thread_ts"] = thread }
-        switch api.call("chat.postMessage", parameters) {
+        var sent: Result<[String: Any], SlackAPI.Failure>
+        if let clickedPost, thread != nil,
+           let data = try? JSONSerialization.data(withJSONObject: SlackNotice.clickBlocks(label: text, target: clickedPost)),
+           let blocks = String(data: data, encoding: .utf8) {
+            var named = parameters; named["blocks"] = blocks
+            sent = api.call("chat.postMessage", named)
+            if case .failure(.api(let code)) = sent, code.hasPrefix("invalid_blocks") { sent = api.call("chat.postMessage", parameters) }
+        } else { sent = api.call("chat.postMessage", parameters) }
+        switch sent {
         case .failure(let failure):
             if case .rateLimited(let seconds) = failure { pausedUntil = clock.addingTimeInterval(max(1, seconds)); refused("chat.postMessage", wait: seconds) }
             return SlackAPI.message(failure)

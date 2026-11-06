@@ -277,6 +277,7 @@ final class SlackController {
         model.onSend = { [weak self] text, room, thread, files in
             if files.isEmpty { self?.send(text, room: room, thread: thread) } else { self?.sendFiles(text, room: room, thread: thread, files: files) }
         }
+        model.onClickSend = { [weak self] text, room, thread, post in self?.send(text, room: room, thread: thread, clickedPost: post) }
         model.onPageSend = { [weak self] command, thread, completion in
             guard let self else { completion(); return }
             self.sendPage(command, thread: thread, completion: completion)
@@ -745,7 +746,7 @@ final class SlackController {
     }
     /// True while sends go out in a UI check, through a made-up workspace; nothing reaches Slack.
     var smokeSends = false
-    private func send(_ text: String, room: String, thread: SlackThread?) {
+    private func send(_ text: String, room: String, thread: SlackThread?, clickedPost: String? = nil) {
         guard !closing, let bridge, persists || smokeSends else { return }
         model.pageHold = nil
         // Work out optional channel mentions while the draft and pressed face still stand.
@@ -753,14 +754,16 @@ final class SlackController {
         let pick = thread == nil && model.ddotsPicked ? model.ddotsTarget : nil
         let revision = thread == nil ? model.beginPost() : model.composeRevision
         let attempt = sending(text, room: room, thread: thread, files: [], pick: pick)
-        let echo = Echo(room: room, thread: thread?.ts, message: ChatMessage(id: "slack-pending:\(UUID().uuidString)", fromUser: true, speaker: "", body: post?.shown ?? text, date: Date(), pending: true, profile: ""))
+        var echoed = ChatMessage(id: "slack-pending:\(UUID().uuidString)", fromUser: true, speaker: "", body: post?.shown ?? text, date: Date(), pending: true, profile: "")
+        echoed.slackClickTarget = clickedPost
+        let echo = Echo(room: room, thread: thread?.ts, message: echoed)
         echoes.append(echo); sendNotice = nil; model.replyTo = nil
         if model.isDdots { model.petWave += 1 }
         publish(); model.requestScroll(thread == nil || model.isDdots ? "slack-bottom" : echo.message.id)
         model.didPublishEcho()
         let outgoing = post?.sent ?? SlackMention.outgoing(text, members: model.members[room] ?? [])
         queue.async { [weak self] in
-            let failure = bridge.post(room: room, thread: thread?.ts, text: outgoing)
+            let failure = bridge.post(room: room, thread: thread?.ts, text: outgoing, clickedPost: clickedPost)
             let result = bridge.current
             let postedTS = bridge.postedRootTS
             DispatchQueue.main.async {
