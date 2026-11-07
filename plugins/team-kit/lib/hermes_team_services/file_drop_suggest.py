@@ -77,19 +77,28 @@ def module(name, path):
     return result
 
 
-def read_document(path):
+READER_SECONDS = 3  # one reader call
+CONTENT_LIMIT = 30_000  # characters of file text the engine receives
+XLSX_SHEETS = 10  # sheets read per workbook, one reader call each
+HANGUL_PAGES = 10  # reader calls per hwp/hwpx, 200 paragraphs each
+
+
+def read_document(path, end=None):
     """Reuse existing readers; retain coverage flags rather than treating a preview as complete."""
     def read(job):
+        remaining = READER_SECONDS if end is None else min(READER_SECONDS, end - time.time())
+        if remaining <= 0:
+            raise TimeoutError("drop_deadline")
         executable = Path.home() / ".local/share/hermes-docs/bin/python"
         completed = subprocess.run([str(executable), str(LIBRARY / "hermes_packs/files_docs/doc_worker.py")],
                                    input=json.dumps(job), text=True, stdout=subprocess.PIPE,
-                                   stderr=subprocess.DEVNULL, timeout=3, check=True)
+                                   stderr=subprocess.DEVNULL, timeout=remaining, check=True)
         value = json.loads(completed.stdout)
         if value.get("ok") is not True:
             raise ValueError("reader_failed")
         return value
     kind = path.suffix.lower().lstrip(".")
-    if kind not in {"pdf", "xlsx", "docx", "hwp", "hwpx"}:
+    if kind not in {"pdf", "xlsx", "docx", "hwp", "hwpx", "eml"}:
         return "", False
     if kind == "pdf":
         first = read({"kind": "read_pdf", "source": str(path)})
@@ -100,10 +109,35 @@ def read_document(path):
         text = "\n".join(page["text"] for page in pages)
         complete = not any(result["textless_pages"] for result in results) and not any(page["truncated"] for page in pages)
         return text, complete
-    result = read({"kind": "read_" + kind, "source": str(path)})
-    # All returned cells/sections are data, never tool instructions. The existing reader's
-    # bounded output is explicitly a preview for formats without full coverage metadata.
-    return json.dumps(result, ensure_ascii=False), False
+    # All returned cells/sections are data, never tool instructions. `complete` is true only when
+    # the reader's own coverage numbers show nothing was left out or clipped.
+    if kind == "eml":
+        result = read({"kind": "read_eml", "source": str(path)})
+        return result["text"], bool(result["complete"])
+    if kind == "xlsx":
+        first = read({"kind": "read_xlsx", "source": str(path)})
+        others = [read({"kind": "read_xlsx", "source": str(path), "sheet": sheet["name"]})
+                  for sheet in first["sheets"][:XLSX_SHEETS] if sheet["name"] != first["sheet"]]
+        lines = []
+        for result in [first] + others:
+            lines.append("시트: " + result["sheet"])
+            lines.extend(" | ".join(f"{cell}={value}" for cell, value in row.items()) for row in result["cells"])
+        return "\n".join(lines), len(first["sheets"]) <= XLSX_SHEETS and all(result["complete"] for result in [first] + others)
+    if kind == "docx":
+        result = read({"kind": "read_docx", "source": str(path)})
+        lines = [row["text"] for row in result["paragraphs"]]
+        for table in result["tables"]:
+            lines.extend(" | ".join(row) for row in table["rows"])
+        return "\n".join(lines), result["complete"]
+    # hwp / hwpx: the reader pages 200 paragraphs at a time.
+    lines, offset = [], 0
+    for _ in range(HANGUL_PAGES):
+        result = read({"kind": "read_" + kind, "source": str(path), "offset": offset})
+        lines.extend(row["text"] for row in result["paragraphs"])
+        offset = result["next_offset"]
+        if offset is None:
+            return "\n".join(lines), True
+    return "\n".join(lines), False
 
 
 def read_memories(home, profiles):
@@ -228,7 +262,10 @@ def suggest(home, request, *, run=cli_answer):
         context_data["works"] = linked_works(home, signals, profiles)
         return context_data
     blocks, extracted = [], []
-    partial = bool(signals.get("partial"))
+    # `unread` lists the files the app could not read completely; apps that predate it only send `partial`.
+    unread = signals.get("unread")
+    partial = bool(signals.get("truncated")) if unread is not None else bool(signals.get("partial"))
+    covered = set()
     files = request.get("files", [])
     if not isinstance(files, list) or len(files) > 10:
         raise ValueError("invalid_files")
@@ -240,18 +277,20 @@ def suggest(home, request, *, run=cli_answer):
         if not path.is_file() or path.stat().st_size > 200 * 1024 * 1024:
             raise ValueError("invalid_file")
         try:
-            text, complete = read_document(path)
+            text, complete = read_document(path, end)
         except (OSError, ValueError, ImportError, subprocess.SubprocessError):
             text, complete = "", False
         if secret(path.name) or secret(text):
             raise ValueError("sensitive_input")
         if text:
             extracted.append(text)
+        if complete:
+            covered.add(path.name)
         suffix = path.suffix.lower()
         image = suffix in {".png", ".jpg", ".jpeg"}
         # AppKit/Vision attests full local coverage for images; PDF text coverage
         # can also be independently confirmed by the existing document reader.
-        safe_original = complete or not signals.get("partial", True)
+        safe_original = complete or (path.name not in unread if unread is not None else not signals.get("partial", True))
         if suffix == ".pdf" or image:
             if not safe_original or path.stat().st_size > 20 * 1024 * 1024 or originals >= 5:
                 partial = True
@@ -260,7 +299,11 @@ def suggest(home, request, *, run=cli_answer):
             blocks.append({"type": "document" if suffix == ".pdf" else "image",
                            "source": {"type": "base64", "media_type": mime, "data": base64.b64encode(path.read_bytes()).decode()}})
             originals += 1
-    signals["content"] = (signals.get("content", "") + "\n" + "\n".join(extracted))[:30_000]
+    content = "\n".join(part for part in [signals.get("content", ""), *extracted] if part)
+    # The card shows "didn't read it all" only when something is really left out: a file nobody
+    # read completely, a reader that failed or ran out of time, or text cut at the limit.
+    partial = partial or len(content) > CONTENT_LIMIT or any(name not in covered for name in unread or ())
+    signals["content"] = content[:CONTENT_LIMIT]
     signals["partial"] = partial
     signals["works"] = linked_works(home, signals, profiles)
     # Learning rules are read without taking a writer lock or creating a session.
@@ -293,6 +336,7 @@ def suggest(home, request, *, run=cli_answer):
     value = run(blocks, timeout=remaining) if run is cli_answer else run(blocks)
     answer = validate_answer(value, signals.get("custom", []), profiles, signals.get("works", []))
     answer["works"] = signals.get("works", [])
+    answer["partial"] = partial
     answer["outcomes"] = context_data["outcomes"]
     return answer
 

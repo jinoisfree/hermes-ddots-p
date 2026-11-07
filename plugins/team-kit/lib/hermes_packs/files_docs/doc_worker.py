@@ -221,7 +221,10 @@ def pdf(job):
     return done
 
 
-def _clip(value, limit=500):
+CLIP_LIMIT = 500
+
+
+def _clip(value, limit=CLIP_LIMIT):
     if value is None or isinstance(value, (bool, int, float)):
         return value
     text = str(value)
@@ -264,18 +267,23 @@ def read_xlsx(job):
     else:
         left, top, right, bottom = 1, 1, min(sheet.max_column, 30), min(sheet.max_row, 200)
     right, bottom = min(right, left + 49), min(bottom, top + 499)
-    rows = []
+    rows, clipped = [], False
     for number in range(top, bottom + 1):
         cells = {}
         for column in range(left, right + 1):
             value = sheet.cell(row=number, column=column).value
             if value not in (None, ""):
+                clipped = clipped or len(str(value)) > CLIP_LIMIT
                 cells[f"{get_column_letter(column)}{number}"] = _clip(value)
         if cells:
             rows.append(cells)
+    covered = left == 1 and top == 1 and right >= sheet.max_column and bottom >= sheet.max_row
     return {"sheets": sheets, "sheet": sheet.title, "shown": f"{get_column_letter(left)}{top}:{get_column_letter(right)}{bottom}",
-            "cells": rows, "merged": [str(item) for item in list(sheet.merged_cells.ranges)[:50]],
+            "cells": rows, "complete": covered and not clipped, "merged": [str(item) for item in list(sheet.merged_cells.ranges)[:50]],
             "note": "values starting with '=' are formulas; empty cells are omitted"}
+
+
+PARAGRAPH_LIMIT, CELL_LIMIT = 1000, 200  # read_docx clip lengths
 
 
 def read_docx(job):
@@ -283,13 +291,19 @@ def read_docx(job):
     document = word.Document(job["source"])
     paragraphs = document.paragraphs
     start = max(int(job.get("offset") or 0), 0)
-    shown = [{"index": index, "style": paragraph.style.name if paragraph.style is not None else None, "text": _clip(paragraph.text, 1000)}
-             for index, paragraph in enumerate(paragraphs[start:start + 200], start)]
+    window = paragraphs[start:start + 200]
+    shown = [{"index": index, "style": paragraph.style.name if paragraph.style is not None else None, "text": _clip(paragraph.text, PARAGRAPH_LIMIT)}
+             for index, paragraph in enumerate(window, start)]
     tables = []
     for number, table in enumerate(document.tables[:20]):
-        tables.append({"table": number, "rows": [[_clip(cell.text, 200) for cell in row.cells] for row in table.rows[:50]],
+        tables.append({"table": number, "rows": [[_clip(cell.text, CELL_LIMIT) for cell in row.cells] for row in table.rows[:50]],
                        "total_rows": len(table.rows)})
-    return {"paragraphs": shown, "total_paragraphs": len(paragraphs), "tables": tables, "total_tables": len(document.tables)}
+    clipped = (any(len(paragraph.text) > PARAGRAPH_LIMIT for paragraph in window)
+               or any(len(cell.text) > CELL_LIMIT for table in document.tables[:20] for row in table.rows[:50] for cell in row.cells))
+    covered = (start == 0 and len(paragraphs) <= len(shown) and len(document.tables) <= len(tables)
+               and all(table["total_rows"] <= len(table["rows"]) for table in tables))
+    return {"paragraphs": shown, "total_paragraphs": len(paragraphs), "tables": tables, "total_tables": len(document.tables),
+            "complete": covered and not clipped}
 
 
 # Bound both archive members and decompressed OLE streams before parsing.
@@ -429,6 +443,118 @@ def read_hwp(job):
             return _paragraphs(texts, job)
     except (OSError, zlib.error, UnicodeError, struct.error) as exc:
         raise ValueError("손상된 HWP 문서를 읽지 못했습니다.") from exc
+
+
+def _mail_codec(name):
+    """Python codec for a mail charset label; Korean mail often says ks_c_5601-1987 for what is really CP949."""
+    import codecs
+    label = (name or "utf-8").strip().strip('"').lower()
+    if label in {"ks_c_5601-1987", "ks_c_5601", "ksc5601", "euc_kr", "euc-kr", "x-windows-949", "korean"}:
+        return "cp949"
+    try:
+        return codecs.lookup(label).name
+    except LookupError:
+        return "utf-8"
+
+
+def _mail_decode(data, charset):
+    for codec in (_mail_codec(charset), "utf-8", "cp949"):
+        try:
+            return data.decode(codec)
+        except (UnicodeError, LookupError):
+            continue
+    return data.decode("utf-8", errors="replace")
+
+
+def _mime_text(value):
+    """A header value with RFC 2047 words decoded; raw 8-bit UTF-8 or EUC-KR headers (some mail clients) too."""
+    import email.header
+    parts = []
+    for chunk, charset in email.header.decode_header(_eight_bit(value)):
+        parts.append(_mail_decode(chunk, charset) if isinstance(chunk, bytes) else chunk)
+    return "".join(parts)
+
+
+def _eight_bit(value):
+    """Raw non-ASCII header bytes arrive as surrogate escapes; turn them back into text (UTF-8, else CP949)."""
+    try:
+        value.encode("utf-8")
+        return value
+    except UnicodeEncodeError:
+        return _mail_decode(value.encode("utf-8", "surrogateescape"), None)
+
+
+def _attachment_name(part):
+    """File name of a mail part (RFC 2231, RFC 2047 or raw 8-bit), or None for a body part."""
+    import email.message
+    named = email.message.Message()
+    for key, value in part.raw_items():
+        if key.lower() in {"content-disposition", "content-type"}:
+            named[key] = _eight_bit(value)
+    name = named.get_filename()
+    return _mime_text(name) if name else None
+
+
+def _html_text(html):
+    """Body text of an HTML mail part: scripts, styles and tags are dropped; table cells stay separated."""
+    import re
+    import html as entities
+    text = re.sub(r"<!--.*?-->", " ", html, flags=re.S)
+    for tag in ("script", "style", "noscript", "head"):
+        text = re.sub(rf"<{tag}\b.*?</{tag}\s*>", " ", text, flags=re.S | re.I)
+    text = re.sub(r"</t[dh]\s*>", " | ", text, flags=re.I)
+    text = re.sub(r"</(tr|p|div|li|h[1-6]|table|section|article)\s*>|<br\s*/?>", "\n", text, flags=re.I)
+    text = entities.unescape(re.sub(r"<[^>]*>", "", text, flags=re.S))
+    text = re.sub(r"[ \t\u00a0]+", " ", text)
+    text = re.sub(r"( \| )+\n", "\n", text)
+    text = re.sub(r"\n[ ]*", "\n", text)
+    return re.sub(r"\n{2,}", "\n", text).strip()
+
+
+MAIL_LIMIT = 30000
+
+
+def read_eml(job):
+    """Mail file (.eml): headers and body text; attachments are named, never read (REQ-FD-06, D29).
+
+    text/plain wins over text/html. The text format is shared with the app's own reader:
+    header lines, a blank line, the body, then one ``첨부: 이름`` line per attachment.
+    """
+    import email
+    import email.policy
+    from pathlib import Path
+    path = Path(job["source"])
+    if path.stat().st_size > 20 * 1024 * 1024:
+        raise ValueError("메일 파일은 20MB까지 읽습니다.")
+    message = email.message_from_bytes(path.read_bytes(), policy=email.policy.compat32)
+
+    def header(name):
+        out = (" ".join(_mime_text(value).split()) for key, value in message.raw_items() if key.lower() == name.lower())
+        return ", ".join(item for item in out if item)
+
+    plain, rich, attachments = [], [], []
+    for part in message.walk():
+        if part.is_multipart():
+            continue
+        name = _attachment_name(part)
+        if name:
+            attachments.append(name)
+            continue
+        kind = part.get_content_type()
+        if kind not in {"text/plain", "text/html"}:
+            continue
+        payload = part.get_payload(decode=True) or b""
+        text = _mail_decode(payload, part.get_content_charset())
+        (plain if kind == "text/plain" else rich).append(text)
+    body = "\n".join(plain).strip() if any(item.strip() for item in plain) else "\n".join(_html_text(item) for item in rich).strip()
+    truncated = len(body) > MAIL_LIMIT
+    lines = [f"{label}: {value}" for label, value in
+             (("보낸 사람", header("From")), ("받는 사람", header("To")), ("참조", header("Cc")),
+              ("날짜", header("Date")), ("제목", header("Subject"))) if value]
+    text = "\n".join(lines) + "\n\n" + body[:MAIL_LIMIT]
+    if attachments:
+        text += "\n\n" + "\n".join(f"첨부: {name}" for name in attachments)
+    return {"text": text, "attachments": attachments, "truncated": truncated, "complete": bool(lines) and not truncated}
 
 
 def render(job):
@@ -635,8 +761,8 @@ def fill(job):
 def main():
     try:
         job = json.loads(sys.stdin.read())
-        if job["kind"] in ("read_pdf", "read_xlsx", "read_docx", "read_hwp", "read_hwpx", "render", "fill_inspect", "fill"):
-            result = {"read_pdf": read_pdf, "read_xlsx": read_xlsx, "read_docx": read_docx, "read_hwp": read_hwp, "read_hwpx": read_hwpx, "render": render,
+        if job["kind"] in ("read_pdf", "read_xlsx", "read_docx", "read_hwp", "read_hwpx", "read_eml", "render", "fill_inspect", "fill"):
+            result = {"read_pdf": read_pdf, "read_xlsx": read_xlsx, "read_docx": read_docx, "read_hwp": read_hwp, "read_hwpx": read_hwpx, "read_eml": read_eml, "render": render,
                       "fill_inspect": fill_inspect, "fill": fill}[job["kind"]](job)
             print(json.dumps({"ok": True, **result}, ensure_ascii=False, default=str))
             return

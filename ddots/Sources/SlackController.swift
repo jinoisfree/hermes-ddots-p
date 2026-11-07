@@ -732,6 +732,68 @@ final class SlackController {
         }
     }
 
+    // MARK: Pet bubble: which thread it speaks to, and answering there.
+
+    private var queuedProfiles: [String: Bool] = [:]
+    /// Whether this agent reads a new line only after it finishes (`display.busy_input_mode: queue`). Unknown means it steers.
+    func isQueued(profile: String) -> Bool {
+        if let known = queuedProfiles[profile] { return known }
+        let home = DdotsConfig.shared.hermes
+        let file = profile.isEmpty ? home : home.appendingPathComponent("profiles/" + profile)
+        let queued = (try? String(contentsOf: file.appendingPathComponent("config.yaml"), encoding: .utf8)).map(BubbleReply.isQueued(config:)) ?? false
+        if persists { queuedProfiles[profile] = queued }
+        return queued
+    }
+    /// A message into a thread whose agent is writing interrupts it, unless that agent reads only after it finishes.
+    private func markInterruption(_ thread: SlackThread?) {
+        guard let thread, let writer = model.typing[thread.id]?.first, !isQueued(profile: writer.profile) else { return }
+        model.interruption.mark(thread: thread.id, at: Date())
+    }
+    func replyTarget(thread id: String, room: String, speaker: String, profile: String) -> BubbleReplyTarget {
+        let writing = model.typing[id] ?? []
+        let who = writing.first
+        let name = speaker.isEmpty ? (who?.speaker ?? "") : speaker, key = profile.isEmpty ? (who?.profile ?? "") : profile
+        return BubbleReplyTarget(thread: id, room: room, speaker: name, profile: key, working: !writing.isEmpty,
+                                 queued: !writing.isEmpty && isQueued(profile: key))
+    }
+    private var threadOfMessage: [String: (id: String, room: String)] = [:]
+    /// The thread a message of the bubble belongs to, as an answer target. The pet asks on every refresh, so a found thread is remembered.
+    func replyTarget(forMessage messageID: String, speaker: String, profile: String) -> BubbleReplyTarget? {
+        if threadOfMessage[messageID] == nil {
+            for threads in snapshot.threads.values {
+                if let thread = threads.first(where: { $0.messages.contains { $0.id == messageID } }), !thread.ts.isEmpty {
+                    if threadOfMessage.count > 200 { threadOfMessage.removeAll() }
+                    threadOfMessage[messageID] = (thread.id, thread.room); break
+                }
+            }
+        }
+        return threadOfMessage[messageID].map { replyTarget(thread: $0.id, room: $0.room, speaker: speaker, profile: profile) }
+    }
+    /// The thread whose agent is writing and in which the user wrote last (REQ-CI-01).
+    func workingTarget() -> BubbleReplyTarget? {
+        let candidates = model.typing.compactMap { id, writers -> (SlackThread, TypingIndicator)? in
+            guard let writer = writers.first else { return nil }
+            for threads in snapshot.threads.values { if let thread = threads.first(where: { $0.id == id }), !thread.ts.isEmpty { return (thread, writer) } }
+            return nil
+        }
+        func mine(_ thread: SlackThread) -> Date { thread.messages.filter(\.fromUser).map(\.date).max() ?? .distantPast }
+        guard let best = candidates.max(by: { mine($0.0) < mine($1.0) }) else { return nil }
+        return replyTarget(thread: best.0.id, room: best.0.room, speaker: best.1.speaker, profile: best.1.profile)
+    }
+    func latestAgentLine(in threadID: String) -> Date? {
+        for threads in snapshot.threads.values {
+            if let thread = threads.first(where: { $0.id == threadID }) { return thread.messages.filter { !$0.fromUser && !SlackText.isThinking($0.body) }.map(\.date).max() }
+        }
+        return nil
+    }
+    /// The same send path as the conversation window's reply. Returns false when the thread is gone.
+    @discardableResult func sendReply(_ text: String, to threadID: String) -> Bool {
+        for threads in snapshot.threads.values {
+            if let thread = threads.first(where: { $0.id == threadID }) { model.onSend?(text, thread.room, thread, []); return true }
+        }
+        return false
+    }
+
     /// What a send was, captured as it leaves, so a failure is put back where it was going and nowhere else.
     private func sending(_ text: String, room: String, thread: SlackThread?, files: [URL], pick: String?) -> SlackFailedSend {
         SlackFailedSend(workspace: model.workspace, shown: model.selected ?? "", room: room, thread: thread?.id, text: text, files: files, pick: pick, reason: "")
@@ -741,11 +803,14 @@ final class SlackController {
     private func failed(_ attempt: SlackFailedSend, reason: String, current: Bool) {
         var failure = attempt; failure.reason = reason
         model.recordFailure(failure)
+        if current, let thread = attempt.thread { onSendFailed?(thread, attempt.text, reason) }
         guard current else { return }
         sendNotice = reason + " · 보내지 못한 글은 " + (model.selected == failure.shown ? "입력창 위" : "보낸 방의 입력창 위") + " ‘되살리기’로 다시 쓸 수 있어요."
     }
     /// True while sends go out in a UI check, through a made-up workspace; nothing reaches Slack.
     var smokeSends = false
+    /// A reply to a thread could not go out: the thread, the words and why. The pet bubble puts the words back.
+    var onSendFailed: ((String, String, String) -> Void)?
     private func send(_ text: String, room: String, thread: SlackThread?, clickedPost: String? = nil) {
         guard !closing, let bridge, persists || smokeSends else { return }
         model.pageHold = nil
@@ -753,6 +818,7 @@ final class SlackController {
         let post = thread == nil ? model.relayedPost(text) ?? model.hubPost(text) : nil
         let pick = thread == nil && model.ddotsPicked ? model.ddotsTarget : nil
         let revision = thread == nil ? model.beginPost() : model.composeRevision
+        markInterruption(thread)
         let attempt = sending(text, room: room, thread: thread, files: [], pick: pick)
         var echoed = ChatMessage(id: "slack-pending:\(UUID().uuidString)", fromUser: true, speaker: "", body: post?.shown ?? text, date: Date(), pending: true, profile: "")
         echoed.slackClickTarget = clickedPost
@@ -1451,6 +1517,7 @@ extension SlackController {
         let post = routedPost ?? (thread == nil ? model.hubPost(text) : nil)
         let pick = selectedProfile ?? (thread == nil && model.ddotsPicked ? model.ddotsTarget : nil)
         let revision = thread == nil ? model.beginPost() : model.composeRevision
+        markInterruption(thread)
         let attempt = sending(text, room: room, thread: thread, files: files, pick: pick)
         var message = ChatMessage(id: "slack-pending:\(UUID().uuidString)", fromUser: true, speaker: "", body: post?.shown ?? text, date: Date(), pending: true, profile: "")
         message.files = files.map(Self.localFile)

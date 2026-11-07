@@ -67,6 +67,11 @@ struct RelayFrame: Codable {
     var part: Int?
     var tapFailure: ThreeTapFailure?
     var connections: AgentConnectionDocument?
+    /// `connections-check`: one connection of `profile`, or all of them when `connection` is nil. The reply carries `checks`.
+    var connection: String?
+    var checks: [AgentActionReply]?
+    /// Set in `welcome` by a sharing Mac that can run `connections-check`.
+    var checkVersion: Int?
     var op: String
     var id: Int?
     var token: String?

@@ -164,7 +164,7 @@ final class FileDropHistory {
         rows("c:", as: Custom.self).filter { store.entries[$0.0]!.at > cutoff && $0.1.feature == feature }.map { $0.1.instruction }
     }
     func comparisons() -> [Comparison] {
-        ["mac", "claude"].map { engine in
+        ["claude"].map { engine in
             var result = Comparison(engine: engine)
             for (_, row) in rows("h:", as: Habit.self) where row.at > cutoff && row.engine == engine {
                 result.cards += 1; if row.closed { result.closed += 1 }; if row.failed { result.failures += 1 }

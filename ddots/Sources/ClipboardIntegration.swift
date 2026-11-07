@@ -77,8 +77,9 @@ extension AppDelegate {
             clipboard?.shelfWidth = size.width
             pet.clipboardOpacityPercent = clipboard?.opacityPercent ?? ClipboardDrawer.opacity()
         }
+        else if pet.bubbleReplyShown { size.height += bubbleReply.height }
         else if pet.clipboardRowVisible { size.height += ClipboardDrawer.rowHeight }
-        pet.foldedHeight = folded.height + (pet.clipboardRowVisible ? ClipboardDrawer.rowHeight : 0)
+        pet.foldedHeight = folded.height + (pet.bubbleReplyShown ? bubbleReply.height : pet.clipboardRowVisible ? ClipboardDrawer.rowHeight : 0)
         guard size != bubbleSize else { return }
         if !pet.clipboardResizing { bubbleMotion.slideWidth(now: ProcessInfo.processInfo.systemUptime, duration: clipboard?.settings.fitsContents == true ? 0.2 : 0.25) }
         bubbleSize = size; constrainPosition()

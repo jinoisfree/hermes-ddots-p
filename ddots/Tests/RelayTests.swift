@@ -159,8 +159,18 @@ import SQLite3
         var server = HermesRelayServer(home: home, token: token, interval: 0.1, sendsMessages: true, readUsage: fakeUsage)
         let connectionCommand = home.appendingPathComponent("bin/hermes-connections")
         try FileManager.default.createDirectory(at: connectionCommand.deletingLastPathComponent(), withIntermediateDirectories: true)
-        let connectionJSON = #"{"schema":"hermes-connections/1","checked_at":"2026-11-07T00:00:00Z","agents":[]}"#
-        try Data("#!/bin/sh\nprintf '%s' '\(connectionJSON)'\n".utf8).write(to: connectionCommand)
+        let connectionJSON = #"{"schema":"hermes-connections/1","checked_at":"2026-11-07T00:00:00Z","agents":[{"profile":"agent-a","display_name":"합성","connections":[{"id":"notion","group":"account","service":"notion","label":"Notion","account":null,"scope":null,"state":"connected","reason":"CONFIG_ONLY","checked_at":"2026-11-07T00:00:00Z","capabilities":["조회"],"rules":["승인 유지"],"reconnect":null,"connect_kind":"secret","verified_by":"config","actions":[{"id":"check","label":"확인","primary":true}]}]}]}"#
+        let checkReply = #"{"action":"check","profile":"agent-a","connection":"notion","outcome":"done","reason":"OK","check":{"state":"connected","reason":"NOTION_VERIFIED","verified_by":"notion_users_me","checked_at":"2026-11-07T00:00:00Z"}}"#
+        let checkAllReply = #"{"action":"check","profile":"agent-a","outcome":"done","reason":"OK","results":[\#(checkReply)]}"#
+        let callLog = home.appendingPathComponent("bin/calls.log")
+        try Data("""
+            #!/bin/sh
+            printf '%s\\n' "$*" >> '\(callLog.path)'
+            if [ "$1" = check ]; then
+              case "$*" in *--all*) printf '%s' '\(checkAllReply)';; *) printf '%s' '\(checkReply)';; esac
+            else printf '%s' '\(connectionJSON)'; fi
+
+            """.utf8).write(to: connectionCommand)
         try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: connectionCommand.path)
         let maintenanceLock = NSLock()
         var maintenance: [ThreeTapFailure] = []
@@ -176,6 +186,7 @@ import SQLite3
         check(wait(3) { intruder.poll(unreadSince: nil).status == .unavailable(RemoteHermes.denied) } != nil, "wrong code is told so")
         check(intruder.poll(unreadSince: nil).messages.isEmpty && intruder.search("합성").isEmpty, "wrong code receives no conversation")
         do { _ = try intruder.connectionStatus(); check(false, "wrong code cannot read connections") } catch {}
+        do { _ = try intruder.connectionCheck(profile: "agent-a", connection: "notion"); check(false, "wrong code cannot run a check") } catch {}
         intruder.stop()
         check(server.polls == 0, "wrong code never triggers a read")
         check({ usageLock.lock(); defer { usageLock.unlock() }; return usageReads == 0 }(), "usage is not read before a Mac is authorized")
@@ -207,6 +218,21 @@ import SQLite3
         check(wait(3) { client.usage != nil } != nil, "sharing Mac's Paseo usage arrives with the state")
         let connectionDocument = try client.connectionStatus()
         check(connectionDocument.schema == "hermes-connections/1", "authenticated connections round trip")
+        // Remote check: runs the read-only command for a listed profile/connection only, then drops the cached status.
+        let oneCheck = try client.connectionCheck(profile: "agent-a", connection: "notion")
+        check(oneCheck.count == 1 && oneCheck[0].check?.state == "connected" && oneCheck[0].reason == "OK", "authenticated check round trip")
+        let allChecks = try client.connectionCheck(profile: "agent-a", connection: nil)
+        check(allChecks.count == 1 && allChecks[0].connection == "notion", "check of every connection returns each result")
+        for (profile, connection) in [("ghost", nil), ("agent-a", "slack"), ("agent-a", "notion; touch /tmp/x"), ("../agent-a", "notion")] as [(String, String?)] {
+            let start = Date()
+            do { _ = try client.connectionCheck(profile: profile, connection: connection); check(false, "unlisted \(profile)/\(connection ?? "-") is refused") }
+            catch ConnectionFailure.command { check(Date().timeIntervalSince(start) < 3, "a refusal comes back at once") }
+        }
+        let calls = try String(contentsOf: callLog, encoding: .utf8).split(separator: "\n").map(String.init)
+        check(calls.filter { $0.hasPrefix("check") } == ["check --profile agent-a --connection notion --json", "check --profile agent-a --all --json"],
+              "only the two listed checks reached the command line")
+        check(!calls.contains { $0.contains("ghost") || $0.contains("touch") || $0.contains("..") }, "unlisted names never reach the command")
+        check(calls.filter { $0 == "status --json" }.count >= 2, "a check drops the cached status so the next read is fresh")
         var connectionFrame = RelayFrame(op: "result"); connectionFrame.connections = connectionDocument
         check(connectionFrame.line().count < RelayFrame.maximumAuthorizedLine, "connection result fits authorized frame limit")
         // A cached reply is still available after the underlying command disappears.
@@ -380,6 +406,9 @@ import SQLite3
         client.start()
         defer { client.stop() }
         check(wait(3) { client.linked } != nil, "legacy peer accepts authenticated hello")
+        let checkStart = Date()
+        do { _ = try client.connectionCheck(profile: "a", connection: "b"); check(false, "legacy peer cannot run a check") }
+        catch ConnectionFailure.oldRelay { check(Date().timeIntervalSince(checkStart) < 1, "an old sharing Mac is recognised at once, without waiting") }
         let start = Date()
         do { _ = try client.connectionStatus(); check(false, "legacy peer cannot produce connections") }
         catch ConnectionFailure.oldRelay {

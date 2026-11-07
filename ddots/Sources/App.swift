@@ -54,17 +54,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
     var chatThemePicker: NSSegmentedControl?
     let fileDrop = FileDropCard()
     let fileDropWatch = FileDropWatch()
+    let bubbleReply = BubbleReplyCard()
     var fileDropHistory: FileDropHistory?
-    var fileDropEngines: [String: FileDropCard.Engine] = [:]
     lazy var fileDropSettings = FileDropSettings(defaults: isSmoke ? nil : .standard)
-    var fileDropLocalEvents: Any?
-    var fileDropGlobalEvents: Any?
     var optionsWindow: NSWindow?
     var settingsTabs: NSTabView?
     var settingsScroll: NSScrollView? { settingsTabs?.selectedTabViewItem?.view as? NSScrollView }
     var tapCheckbox: NSButton?
     var tapCopyButton: NSButton?
     var bubbleCheckbox: NSButton?
+    var bubbleReplyCheckbox: NSButton?
     var vaultDeleteCheckbox: NSButton?
     var paseoStatusLabel: NSTextField?
     var loginCheckbox: NSButton?
@@ -307,6 +306,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         panel.appearance = (isSmoke ? ChatTheme.system : ChatTheme.load()).appearance
         panel.contentView = pet
         prepareFileDrop()
+        prepareBubbleReply()
         pet.autoresizingMask = [.width, .height]
         pet.onClick = { [weak self] count in self?.petClicked(count: count) }
         pet.onPress = { [weak self] in
@@ -567,7 +567,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
                     return
                 }
                 self.capture(destination: destination)
-                if CommandLine.arguments.contains("--ui-smoke-file-drop") { Task { @MainActor in await self.verifyFileDrop(destination: destination) } }
+                if CommandLine.arguments.contains("--ui-smoke-bubble-reply-live") { Task { @MainActor in await self.verifyBubbleReplyLive(destination: destination) } }
+                else if CommandLine.arguments.contains("--ui-smoke-file-drop-live") { Task { @MainActor in await self.verifyFileDropLive(destination: destination) } }
+                else if CommandLine.arguments.contains("--ui-smoke-file-drop") { Task { @MainActor in await self.verifyFileDrop(destination: destination) } }
                 else if CommandLine.arguments.contains("--ui-smoke-clipboard") { Task { @MainActor in await self.verifyClipboard(destination: destination) } }
                 else if CommandLine.arguments.contains("--ui-smoke-hybrid") { self.verifyHybridChat(destination: destination) }
                 else if CommandLine.arguments.contains("--ui-smoke-update-notices") { self.verifyUpdateNotices(destination: destination) }
@@ -1196,13 +1198,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
     func updatePet() {
         let workStart = StallTrace.now
         defer { StallTrace.shared.record("updatePet", since: workStart) }
+        // Which thread the bubble speaks to, set by the branch that decides what it says.
+        var replyTarget: BubbleReplyTarget?
+        defer { applyBubbleReply(replyTarget) }
         defer {
             // A new message or a task that waits or failed brings the bubble out; anything else waits for the pointer.
             if bubbleAlert != shownBubbleAlert {
                 shownBubbleAlert = bubbleAlert
                 if bubbleAlert != nil { pet.revealBubble() }
             }
-            if !chatExpanded, !chat.typing.isEmpty, !model.paused, pet.chatAnimation == .replyWaiting {
+            if !chatExpanded, !chat.typing.isEmpty, !model.paused, pet.chatAnimation == .replyWaiting, !slack.model.interruption.active(in: replyTarget?.thread) {
                 let names = chat.typing.map(\.speaker).filter { !$0.isEmpty }.joined(separator: ", ")
                 pet.subtitle = names.isEmpty ? "작성 중…" : "\(names) 작성 중…"
             }
@@ -1225,6 +1230,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
             pet.headline = (notice.state == .asking ? "🔴 " : "🟢 ") + name + Ddots.particle(name) + (notice.state == .asking ? " 물어봐요" : " 끝냈어요 · " + notice.label)
             pet.subtitle = "눌러서 스레드 보기"
             pet.bubbleText.avatar = Ddots.avatar(chat.avatars[notice.profile], name: name); pet.bubbleText.avatarName = name
+            replyTarget = slack.replyTarget(thread: notice.thread.id, room: notice.thread.room, speaker: name, profile: notice.profile)
             return
         }
         if let approval = slack.model.petApproval {
@@ -1238,6 +1244,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
             pet.subtitle = reason.isEmpty ? "확인할 요청이 있어요 · 눌러서 스레드 보기" : reason
             pet.bubbleText.avatar = Ddots.avatar(chat.avatars[message.profile], name: message.speaker)
             pet.bubbleText.avatarName = message.speaker
+            replyTarget = slack.replyTarget(forMessage: message.id, speaker: message.speaker, profile: message.profile)
             return
         }
         if let notice = installedUpdateNotice, Date() < notice.until {
@@ -1247,10 +1254,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         let active = model.tasks.filter { $0.state == .running }.count
         let urgent = model.tasks.first { $0.state == .waiting || ($0.state == .failed && Date().timeIntervalSince($0.updatedAt) < 60) }
         if let urgent { bubbleAlert = "task:\(urgent.id):\(urgent.state)" }
-        if urgent == nil, !chat.typing.isEmpty {
+        let writing = urgent == nil ? slack.workingTarget() : nil
+        if urgent == nil, !chat.typing.isEmpty || writing != nil {
             pet.chatAnimation = .replyWaiting; setBubbleActions([])
             pet.state = .running; pet.headline = "답변을 생각하고 있어요"
-            pet.subtitle = chat.typing.map(\.speaker).filter { !$0.isEmpty }.joined(separator:", ") + " 작성 중…"
+            let names = chat.typing.map(\.speaker).filter { !$0.isEmpty }
+            pet.subtitle = (names.isEmpty ? [writing?.speaker ?? ""].filter { !$0.isEmpty } : names).joined(separator:", ") + " 작성 중…"
+            replyTarget = writing
+            if let writing, slack.model.interruption.active(in: writing.thread) { pet.subtitle = BubbleReply.interruptedSubtitle }
             return
         }
         // A waiting or failed task is never covered by a chat nudge.
@@ -1260,6 +1271,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
             bubbleAlert = "message:\(nudge.message.id):\(nudge.reminder)"
             pet.bubbleText.avatar = Ddots.avatar(chat.avatars[nudge.message.profile], name: nudge.message.speaker)
             pet.bubbleText.avatarName = nudge.message.speaker
+            replyTarget = slack.replyTarget(forMessage: nudge.message.id, speaker: nudge.message.speaker, profile: nudge.message.profile)
             pet.state = .responded
             pet.headline = "\(nudge.message.speaker) · \(nudge.reminder ? "다시 알림" : "새 메시지")"
             pet.subtitle = ChatText.preview(nudge.message.body); return
@@ -1415,9 +1427,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
             let readOnly = !(UserDefaults.standard.string(forKey: RelaySettings.hostKey) ?? "").isEmpty
             let model = AgentConnectionsModel(remote: remoteHermes, readOnly: readOnly,
                 fixture: isSmoke ? AgentConnectionsSmoke.document : nil,
-                runCommand: isSmoke ? { _ in throw ConnectionFailure.command } : nil,
+                runCommand: isSmoke ? { _, _, _ in throw ConnectionFailure.command } : nil,
                 openLogin: { [weak self] url in self?.isSmoke == false && NSWorkspace.shared.open(url) })
             model.avatars = chat.avatars
+            var clipboardWasPaused = false
+            model.secretEntryScope = { [weak self] entering in
+                // No clipboard history while a secret is pasted into the entry window.
+                guard let library = self?.clipboard else { return }
+                if entering { clipboardWasPaused = library.paused; library.paused = true } else { library.paused = clipboardWasPaused }
+            }
             let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 760, height: 560),
                                   styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
             window.title = "에이전트 연결"; window.isReleasedWhenClosed = false
@@ -1639,13 +1657,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
                 guard let self, self.fileDropHistory?.store.user == user else { return }; self.fileDropHistory?.receive(entries)
             } }
             client.onSync = { [weak self] user, entries in DispatchQueue.main.async { self?.slack.receiveSynced(user: user, entries: entries) } }
-            client.onLinked = { [weak self] in DispatchQueue.main.async { self?.slack.syncSendAll(); self?.fileDropHistory?.sendAll(); self?.updateFileDropDefaultEngine() } }
+            client.onLinked = { [weak self] in DispatchQueue.main.async { self?.slack.syncSendAll(); self?.fileDropHistory?.sendAll() } }
             source = client; remote = client
         }
         let old = remoteHermes
         replaceHermesSource(source)
         remoteHermes = remote
-        if !isSmoke { bindFileDropHistory(force: true); updateFileDropDefaultEngine() }
+        if !isSmoke { bindFileDropHistory(force: true) }
         slack.syncSend = remote.map { client in { entries, user, replace in client.sendSync(user: user, entries: entries, replace: replace) } }
         old?.stop()
         if hermesEnabled { remote?.start() }
@@ -1922,6 +1940,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
             }
             let bubble = check("말풍선 항상 보이기", #selector(toggleBubbleAlwaysShown(_:)))
             bubbleCheckbox = bubble
+            let reply = check("말풍선에서 바로 답하기", #selector(toggleBubbleReply(_:))); bubbleReplyCheckbox = reply
             let tap = check(ThreeTapController.title, #selector(toggleThreeTap)); tapCheckbox = tap
             // Keep the size endpoint labels together with their slider.
             let endpoints = content.subviews.filter { $0 is NSTextField && $0.frame.minY == 65 }
@@ -1933,7 +1952,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
             appearanceControls = appearance
             page("화면과 펫", [[appearance], [nameLabel, nameField, saveName, nameHint],
                 [title, value, slider, hint, reset] + endpoints,
-                [bubble], [tap], [action("펫 위치 초기화", #selector(resetPosition))]])
+                [bubble], [reply], [tap], [action("펫 위치 초기화", #selector(resetPosition))]])
             let homeTitle = NSTextField(labelWithString: "고정 채널")
             homeTitle.font = .systemFont(ofSize: 14, weight: .semibold)
             homeTitle.frame = NSRect(x:24,y:38,width:312,height:22)
@@ -1967,6 +1986,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         fitOptionsToScreen()
         refreshHomeRoomSettings()
         bubbleCheckbox?.state = pet.bubbleAlwaysShown ? .on : .off
+        bubbleReplyCheckbox?.state = bubbleReplyEnabled ? .on : .off
         vaultDeleteCheckbox?.state = (UserDefaults.standard.object(forKey: ShrimpReceipts.setting) == nil || UserDefaults.standard.bool(forKey: ShrimpReceipts.setting)) ? .on : .off
         refreshThreeTapSettings()
         refreshLoginLaunch()

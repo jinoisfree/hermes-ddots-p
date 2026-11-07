@@ -21,6 +21,7 @@ final class PetPanel: NSPanel {
     var chatExpanded = false
     var clipboardPresented = false
     var fileDropPresented = false
+    var bubbleReplyPresented = false
     var onClipboardKey: ((NSEvent) -> Bool)?
     var onCollapse: (() -> Void)?
     var onChatKey: ((NSEvent) -> Bool)?
@@ -29,6 +30,10 @@ final class PetPanel: NSPanel {
     var onPasteAttachments: (() -> Bool)?
     override func sendEvent(_ event: NSEvent) {
         if fileDropPresented, event.type == .keyDown, event.keyCode == 53 { (contentView as? PetView)?.fileDrop?.escape(); return }
+        if bubbleReplyPresented, event.type == .keyDown, event.keyCode == 53, isKeyWindow { (contentView as? PetView)?.bubbleReply?.escape(); return }
+        // The input takes the keyboard only when it is pressed, never when the pointer merely rests on the bubble.
+        if bubbleReplyPresented, !isKeyWindow, event.type == .leftMouseDown, let pet = contentView as? PetView,
+           pet.bubbleReplyContains(event.locationInWindow) { makeKey() }
         if clipboardPresented, event.type == .keyDown, onClipboardKey?(event) == true { return }
         if clipboardPresented, event.type == .leftMouseDown || event.type == .rightMouseDown,
            let pet = contentView as? PetView, pet.clipboardContains(event.locationInWindow) { makeKey() }
@@ -50,7 +55,7 @@ final class PetPanel: NSPanel {
         if chatExpanded, onPageKey?(event) == true { return true }
         if chatExpanded, event.modifierFlags.contains(.command), Self.shortcutKey(event) == "f", onChatKey?(event) == true { return true }
         if chatExpanded, Self.editAction(for: event) == #selector(NSText.paste(_:)), onPasteAttachments?() == true { return true }
-        if chatExpanded || clipboardPresented || fileDropPresented, let action = Self.editAction(for: event), NSApp.sendAction(action, to: nil, from: self) { return true }
+        if chatExpanded || clipboardPresented || fileDropPresented || (bubbleReplyPresented && isKeyWindow), let action = Self.editAction(for: event), NSApp.sendAction(action, to: nil, from: self) { return true }
         return super.performKeyEquivalent(with: event)
     }
     /// The letter a shortcut stands for. A Korean or other non-Latin input source can report its own character,
@@ -74,7 +79,7 @@ final class PetPanel: NSPanel {
         default: return nil
         }
     }
-    override var canBecomeKey: Bool { chatExpanded || clipboardPresented || fileDropPresented }
+    override var canBecomeKey: Bool { chatExpanded || clipboardPresented || fileDropPresented || bubbleReplyPresented }
     override func cancelOperation(_ sender: Any?) { if fileDropPresented { (contentView as? PetView)?.fileDrop?.escape() } else if clipboardPresented { (contentView as? PetView)?.dismissClipboard() } else { onCollapse?() } }
     override var canBecomeMain: Bool { false }
 }
@@ -125,6 +130,10 @@ final class BubbleTextView: NSView {
     var subtitle = "AI 작업을 살펴보고 있어요" { didSet { needsDisplay = true } }
     var state: WorkState = .idle { didSet { updateStatusIndicator(); needsDisplay = true } }
     var actionTitles: [String] = [] { didSet { needsDisplay = true } }
+    /// Where the light band is on the subtitle (WritingShimmer units); nil draws the subtitle plain.
+    var subtitleShimmer: Double? { didSet { if subtitleShimmer != oldValue { needsDisplay = true } } }
+    /// VoiceOver action that opens the reply input under this bubble.
+    var onOpenReply: (() -> Void)? { didSet { setAccessibilityCustomActions(onOpenReply == nil ? [] : [NSAccessibilityCustomAction(name: BubbleReply.accessibilityName, handler: { [weak self] in self?.onOpenReply?(); return true })]) } }
     private var textBase: CGFloat { bounds.height - PetLayout.bubbleSize.height }
     private let statusDot = CALayer()
     private var pulseAllowed = true
@@ -181,7 +190,21 @@ final class BubbleTextView: NSView {
         }
         let textX: CGFloat = avatarName == nil ? (unreadCount > 0 ? badgeRect.maxX + 8 : 30) : avatarX + ChatMetrics.notificationAvatar + ChatMetrics.avatarNameGap
         drawText(headline, rect: NSRect(x: textX, y: 27 + textBase, width: max(0, bounds.width-16-textX), height: 19), size: ChatMetrics.nameFont, color: .labelColor, bold: true)
-        drawText(subtitle, rect: NSRect(x: 16, y: 10 + textBase, width: max(0, bounds.width-32), height: 16), size: ChatMetrics.auxiliaryFont, color: .secondaryLabelColor, bold: false)
+        let subtitleRect = NSRect(x: 16, y: 10 + textBase, width: max(0, bounds.width-32), height: 16)
+        drawText(subtitle, rect: subtitleRect, size: ChatMetrics.auxiliaryFont, color: .secondaryLabelColor, bold: false)
+        if let phase = subtitleShimmer, let context = NSGraphicsContext.current?.cgContext {
+            // The conversation's light band: the same words in full colour, shown only inside a soft band.
+            let width = min(subtitleRect.width, ceil((subtitle as NSString).size(withAttributes: [.font: NSFont.systemFont(ofSize: ChatMetrics.auxiliaryFont)]).width))
+            let band = width * WritingShimmer.bandWidth, centre = subtitleRect.minX + width * phase
+            context.saveGState(); context.clip(to: subtitleRect)
+            context.beginTransparencyLayer(auxiliaryInfo: nil)
+            drawText(subtitle, rect: subtitleRect, size: ChatMetrics.auxiliaryFont, color: .labelColor, bold: false)
+            context.setBlendMode(.destinationIn)
+            if let gradient = CGGradient(colorsSpace: CGColorSpaceCreateDeviceGray(), colors: [CGColor(gray: 1, alpha: 0), CGColor(gray: 1, alpha: 1), CGColor(gray: 1, alpha: 0)] as CFArray, locations: [0, 0.5, 1]) {
+                context.drawLinearGradient(gradient, start: CGPoint(x: centre - band / 2, y: 0), end: CGPoint(x: centre + band / 2, y: 0), options: [])
+            }
+            context.endTransparencyLayer(); context.restoreGState()
+        }
         for (rect, title) in zip(PetLayout.actionRects(count: actionTitles.count), actionTitles) {
             NSColor.labelColor.withAlphaComponent(0.12).setFill()
             NSBezierPath(roundedRect: rect, xRadius: 12, yRadius: 12).fill()
@@ -595,7 +618,7 @@ final class PetView: NSView {
         }
         let shown = fileDrop?.visible != true && enabled && !clipboardDismissed && (clipboardRequested || clipboardIncoming) && !chatExpanded && !morphing && !genieActive
             && previewRow == nil && !previewLook && !didDrag
-        let rowShown = fileDrop?.visible != true && enabled && (shown || (clipboardAvailable && !clipboardAttention && !chatExpanded && !morphing && !genieActive && (hovering || clipboardCopyFrame != nil)))
+        let rowShown = fileDrop?.visible != true && bubbleReply?.visible != true && enabled && (shown || (clipboardAvailable && !clipboardAttention && !chatExpanded && !morphing && !genieActive && (hovering || clipboardCopyFrame != nil)))
         let rowChanged = clipboardRow.isHidden == rowShown
         if rowShown { clipboardSurfaceActive = true }
         clipboardRow.isHidden = !rowShown
@@ -622,6 +645,53 @@ final class PetView: NSView {
         if rowChanged { onClipboardGeometry?(); needsLayout = true }
         updateClipboardEventScope()
     }
+    // MARK: Answering from the bubble
+    var bubbleReply: BubbleReplyCard?
+    private var bubbleReplyHost: NSHostingView<BubbleReplyView>?
+    /// The setting and the connection: the app says whether the bubble may offer an input at all.
+    var bubbleReplyAllowed = true
+    /// The subtitle says the user interrupted; it carries the light band while the agent thinks again.
+    var subtitleInterrupted = false
+    var bubbleReplyShown: Bool { bubbleReply?.visible == true && bubbleReplyHost != nil && !chatExpanded }
+    var bubbleReplyFrame: CGRect { bubbleReplyHost?.frame ?? .zero }
+    func bubbleReplyContains(_ windowPoint: NSPoint) -> Bool {
+        guard bubbleReplyShown, let host = bubbleReplyHost else { return false }
+        return host.frame.contains(convert(windowPoint, from: nil))
+    }
+    func installBubbleReply(_ card: BubbleReplyCard) {
+        bubbleReply = card
+        bubbleText.onOpenReply = { [weak card] in card?.openNow() }
+    }
+    /// Mounts or removes the input as the card opens and folds, and gives the keyboard back when it folds.
+    func updateBubbleReplyPresentation() {
+        guard let card = bubbleReply else { return }
+        let shown = card.visible && !chatExpanded
+        if shown, bubbleReplyHost == nil {
+            let host = NSHostingView(rootView: BubbleReplyView(card: card)); host.sizingOptions = []; host.wantsLayer = true
+            addSubview(host); bubbleReplyHost = host
+        } else if !shown, let host = bubbleReplyHost {
+            if window?.firstResponder is NSTextView, (window?.firstResponder as? NSView)?.isDescendant(of: host) == true {
+                window?.makeFirstResponder(nil); window?.resignKey()
+            }
+            card.focused = false
+            host.removeFromSuperview(); bubbleReplyHost = nil
+        }
+        (window as? PetPanel)?.bubbleReplyPresented = shown
+        bubbleText.onOpenReply = card.target == nil ? nil : { [weak card] in card?.openNow() }
+        needsLayout = true
+    }
+    private func updateBubbleReply(overBubble: Bool, overContent: Bool, now: TimeInterval) {
+        guard let card = bubbleReply else { return }
+        let surroundings = BubbleReply.Surroundings(enabled: bubbleReplyAllowed, connected: true, paused: isPaused, resting: resting, chatExpanded: chatExpanded,
+            fileDropActive: fileDrop?.visible == true, clipboardActive: clipboardPresented || clipboardCopyFrame != nil || clipboardIncoming,
+            bubbleShown: bubbleShown, hasTarget: card.target != nil)
+        card.hover.update(now: now, eligible: BubbleReply.canOpen(surroundings), pointerOver: card.open ? overBubble : overContent, holds: card.holds)
+        if card.hover.open != card.open {
+            card.open = card.hover.open
+            if !card.open { card.focused = false; card.onFolded?() }
+            updateBubbleReplyPresentation(); card.onGeometry?()
+        }
+    }
     var fileDropNotice = false { didSet { if oldValue != fileDropNotice { updateBubbleShown() } } }
     var fileDrop: FileDropCard?
     private var fileDropHost: NSHostingView<FileDropCardView>?
@@ -630,7 +700,6 @@ final class PetView: NSView {
         return bubbleSurface.frame.insetBy(dx: -1, dy: -1).contains(host.frame) && !bubbleText.isHidden && bubbleText.frame.height == FileDropCard.footer
     }
     var fileDropPointer: CGPoint?
-    func fileDropContains(_ point: CGPoint) -> Bool { bubbleSurface.frame.contains(convert(point, from: nil)) }
     func installFileDrop(_ card: FileDropCard) {
         fileDrop = card
         fileDropHost?.removeFromSuperview(); fileDropHost = nil
@@ -699,7 +768,13 @@ final class PetView: NSView {
                 if now - clipboardRowEntered! >= 0.3 { clipboardRequested = true; clipboardDismissed = false; clipboardRowEntered = nil }
             } else { clipboardRowEntered = nil }
             held = held || hovering || clipboardHolding || clipboardIncoming || clipboardPresented
-        } else { hovering = false }
+            let rowRect = clipboardRowVisible ? clipboardRowRect : .zero
+            updateBubbleReply(overBubble: over(bubbleSurface.frame), overContent: over(bubbleSurface.frame) && !(clipboardRowVisible && over(rowRect)), now: ProcessInfo.processInfo.systemUptime)
+        } else {
+            hovering = false
+            updateBubbleReply(overBubble: false, overContent: false, now: ProcessInfo.processInfo.systemUptime)
+        }
+        held = held || bubbleReply?.visible == true
         updateClipboardPresentation()
         let copyEnded = updateClipboardCopyNotice(now: ProcessInfo.processInfo.systemUptime)
         let shown = reveal.update(now: ProcessInfo.processInfo.systemUptime, held: held || clipboardCopyFrame != nil) || bubbleAlwaysShown
@@ -986,6 +1061,7 @@ final class PetView: NSView {
         if spriteContains(local) { return self }
         guard (bubbleShown ? spriteRect.union(bubbleSurface.frame) : spriteRect).insetBy(dx: -12, dy: -12).contains(local) else { return nil }
         if fileDrop?.visible == true, let host = fileDropHost, host.frame.contains(local) { return host.hitTest(local) ?? host }
+        if bubbleReplyShown, let host = bubbleReplyHost, host.frame.contains(local) { return host.hitTest(local) ?? host }
         if !resizeEdge(local).isEmpty { return self }
         if hasWidthPicture { return widthHeader.frame.contains(local) ? widthHeader : self }
         if clipboardRowVisible, clipboardRowRect.contains(local) { return clipboardRow }
@@ -1226,7 +1302,14 @@ final class PetView: NSView {
         let rowHeight: CGFloat = clipboardRowVisible ? (clipboardPresented ? ClipboardDrawer.footerHeight : ClipboardDrawer.rowHeight) : 0
         let below = placement?.bubbleBelow == true
         let regions = ClipboardDrawer.regions(in: surfaceContent.bounds, rowHeight: rowHeight, below: below)
-        bubbleText.frame = fileDrop?.visible == true ? NSRect(x: 0, y: 0, width: surfaceContent.bounds.width, height: min(FileDropCard.footer, surfaceContent.bounds.height)) : regions.content
+        var content = regions.content
+        if bubbleReplyShown, let card = bubbleReply, let host = bubbleReplyHost {
+            // The input sits at the bottom of the glass whichever side the bubble is on; the words keep the rest.
+            let rowHeight = min(card.height, surfaceContent.bounds.height)
+            host.frame = NSRect(x: bubbleSurface.frame.minX, y: bubbleSurface.frame.minY, width: surfaceContent.bounds.width, height: rowHeight)
+            content = CGRect(x: 0, y: rowHeight, width: surfaceContent.bounds.width, height: max(0, surfaceContent.bounds.height - rowHeight))
+        }
+        bubbleText.frame = fileDrop?.visible == true ? NSRect(x: 0, y: 0, width: surfaceContent.bounds.width, height: min(FileDropCard.footer, surfaceContent.bounds.height)) : content
         clipboardCopyText.frame = bubbleText.frame
         clipboardRow.below = below; clipboardRow.frame = regions.row
         clipboardHost?.frame = regions.content.offsetBy(dx: bubbleSurface.frame.minX, dy: bubbleSurface.frame.minY)
@@ -1306,6 +1389,10 @@ final class PetView: NSView {
         defer { onAnimationWork?(began, ProcessInfo.processInfo.systemUptime - began) }
         guard let window, window.isVisible else { pointerInteraction.reset(); bubbleText.setPulseAllowed(false); return }
         if widthClock == nil { onAnimationTick?() } else { onClockFallback?() }
+        // The light band on the subtitle moves in 1/24 s steps, like the conversation's writing line.
+        let band = subtitleInterrupted && !reducesMotion && bubbleShown && !isPaused
+            ? WritingShimmer.phase(at: floor(Date().timeIntervalSinceReferenceDate * 24) / 24, reduceMotion: false) : nil
+        if bubbleText.subtitleShimmer != band { bubbleText.subtitleShimmer = band }
         updateBubbleShown()
         bubbleText.setPulseAllowed(!isPaused && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion)
         guard !isPaused else { return }
@@ -1569,4 +1656,9 @@ private final class WidthDisplayClock: NSObject {
         signal?.cancel(); signal = nil
     }
     deinit { stop() }
+}
+
+extension PetView {
+    /// The glass of the bubble in this view's coordinates, for checks that point at it.
+    var bubbleGlassFrame: CGRect { bubbleSurface.frame }
 }

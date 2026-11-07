@@ -18,6 +18,7 @@ final class NativeThreadInputsCache {
         var vaultSent: Set<String>, driveSent: Set<String>
         var driveDone: [String: Double], driveChosen: [String: String], pages: [String: Int]
         var thumbnails: [String: ObjectIdentifier], failed: Set<String>, busy: Set<String>
+        var interrupted: String?
     }
     private var key: Key?
     private var values: [String: SlackThreadInputs] = [:]
@@ -36,6 +37,7 @@ final class NativeThreadInputsCache {
         value.confirmingDelete = key.confirmingDelete == id ? id : nil
         value.open = key.open.contains(id) ? [id] : []
         value.stopped = key.stopped.contains(id) ? [id] : []
+        value.interrupted = key.interrupted == id ? id : nil
         value.confirmed = key.confirmed.intersection(messages)
         // A report's details shown after its buttons fold on their own ("<id>:detail").
         value.expandedReplies = key.expandedReplies.filter { messages.contains($0) || ($0.hasSuffix(":detail") && messages.contains(String($0.dropLast(7)))) }

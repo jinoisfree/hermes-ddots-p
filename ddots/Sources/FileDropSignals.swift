@@ -12,9 +12,15 @@ struct FileDropSignals: Codable {
     var folder = ""
     var hosts: [String] = []
     var content = ""
+    /// Something was left unread: a file in `unread`, or text cut at the limit (`truncated`). The Mac mini reader may
+    /// still read the unread files; it reports the final answer in `FileDropAnswer.partial`.
     var partial = false
+    /// Names of the dropped files this app could not read completely.
+    var unread: [String] = []
+    var truncated = false
     var sensitive = false
-    var profile = "work-assistant"
+    /// Assigned at runtime from the organization's roles (FileDropCast); never a fixed ID.
+    var profile = ""
     var agentRoles: [String: [String]] = [:]
     var works: [String] = []
     var recent: [[String: String]] = []
@@ -28,10 +34,35 @@ struct FileDropSignals: Codable {
         let weekday = ["일", "월", "화", "수", "목", "금", "토"][parts.weekday! - 1]
         return String(format: "%04d-%02d-%02d", parts.year!, parts.month!, parts.day!) + "(" + weekday + ")"
     }
-    static func owner(_ hint: String) -> String {
+    /// The hint words resolve to a role; the card turns the role into whichever profile holds it.
+    static func role(_ hint: String) -> String {
         let hint = hint.lowercased()
-        if ["영수증", "개인", "receipt"].contains(where: hint.contains) { return "personal-secretary" }
-        return "work-assistant"
+        return ["영수증", "개인", "receipt"].contains(where: hint.contains) ? "personal" : "work"
+    }
+    var hint: String { (names.joined(separator: " ") + " " + source + " " + content).lowercased() }
+    /// Plain text of the formats the app reads itself: UTF-8 first, then EUC-KR. Returns nil when neither decodes.
+    static func plainText(_ data: Data) -> String? {
+        if let text = String(data: data, encoding: .utf8) { return text }
+        let korean = String.Encoding(rawValue: CFStringConvertEncodingToNSStringEncoding(CFStringEncoding(CFStringEncodings.EUC_KR.rawValue)))
+        return String(data: data, encoding: korean)
+    }
+    /// Body text of an HTML page: tags, scripts, styles and comments are dropped; table cells stay separated.
+    static func htmlText(_ html: String) -> String {
+        func replace(_ text: String, _ pattern: String, _ with: String, _ options: NSRegularExpression.Options = [.caseInsensitive]) -> String {
+            guard let regex = try? NSRegularExpression(pattern: pattern, options: options) else { return text }
+            return regex.stringByReplacingMatches(in: text, range: NSRange(text.startIndex..., in: text), withTemplate: with)
+        }
+        var text = replace(html, #"<!--.*?-->"#, " ", [.dotMatchesLineSeparators])
+        for tag in ["script", "style", "noscript", "head"] { text = replace(text, "<\(tag)\\b.*?</\(tag)\\s*>", " ", [.caseInsensitive, .dotMatchesLineSeparators]) }
+        text = replace(text, #"</t[dh]\s*>"#, " | ")
+        text = replace(text, #"</(tr|p|div|li|h[1-6]|table|section|article)\s*>|<br\s*/?>"#, "\n")
+        text = replace(text, #"<[^>]*>"#, "", [.dotMatchesLineSeparators])
+        for (entity, value) in [("&nbsp;", " "), ("&lt;", "<"), ("&gt;", ">"), ("&quot;", "\""), ("&#39;", "'"), ("&amp;", "&")] { text = text.replacingOccurrences(of: entity, with: value) }
+        text = replace(text, #"[ \t\u00A0]+"#, " ")
+        text = replace(text, #"( \| )+\n"#, "\n")
+        text = replace(text, #"\n[ ]*"#, "\n")
+        text = replace(text, #"\n{2,}"#, "\n")
+        return text.trimmingCharacters(in: .whitespacesAndNewlines)
     }
     static func originHosts(_ file: URL) -> [String] {
         let item = MDItemCreate(kCFAllocatorDefault, file.path as CFString)
@@ -62,8 +93,6 @@ struct FileDropSignals: Codable {
                 value.folder = "~/" + first.deletingLastPathComponent().path.dropFirst(home.count).split(separator: "/").prefix(2).joined(separator: "/")
             }
         }
-        let hint = (value.names.joined(separator: " ") + " " + payload.text + " " + payload.source).lowercased()
-        value.profile = owner(hint)
         value.content = payload.text; value.sensitive = secret(value.names.joined(separator: " ") + "\n" + payload.text)
         return value
     }
@@ -71,17 +100,18 @@ struct FileDropSignals: Codable {
     static func read(_ payload: FileDropIntake.Payload, initial: Self, budget: TimeInterval = 1) -> Self {
         var value = initial, chunks = [payload.text]
         let deadline = Date().addingTimeInterval(budget)
-        for file in payload.files {
-            if Date() > deadline { value.partial = true; break }
+        for (position, file) in payload.files.enumerated() {
+            if Date() > deadline { value.unread += payload.files[position...].map(\.lastPathComponent); break }
             value.hosts += originHosts(file)
             do {
                 let text: String
+                var complete = true
                 switch file.pathExtension.lowercased() {
                 case "pdf":
                     guard let pdf = PDFDocument(url: file) else { throw CocoaError(.fileReadCorruptFile) }
                     var pages: [String] = []
                     for index in 0..<pdf.pageCount {
-                        guard Date() < deadline, let page = pdf.page(at: index) else { value.partial = true; break }
+                        guard Date() < deadline, let page = pdf.page(at: index) else { complete = false; break }
                         if let string = page.string, !string.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { pages.append(string) }
                         else if let image = page.thumbnail(of: CGSize(width: 1600, height: 2200), for: .mediaBox).tiffRepresentation {
                             pages.append(try ClipboardOCR.recognize(data: image) ?? "")
@@ -89,23 +119,37 @@ struct FileDropSignals: Codable {
                     }
                     text = pages.joined(separator: "\n")
                 case "png", "jpg", "jpeg", "tiff", "heic": text = try ClipboardOCR.recognize(file: file) ?? ""
-                case "txt", "md", "csv", "log", "json": text = try String(contentsOf: file, encoding: .utf8)
+                case "txt", "md", "csv", "log", "json", "html", "htm", "eml":
+                    let handle = try FileHandle(forReadingFrom: file); defer { try? handle.close() }
+                    let limit = 8 * 1024 * 1024
+                    let data = try handle.read(upToCount: limit + 1) ?? Data()
+                    if data.count > limit { complete = false }
+                    if file.pathExtension.lowercased() == "eml" {
+                        guard let mail = FileDropMail.read(Data(data.prefix(limit))) else { throw CocoaError(.fileReadCorruptFile) }
+                        text = mail.text; complete = complete && mail.complete
+                    } else {
+                        guard let plain = plainText(data.prefix(limit)) else { throw CocoaError(.fileReadInapplicableStringEncoding) }
+                        text = ["html", "htm"].contains(file.pathExtension.lowercased()) ? htmlText(plain) : plain
+                    }
                 case "rtf", "docx":
                     let type: NSAttributedString.DocumentType = file.pathExtension.lowercased() == "docx" ? .officeOpenXML : .rtf
                     text = try NSAttributedString(url: file, options: [.documentType: type], documentAttributes: nil).string
-                default: value.partial = true; text = ""
+                default: complete = false; text = ""
                 }
+                if !complete { value.unread.append(file.lastPathComponent) }
                 value.sensitive = value.sensitive || secret(text)
                 chunks.append(text)
-            } catch { value.partial = true }
+            } catch { value.unread.append(file.lastPathComponent) }
         }
         value.hosts = Array(Set(value.hosts)).sorted()
         let text = chunks.joined(separator: "\n")
         value.sensitive = value.sensitive || secret(text)
-        value.content = String(text.prefix(30_000))
-        value.profile = owner(value.names.joined(separator: " ") + " " + value.source + " " + text)
+        value.truncated = text.count > contentLimit
+        value.content = String(text.prefix(contentLimit))
+        value.partial = !value.unread.isEmpty || value.truncated
         return value
     }
+    static let contentLimit = 30_000
     static func secret(_ text: String) -> Bool {
         let token = #"xox[abprs]-|sk-[A-Za-z0-9_-]+|AKIA[A-Z0-9]+|ghp_[A-Za-z0-9]+|-----BEGIN|(?:비밀번호|password|passwd)\s*[:=]\s*\S+"#
         if text.range(of: token, options: [.regularExpression, .caseInsensitive]) != nil { return true }

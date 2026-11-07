@@ -8,6 +8,8 @@ xcrun swiftc -swift-version 5 "$ROOT/Sources/ClipboardHistory.swift" "$ROOT/Sour
 xcrun swiftc -swift-version 5 -framework Vision "$ROOT/Sources/ClipboardHistory.swift" "$ROOT/Sources/ClipboardCopyNotice.swift" "$ROOT/Sources/ClipboardTabs.swift" "$ROOT/Sources/ClipboardStore.swift" "$ROOT/Sources/ClipboardMonitor.swift" "$ROOT/Sources/ClipboardOCR.swift" "$ROOT/Tests/ClipboardHistoryTests.swift" -o "$ROOT/.build/ClipboardHistoryTests"
 "$ROOT/.build/ClipboardHistoryTests"
 xcrun swiftc -swift-version 5 "$ROOT/Sources/WritingShimmer.swift" "$ROOT/Tests/WritingShimmerTests.swift" -o "$ROOT/.build/WritingShimmerTests"
+xcrun swiftc -swift-version 5 "$ROOT/Sources/BubbleReply.swift" "$ROOT/Tests/BubbleReplyTests.swift" -o "$ROOT/.build/BubbleReplyTests"
+"$ROOT/.build/BubbleReplyTests"
 "$ROOT/.build/WritingShimmerTests"
 xcrun swiftc -swift-version 5 "$ROOT/Sources/AppIdentity.swift" "$ROOT/Tests/PreviousInstallationTests.swift" -o "$ROOT/.build/PreviousInstallationTests"
 "$ROOT/.build/PreviousInstallationTests"
@@ -17,6 +19,12 @@ export DDOTS_CONFIG_ROOT="$TEST_CONFIG/record" HERMES_HOME="$TEST_CONFIG/hermes"
 mkdir -p "$HERMES_HOME"
 python3 "$ROOT/Tests/prepare_config.py" "$DDOTS_CONFIG_ROOT"
 xcrun swiftc -swift-version 5 "$ROOT/Sources/AppIdentity.swift" "$ROOT/Sources/SettingsSync.swift" "$ROOT/Sources/FileDropHistory.swift" "$ROOT/Tests/FileDropHistoryTests.swift" -o "$ROOT/.build/FileDropHistoryTests"
+xcrun swiftc -swift-version 5 "$ROOT/Sources/AppIdentity.swift" "$ROOT/Sources/SettingsSync.swift" "$ROOT/Sources/FileDropHistory.swift" "$ROOT/Sources/FileDropSettings.swift" "$ROOT/Tests/FileDropRolesTests.swift" -o "$ROOT/.build/FileDropRolesTests"
+"$ROOT/.build/FileDropRolesTests"
+# AC-55(3): the drop code holds no fixed agent ID, neither the private ones nor the public build's replacements.
+if grep -nE 'work-assistant|personal-secretary|system-doctor|sns-manager|archive-helper|work-assistant|personal-secretary|system-doctor' "$ROOT"/Sources/FileDrop*.swift; then
+    echo "끌어놓기 코드에 고정 프로필 ID가 있어요. 담당은 조직 역할에서 런타임에 정해야 해요." >&2; exit 1
+fi
 "$ROOT/.build/FileDropHistoryTests"
 xcrun swiftc -swift-version 5 "$ROOT/Sources/OptionsLayout.swift" "$ROOT/Tests/OptionsLayoutTests.swift" -o "$ROOT/.build/OptionsLayoutTests"
 "$ROOT/.build/OptionsLayoutTests"
@@ -106,3 +114,5 @@ if [ -f "$ROOT/../hermes/schemas/connections-status.json" ]; then
 else
   "$ROOT/.build/AgentConnectionsTests"
 fi
+xcrun swiftc -swift-version 5 "$ROOT/Sources/AgentConnections.swift" "$ROOT/Sources/InstalledApps.swift" "$ROOT/Tests/InstalledAppsTests.swift" -o "$ROOT/.build/InstalledAppsTests"
+"$ROOT/.build/InstalledAppsTests"

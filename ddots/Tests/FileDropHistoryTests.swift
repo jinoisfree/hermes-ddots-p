@@ -23,7 +23,7 @@ import Foundation
         check(a.habits(feature: feature) == ["summarize": 3, "compare": 1, "explain": 0] && b.habits(feature: feature) == a.habits(feature: feature), "AC-20 offline changes merge without lost increments on all Macs")
         check(a.counters(feature: feature)["summarize"]?.seen == 4 && a.counters(feature: feature)["summarize"]?.ignored == 1 && a.counters(feature: feature)["compare"]?.ignored == 3, "AC-26 chosen/unchosen/shown counters are independent")
         let table = history("table", "table")
-        for engine in ["mac", "claude"] {
+        for engine in ["mac", "claude"] { // an old Mac AI record may still sit in the shared history; it is never shown
             for index in 0..<4 {
                 table.begin(id: engine + String(index), feature: feature, engine: engine, names: [], shown: ["summarize", "compare", "explain"], profile: "work-assistant", now: 300 + Double(index))
                 table.answer(summary: "SYNTHETIC_SUMMARY", shown: ["summarize", "compare", "explain"], elapsed: Double(index * 2 + 1), failed: index == 3, works: [], now: 300 + Double(index))
@@ -31,8 +31,10 @@ import Foundation
                 table.close(now: 300 + Double(index))
             }
         }
-        for row in table.comparisons() {
-            check(row.cards == 4 && row.first == 1 && row.other == 1 && row.auto == 1 && row.closed == 1 && row.failures == 1 && row.median == 4, "AC-21 literal engine counts and even-sample median")
+        let rows = table.comparisons()
+        check(rows.count == 1 && rows[0].engine == "claude", "AC-21 one Claude table; the old Mac AI record is not shown")
+        for row in rows {
+            check(row.cards == 4 && row.first == 1 && row.other == 1 && row.auto == 1 && row.closed == 1 && row.failures == 1 && row.median == 4, "AC-21 literal Claude counts and even-sample median")
         }
         check(a.recent(now: 700).first?.names == ["B.pdf"] && a.recent(now: 49 * 3600).isEmpty, "AC-37 recent names are supplied only within 48 hours")
         let hText = a.store.entries.filter { $0.key.hasPrefix("h:") }.values.compactMap(\.v).joined()

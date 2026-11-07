@@ -18,6 +18,7 @@ final class RemoteHermes: HermesSource {
     var linked: Bool { lock.lock(); defer { lock.unlock() }; return isLinked }
     private var isLinked = false
     private var dropVersion = 0
+    private var checkVersion = 0
     var dropOriginalsAllowed: ((NWConnection) -> Bool)?
     var supportsDrop: Bool { lock.lock(); defer { lock.unlock() }; return isLinked && dropVersion == 1 }
     var lastReceivedAt: Date? { lock.lock(); defer { lock.unlock() }; return lastStateAt }
@@ -130,7 +131,7 @@ final class RemoteHermes: HermesSource {
         case "denied": startupTapFailure = nil; wasDenied = true
         case "welcome":
             welcomed = true; wasDenied = false; attempts = 0
-            lock.lock(); isLinked = true; dropVersion = frame.dropVersion ?? 0; lock.unlock()
+            lock.lock(); isLinked = true; dropVersion = frame.dropVersion ?? 0; checkVersion = frame.checkVersion ?? 0; lock.unlock()
             if let failure = startupTapFailure { startupTapFailure = nil; reportTapFailure(failure) }
             onLinked?()
         case "drop-sync":
@@ -209,6 +210,16 @@ final class RemoteHermes: HermesSource {
     private func request(_ frame: RelayFrame) -> [ChatMessage] {
         guard includeMessages else { return [] }
         return (requestFrame(frame, timeout: 5)?.messages ?? []).map(\.message)
+    }
+    /// Runs a check on the sharing Mac. An older sharing Mac never answers the op, so the welcome frame decides up front.
+    func connectionCheck(profile: String, connection: String?) throws -> [AgentActionReply] {
+        lock.lock(); let supported = isLinked && checkVersion >= 1; lock.unlock()
+        guard supported else { throw ConnectionFailure.oldRelay }
+        var frame = RelayFrame(op: "connections-check"); frame.profile = profile; frame.connection = connection
+        let limit = connection == nil ? ConnectionCommands.relayCheckAllSeconds : ConnectionCommands.relayCheckSeconds
+        guard let reply = requestFrame(frame, timeout: limit) else { throw ConnectionFailure.timeout }
+        guard let checks = reply.checks, !checks.isEmpty else { throw ConnectionFailure.command }
+        return checks
     }
     func connectionStatus() throws -> AgentConnectionDocument {
         guard let reply = requestFrame(RelayFrame(op: "connections"), timeout: 9) else { throw ConnectionFailure.oldRelay }

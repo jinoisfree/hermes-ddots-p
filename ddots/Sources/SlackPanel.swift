@@ -138,6 +138,7 @@ struct SlackThreadInputs: Equatable {
     var thumbnails: [String: ObjectIdentifier]
     var failedFiles: Set<String>, busyFiles: Set<String>
     var stopped: Bool
+    var interrupted: Bool
 }
 
 struct SlackLineInputs: Equatable {
@@ -180,7 +181,8 @@ final class SlackModel: ObservableObject {
             members:model.ddotsMembers,avatars:chat.avatars,palettes:dark ? chat.darkPalettes:chat.lightPalettes,
             events:chat.calendarEvents,bubbleWidth:chat.bubbleWidth,vaultSent:model.vaultSent,driveSent:model.driveSent,
             driveDone:model.driveDone,driveChosen:model.driveChosen,pages:model.shrimpPendingPages,
-            thumbnails:model.thumbs.mapValues(ObjectIdentifier.init),failed:model.failedThumbs,busy:model.busyFiles)
+            thumbnails:model.thumbs.mapValues(ObjectIdentifier.init),failed:model.failedThumbs,busy:model.busyFiles,
+            interrupted:model.interruption.thread)
         nativeInputs.prepare(next, ids: Set(renderedThreads.map { $0.thread.id }))
     }
 
@@ -390,7 +392,7 @@ final class SlackModel: ObservableObject {
             pendingPages: Dictionary(uniqueKeysWithValues: messages.compactMap { id in shrimpPendingPages[id].map { (id, $0) } }),
             thumbnails: Dictionary(uniqueKeysWithValues: files.compactMap { id in thumbs[id].map { (id, ObjectIdentifier($0)) } }),
             failedFiles: failedThumbs.intersection(files), busyFiles: busyFiles.intersection(files),
-            stopped: stopped.contains(thread.id))
+            stopped: stopped.contains(thread.id), interrupted: interruption.active(in: thread.id))
     }
 
     let composer = SlackDraft()
@@ -610,6 +612,16 @@ final class SlackModel: ObservableObject {
     @Published var typing: [String: [TypingIndicator]] = [:] { didSet { updateWriting() } }
     /// Threads whose run the user stopped; each offers the undo request until it is sent or the user writes there.
     @Published var stopped = Set<String>()
+    /// The thread a message was sent into while its agent was writing, until the agent answers or stops.
+    @Published var interruption = BubbleReplyInterruption()
+    /// The open thread whose agent is writing now. A message typed while looking at it joins that thread, even when the
+    /// composer is on a new post, so the agent hears it instead of the words starting another conversation.
+    var interruptible: SlackThread? {
+        guard source == .slack else { return nil }
+        return threads.filter { !$0.ts.isEmpty && open.contains($0.id) && !(typing[$0.id] ?? []).isEmpty }.max { $0.latest < $1.latest }
+    }
+    /// Where the next message goes: the chosen thread, else the open thread being written.
+    var sendTarget: SlackThread? { target ?? interruptible }
     func stop(_ thread: SlackThread) {
         guard !stopped.contains(thread.id) else { return }
         stopped.insert(thread.id)
@@ -1871,7 +1883,8 @@ final class SlackModel: ObservableObject {
     }
     func send() {
         let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty || !attachments.isEmpty, let room = target?.room ?? postRoom else { return }
+        let aimed = sendTarget
+        guard !text.isEmpty || !attachments.isEmpty, let room = aimed?.room ?? postRoom else { return }
         // A character who is not in the channel would never hear the call. The words stay where they were typed.
         if let post = hubPost(text), let missing = absent(from: post) {
             onRefuse?("\(missing.name)\(Ddots.particle(missing.name)) #\(ddotsHubName ?? "") 채널에 없어요. 슬랙에서 채널에 초대한 뒤 다시 보내 주세요.")
@@ -1879,7 +1892,7 @@ final class SlackModel: ObservableObject {
         }
         // A pressed face is for the one message; the next goes by its own words again.
         sendResponse = StallTrace.shared.response("sendEcho")
-        let destination = target
+        let destination = aimed
         // Commit a routed new post before the callback clears follow-up state or the draft is emptied.
         if destination == nil, automaticReply != nil {
             newPost = true; picked = nil; replyTo = nil; automaticReply = nil
@@ -2582,6 +2595,13 @@ extension ChatView {
         }.buttonStyle(.plain).font(.system(size: ChatMetrics.auxiliaryFont, weight: .medium)).lineLimit(1).fixedSize().threadControls()
     }
 
+    /// Small mark under the words sent into a thread while its agent was writing.
+    var interruptedCaption: some View {
+        Text(BubbleReply.interruptedCaption).font(.system(size: ChatMetrics.auxiliaryFont)).foregroundColor(.secondary)
+            .padding(.leading, ChatMetrics.replyInset).frame(maxWidth: .infinity, alignment: .leading)
+            .accessibilityIdentifier("interrupted-caption")
+    }
+
     @ViewBuilder private func slackThread(_ original: SlackThread, target: Bool) -> some View {
         let thread = slack.vault.hidingPageCommands(original)
         let displayed = SlackNotice.displayed(thread, confirmed: slack.confirmed)
@@ -2656,6 +2676,7 @@ extension ChatView {
                         }
                         driveButtons(thread, message: reply)
                     }
+                    if slack.interruption.active(in: thread.id) { interruptedCaption.transition(.opacity) }
                     ForEach(writing) { typingBubble($0, compact: true).transition(.opacity) }
                     if let control = AgentStop.control(working: AgentStop.working(thread, typing: writing), stopped: slack.stopped.contains(thread.id)) {
                         stopControl(original, control: control).transition(.opacity)
@@ -3045,9 +3066,14 @@ extension ChatView {
         }.buttonStyle(.plain).disabled(!enabled || on).accessibilityLabel(title + (on ? ", 선택됨" : ""))
             .accessibilityIdentifier("slack-mode-" + title)
     }
-    private var slackSendRoom: String? { slack.target?.room ?? slack.postRoom }
+    private var slackSendRoom: String? { slack.sendTarget?.room ?? slack.postRoom }
     /// What the empty draft says: where the next message goes.
     var slackPrompt: String {
+        // A thread being written is answered even from a new post: say so.
+        if slack.target == nil, let writing = slack.interruptible {
+            let speaker = (slack.typing[writing.id] ?? []).first?.speaker ?? ""
+            return BubbleReply.placeholder(BubbleReplyTarget(thread: writing.id, room: writing.room, speaker: speaker, profile: "", working: true, queued: false))
+        }
         if slack.isDdots {
             if let thread = slack.target {
                 return (slack.project(thread)?.title ?? String(MessageFormat.plain(thread.root.body).prefix(36))) + " · 이어서 말하기"

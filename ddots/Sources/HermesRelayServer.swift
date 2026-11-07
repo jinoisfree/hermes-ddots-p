@@ -180,6 +180,7 @@ final class HermesRelayServer {
             client.authorized = true
             client.unread = frame.unread.map(Date.init(timeIntervalSince1970:)); client.unreadChanged = client.unread != nil
             var welcome = RelayFrame(op: "welcome")
+            welcome.checkVersion = 1
             welcome.dropVersion = dropSuggest != nil || FileDropRunner.available(bridge.home) ? 1 : 0
             send(welcome, to: client)
             if timer == nil {
@@ -210,6 +211,9 @@ final class HermesRelayServer {
                 }
             }
             return
+        case "connections-check":
+            receiveConnectionCheck(frame, from: client)
+            return
         case "drop-open", "drop-chunk", "drop-run":
             receiveDrop(frame, from: client)
             return
@@ -233,6 +237,37 @@ final class HermesRelayServer {
         default: return
         }
         send(reply, to: client)
+    }
+
+    /// Another Mac may only run the read-only `check` command, and only for a profile/connection this Mac's own latest
+    /// status lists. Nothing it sends reaches a command line except those two names.
+    private func receiveConnectionCheck(_ frame: RelayFrame, from client: Client) {
+        guard let id = frame.id, id > 0 else { return }
+        func answer(_ checks: [AgentActionReply]?, reason: String? = nil) {
+            queue.async { [weak self, weak client] in
+                guard let self, let client else { return }
+                var reply = RelayFrame(op: "result"); reply.id = id; reply.checks = checks; reply.reason = reason
+                if reply.line().count <= RelayFrame.maximumAuthorizedLine { self.send(reply, to: client) }
+            }
+        }
+        connectionCache.read { [weak self] result in
+            guard let self else { return }
+            guard case .success(let document) = result,
+                  let profile = document.agents.first(where: { $0.profile == frame.profile }) else { answer(nil, reason: "CONNECTION_NOT_LISTED"); return }
+            if let name = frame.connection, !profile.connections.contains(where: { $0.id == name }) { answer(nil, reason: "CONNECTION_NOT_LISTED"); return }
+            let arguments = frame.connection.map { ConnectionCommands.check(profile.profile, $0) } ?? ConnectionCommands.checkAll(profile.profile)
+            let home = self.connectionHome ?? HermesLocator.shared.locate() ?? HermesLocator.shared.fallbackHome
+            DispatchQueue.global(qos: .utility).async {
+                let run = Result { try AgentActionReply.decode(AgentConnectionCommand.run(
+                    executable: home.appendingPathComponent("bin/hermes-connections"), arguments: arguments,
+                    timeout: ConnectionCommands.timeout(arguments))) }
+                self.connectionCache.invalidate()
+                switch run {
+                case .failure: answer(nil, reason: "CONNECTIONS_CHECK_FAILED")
+                case .success(let reply): answer(reply.results ?? [reply])
+                }
+            }
+        }
     }
 
     private func receiveDrop(_ frame: RelayFrame, from client: Client) {

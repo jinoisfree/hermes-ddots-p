@@ -99,6 +99,51 @@
                   "items": {
                     "type": "string"
                   }
+                },
+                "connect_kind": {
+                  "enum": [
+                    "oauth",
+                    "secret",
+                    "mac_permission",
+                    "channel",
+                    null
+                  ]
+                },
+                "verified_by": {
+                  "type": "string"
+                },
+                "expires_at": {
+                  "type": "string"
+                },
+                "actions": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "id",
+                      "label",
+                      "primary"
+                    ],
+                    "properties": {
+                      "id": {
+                        "enum": [
+                          "check",
+                          "oauth_connect",
+                          "secret_set",
+                          "permission_request",
+                          "open_settings",
+                          "gateway_restart"
+                        ]
+                      },
+                      "label": {
+                        "type": "string"
+                      },
+                      "primary": {
+                        "type": "boolean"
+                      }
+                    }
+                  }
                 }
               },
               "required": [
@@ -113,7 +158,10 @@
                 "scope",
                 "reconnect",
                 "capabilities",
-                "rules"
+                "rules",
+                "connect_kind",
+                "verified_by",
+                "actions"
               ]
             }
           }

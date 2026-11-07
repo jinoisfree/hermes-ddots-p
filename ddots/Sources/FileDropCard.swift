@@ -25,29 +25,33 @@ final class FileDropCard: ObservableObject {
     @Published var thumbnail: NSImage?
     @Published var fileDetails: [URL: String] = [:]
     @Published var confirmation: String?
+    /// Where the proposals on screen came from: the engine's name, or "기본 제안이에요 · reason".
+    @Published var origin = ""
+    /// Why the last hand-over could not go out. Shown right above the buttons or the editor; empty when fine.
+    @Published var problem = ""
     var enabled = true
     var request = UUID()
     var eventID = UUID().uuidString
     let intake: FileDropIntake
     var onGeometry: (() -> Void)?
     var onPayload: (() -> Void)?
-    var onSelect: ((FileDropSuggestion) -> Void)?
+    /// Returns false when the item could not go out; the card then keeps what the user typed and shows `problem`.
+    var onSelect: ((FileDropSuggestion) -> Bool)?
     var onClose: (() -> Void)?
     var sending = false
     var onConfirm: ((Bool) -> Void)?
     var profileName: (String) -> String = { $0 == "app" ? "앱" : "에이전트" }
-    var avatar: (String) -> NSImage? = { _ in nil }
-    var primaryProfile = "work-assistant"
+    var avatar: (String) -> ProfileAvatar? = { _ in nil }
+    var cast: () -> FileDropCast = { FileDropCast() }
+    var primaryProfile = ""
     var sensitive = false
     var signals = FileDropSignals()
     var summary = ""
     var outcomes: [String: String] = [:]
-    var engineKind = "mac"
     var pasteboard: () -> NSPasteboard = { .general }
-    var profiles: () -> Set<String> = { FileDropRules.profiles }
     var enrich: (inout FileDropSignals) -> Void = { _ in }
     typealias Engine = (FileDropSignals, [URL]) async throws -> FileDropAnswer
-    var engine: Engine = { signals, _ in try await FileDropRules.mac(signals) }
+    var engine: Engine = { _, _ in throw CocoaError(.featureUnsupported) }
     var onAnswer: ((Double, Bool) -> Void)?
     private var work: Task<Void, Never>?
     private var deadline: Task<Void, Never>?
@@ -55,7 +59,7 @@ final class FileDropCard: ObservableObject {
     var size: CGSize {
         let rows = min(3, payload.files.count)
         let base: CGFloat = dragging ? 250 : payload.count == 0 ? 220 : (editing ? 264 : confirmation != nil ? 242 : 326) + CGFloat(rows) * 42
-        return CGSize(width: 356, height: base + (notice.isEmpty ? 0 : 30) + (signals.works.isEmpty ? 0 : 20))
+        return CGSize(width: 356, height: base + (notice.isEmpty ? 0 : 30) + (problem.isEmpty ? 0 : 30) + (origin.isEmpty ? 0 : 18) + (signals.works.isEmpty ? 0 : 20))
     }
     init(intake: FileDropIntake = FileDropIntake()) { self.intake = intake }
     func target(_ board: NSPasteboard) -> Bool {
@@ -98,12 +102,14 @@ final class FileDropCard: ObservableObject {
     }
     func submit() {
         guard !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
-        let text = String(draft.prefix(100_000)); draft = ""
-        editing = false
+        let text = String(draft.prefix(100_000))
         if payload.count == 0 {
+            draft = ""; editing = false
             payload.text = text; count = 1; status = "살펴보는 중"; analyze(); onPayload?()
         } else {
-            onSelect?(FileDropSuggestion(id: "opinion", label: text, profile: primaryProfile))
+            // The editor and its text stay until the hand-over has really gone out; a failure only adds a reason.
+            problem = ""
+            if onSelect?(FileDropSuggestion(id: "opinion", label: text, profile: primaryProfile)) != true && problem.isEmpty { problem = "보낼 수 없어요" }
         }
         onGeometry?()
     }
@@ -111,68 +117,83 @@ final class FileDropCard: ObservableObject {
         if editing && payload.count > 0 { editing = false; onGeometry?() } else { close() }
     }
     func choose(_ suggestion: FileDropSuggestion) {
-        if suggestion.id == "opinion" { editing = true; onGeometry?(); return }
-        onSelect?(suggestion)
+        if suggestion.id == "opinion" { editing = true; problem = ""; onGeometry?(); return }
+        problem = ""
+        if onSelect?(suggestion) != true && problem.isEmpty { problem = "보낼 수 없어요" }
+        onGeometry?()
     }
     func close(notify: Bool = true) {
         if sending { visible = false; onGeometry?(); return }
         if notify && visible && payload.count > 0 { onClose?() }
         eventID = UUID().uuidString
         request = UUID(); work?.cancel(); deadline?.cancel(); intake.close(); visible = false; dragging = false; editing = false
-        payload = .init(); proposals = []; draft = ""; notice = ""; status = ""; thumbnail = nil; confirmation = nil
+        payload = .init(); proposals = []; draft = ""; notice = ""; problem = ""; origin = ""; status = ""; thumbnail = nil; confirmation = nil
         onGeometry?()
     }
     func cancelAnalysis() { request = UUID(); work?.cancel(); deadline?.cancel() }
     func analyze() {
-        cancelAnalysis(); summary = ""; outcomes = [:]; sensitive = false
-        signals = FileDropSignals.initial(payload); enrich(&signals)
-        primaryProfile = profiles().contains(signals.profile) ? signals.profile : (FileDropRules.profiles.contains(Ddots.defaultTarget) ? Ddots.defaultTarget : signals.profile)
-        signals.profile = primaryProfile
-        proposals = FileDropRules.rules(signals)
-        status = engineKind == "claude" ? profileName(primaryProfile) + Ddots.particle(profileName(primaryProfile)) + " 읽는 중" : "살펴보는 중"
-        let generation = request, payload = payload, initial = signals, kind = engineKind, invoke = engine
+        cancelAnalysis(); summary = ""; outcomes = [:]; sensitive = false; origin = ""
+        signals = FileDropSignals.initial(payload); enrich(&signals); assign(&signals)
+        primaryProfile = signals.profile
+        proposals = FileDropRules.rules(signals, cast: cast())
+        status = profileName(primaryProfile) + Ddots.particle(profileName(primaryProfile)) + " 읽는 중"
+        let generation = request, payload = payload, initial = signals, invoke = engine
         let started = ProcessInfo.processInfo.systemUptime
         work = Task { @MainActor [weak self] in
             var signals = await Task.detached { FileDropSignals.read(payload, initial: initial) }.value
             guard let self, self.request == generation, self.visible else { return }
-            if !self.profiles().contains(signals.profile), FileDropRules.profiles.contains(Ddots.defaultTarget) { signals.profile = Ddots.defaultTarget }
-            self.enrich(&signals)
+            self.enrich(&signals); self.assign(&signals)
             self.primaryProfile = signals.profile
-            if kind == "claude" { self.status = self.profileName(signals.profile) + Ddots.particle(self.profileName(signals.profile)) + " 읽는 중" }
+            self.status = self.profileName(signals.profile) + Ddots.particle(self.profileName(signals.profile)) + " 읽는 중"
             self.signals = signals; self.sensitive = signals.sensitive
-            self.proposals = FileDropRules.rules(signals)
+            self.proposals = FileDropRules.rules(signals, cast: self.cast())
             self.onPayload?()
-            if signals.partial { self.notice = "내용을 다 읽지 못했어요" }
-            if signals.sensitive, kind == "claude" {
+            if signals.sensitive {
                 self.deadline?.cancel()
-                self.notice = "비밀처럼 보여 밖으로 보내지 않았어요"; self.status = ""; self.onGeometry?(); return
+                self.notice = "비밀처럼 보여 밖으로 보내지 않았어요"; self.status = ""; self.origin = Self.basic("비밀 같은 내용이 있어 보내지 않았어요"); self.onGeometry?(); return
             }
             do {
                 let answer = try await invoke(signals, payload.files)
                 guard self.request == generation, self.visible, !Task.isCancelled else { return }
                 self.deadline?.cancel(); self.status = ""
                 var enriched = signals; enriched.works = answer.works
-                self.signals = enriched; self.summary = String(answer.summary.prefix(60)); self.outcomes = answer.outcomes ?? [:]
-                self.proposals = FileDropRules.merge(answer.suggestions, signals: enriched, fallback: self.proposals, profiles: self.profiles())
-                if answer.confidence < 0.4, answer.works.count == 1 { self.confirmation = answer.works[0] }
+                self.signals = enriched
+                // The Mac mini reader may have read what this app could not; its answer decides.
+                if answer.partial ?? signals.partial { self.notice = Self.unreadNotice }
+                self.summary = String(answer.summary.prefix(60)); self.outcomes = answer.outcomes ?? [:]
+                let allowed = self.cast().candidates
+                // An answer whose every proposal is discarded by the check is a failure, not a success.
+                let asking = answer.confidence < 0.4 && answer.works.count == 1
+                if !asking && FileDropRules.merge(answer.suggestions, signals: enriched, fallback: [], profiles: allowed).isEmpty {
+                    self.origin = Self.basic("담당을 맞추지 못했어요")
+                    self.onAnswer?(ProcessInfo.processInfo.systemUptime - started, true); self.onGeometry?(); return
+                }
+                self.proposals = FileDropRules.merge(answer.suggestions, signals: enriched, fallback: self.proposals, profiles: allowed)
+                self.origin = "Claude가 읽고 골랐어요"
+                if asking { self.confirmation = answer.works[0] }
                 self.onAnswer?(ProcessInfo.processInfo.systemUptime - started, false); self.onGeometry?()
             } catch {
                 guard self.request == generation else { return }
                 self.deadline?.cancel(); self.status = ""
-                if case FileDropServiceError.sensitive = error { self.sensitive = true; self.notice = "비밀처럼 보여 밖으로 보내지 않았어요" }
-                else if kind == "claude" { self.notice = "Claude 제안 못 받음" }
+                if case FileDropServiceError.sensitive = error { self.sensitive = true; self.notice = "비밀처럼 보여 밖으로 보내지 않았어요"; self.origin = Self.basic("비밀 같은 내용이 있어 보내지 않았어요") }
+                else if case FileDropServiceError.notConnected = error { self.origin = Self.basic("맥미니에 연결되지 않았어요") }
+                else { self.origin = Self.basic("Claude 연결 실패") }
+                if signals.partial && !self.sensitive { self.notice = Self.unreadNotice }
                 self.onAnswer?(ProcessInfo.processInfo.systemUptime - started, true); self.onGeometry?()
             }
         }
-        let timeout: UInt64 = engineKind == "claude" ? 15_000_000_000 : 2_000_000_000
+        let timeout: UInt64 = 15_000_000_000
         deadline = Task { @MainActor [weak self] in
             do { try await Task.sleep(nanoseconds: timeout) } catch { return }
             guard let self, self.request == generation else { return }
-            self.cancelAnalysis(); self.status = ""
-            if kind == "claude" { self.notice = "Claude 제안 못 받음" }
+            self.cancelAnalysis(); self.status = ""; self.origin = Self.basic("시간 초과")
+            if self.signals.partial { self.notice = Self.unreadNotice }
             self.onAnswer?(ProcessInfo.processInfo.systemUptime - started, true); self.onGeometry?()
         }
     }
+    static let unreadNotice = "내용을 다 읽지 못했어요"
+    static func basic(_ reason: String) -> String { "기본 제안이에요 · " + reason }
+    private func assign(_ signals: inout FileDropSignals) { signals.profile = cast().profile(role: FileDropSignals.role(signals.hint)) }
     private func loadThumbnail() {
         let files = payload.files
         fileDetails = [:]
@@ -198,10 +219,65 @@ final class FileDropCard: ObservableObject {
     }
 }
 
+/// The macOS window close button: a 12 pt red circle that shows its x under the pointer, with a 24 pt target.
+struct FileDropCloseButton: View {
+    var action: () -> Void
+    private final class Hover: ObservableObject { @Published var on = false }
+    @StateObject private var hover = Hover()
+    var body: some View {
+        Button(action: action) {
+            ZStack {
+                Circle().fill(Color(red: 1, green: 0.37, blue: 0.34)).overlay(Circle().strokeBorder(Color.black.opacity(0.18), lineWidth: 0.5))
+                if hover.on { Image(systemName: "xmark").font(.system(size: 7, weight: .heavy)).foregroundStyle(Color.black.opacity(0.6)) }
+            }.frame(width: 12, height: 12).frame(width: 24, height: 24).contentShape(Rectangle())
+        }.buttonStyle(.plain).onHover { hover.on = $0 }.accessibilityLabel("닫기").help("닫기 (esc)")
+    }
+}
+
+/// The conversation's "writing" light band (WritingShimmer) on a line of text while Claude is reading. Plain text when
+/// not active or when Reduce Motion is on; the band never intercepts clicks.
+struct FileDropShimmerText: View {
+    var text: String
+    var active: Bool
+    var highlight: Color
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    var body: some View {
+        if active && !reduceMotion && !CommandLine.arguments.contains("--ui-smoke-reduce-motion") {
+            TimelineView(.periodic(from: .now, by: 1.0 / 24)) { context in
+                Text(text).writingShimmer(at: context.date, reduceMotion: false, highlight: highlight)
+            }
+        } else { Text(text) }
+    }
+}
+
+/// The agent's picture as the conversation shows it (same source, same soft square); a first-letter badge without one.
+struct FileDropFace: View {
+    var profile: String
+    var name: String
+    var avatar: ProfileAvatar?
+    var size: CGFloat = 22
+    var body: some View {
+        Group {
+            if profile == "app" { Image(systemName: "macwindow").font(.system(size: size * 0.9)).foregroundStyle(.secondary) }
+            else {
+                let face = avatar ?? ProfileAvatar()
+                if let image = face.image { Image(nsImage: image).resizable().scaledToFill().frame(width: size, height: size).clipShape(ChatView.face(size)) }
+                else {
+                    ZStack {
+                        Color(nsColor: face.color)
+                        Text(ProfileAvatar.initial(name)).font(.system(size: size * 0.6, weight: .medium)).foregroundColor(Color(nsColor: face.foreground))
+                    }.frame(width: size, height: size).clipShape(ChatView.face(size))
+                }
+            }
+        }.frame(width: size, height: size).accessibilityHidden(true)
+    }
+}
+
 struct FileDropCardView: View {
     @ObservedObject var card: FileDropCard
     @Environment(\.colorScheme) private var scheme
     private var fill: Color { Color.primary.opacity(scheme == .dark ? 0.075 : 0.055) }
+    private var quiet: Color { Color.primary.opacity(0.28) }
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             if card.dragging {
@@ -213,10 +289,10 @@ struct FileDropCardView: View {
                     .background(Color.blue.opacity(0.04), in: RoundedRectangle(cornerRadius: 12))
                     .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(Color.blue.opacity(0.6), style: StrokeStyle(lineWidth: 1, dash: [4, 3])))
             } else {
-                HStack {
+                HStack(spacing: 4) {
+                    FileDropCloseButton { card.close() }.padding(.leading, -6)
                     Text(card.payload.count == 0 ? "글 붙여넣어 맡기기" : "파일 \(card.count)개").font(.system(size: 13, weight: .semibold))
                     Spacer()
-                    Button { card.close() } label: { Image(systemName: "xmark").font(.system(size: 9, weight: .semibold)).frame(width: 24, height: 24).background(fill, in: Circle()) }.buttonStyle(.plain).accessibilityLabel("닫기")
                 }
                 if !card.payload.files.isEmpty {
                     ScrollView {
@@ -230,10 +306,22 @@ struct FileDropCardView: View {
                         .lineLimit(2).frame(maxWidth: .infinity, alignment: .leading).padding(6)
                         .background(card.sensitive ? Color.yellow.opacity(0.14) : Color.clear, in: RoundedRectangle(cornerRadius: 10))
                 }
+                if !card.problem.isEmpty {
+                    Label(card.problem, systemImage: "exclamationmark.circle.fill").font(.system(size: 11, weight: .medium)).foregroundStyle(Color.orange)
+                        .lineLimit(2).frame(maxWidth: .infinity, alignment: .leading).padding(6)
+                        .background(Color.orange.opacity(0.12), in: RoundedRectangle(cornerRadius: 10)).accessibilityIdentifier("file-drop-problem")
+                }
                 if card.editing {
-                    FileDropEditor(card: card).frame(height: 70).padding(8).background(fill, in: RoundedRectangle(cornerRadius: 16))
-                        .overlay(RoundedRectangle(cornerRadius: 16).stroke(Color.primary.opacity(0.12)))
-                    Text("↩ 맡기기 · ⇧↩ 줄바꿈 · esc 닫기").font(.system(size: 11)).foregroundStyle(.secondary)
+                    if !card.status.isEmpty && card.sending {
+                        HStack(spacing: 6) { ProgressView().controlSize(.mini); Text(card.status).lineLimit(1) }.font(.system(size: 11)).foregroundStyle(.secondary)
+                    }
+                    HStack(alignment: .bottom, spacing: 8) {
+                        FileDropEditor(card: card).frame(height: 70).padding(8).background(fill, in: RoundedRectangle(cornerRadius: 16))
+                            .overlay(RoundedRectangle(cornerRadius: 16).stroke(Color.primary.opacity(0.12)))
+                        let empty = card.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                        Button { card.submit() } label: { Image(systemName: "arrow.up.circle.fill").font(.system(size: 24)) }
+                            .buttonStyle(.plain).foregroundColor(empty ? quiet : .blue).disabled(empty).accessibilityLabel("보내기")
+                    }
                 } else if let work = card.confirmation {
                     Text("‘\(work)’ 건 자료예요?").font(.system(size: 13, weight: .semibold)).lineLimit(2)
                     Text("맞으면 그 업무에 붙이고 마감을 확인할게요.").font(.system(size: 11)).foregroundStyle(.secondary)
@@ -243,9 +331,10 @@ struct FileDropCardView: View {
                     }.buttonStyle(.bordered).controlSize(.regular)
                 } else {
                     if !card.status.isEmpty {
-                        HStack(spacing: 6) { ProgressView().controlSize(.mini); Text(card.status).lineLimit(1) }.font(.system(size: 11)).foregroundStyle(.secondary)
-                    } else if !card.summary.isEmpty {
-                        Text(card.summary).font(.system(size: 11)).lineLimit(1).help(card.summary)
+                        HStack(spacing: 6) { ProgressView().controlSize(.mini); FileDropShimmerText(text: card.status, active: !card.sending, highlight: .primary.opacity(0.5)).lineLimit(1) }.font(.system(size: 11)).foregroundStyle(.secondary)
+                    } else {
+                        if !card.origin.isEmpty { Text(card.origin).font(.system(size: 11, weight: .medium)).foregroundStyle(.secondary).lineLimit(1).help(card.origin).accessibilityIdentifier("file-drop-origin") }
+                        if !card.summary.isEmpty { Text(card.summary).font(.system(size: 11)).lineLimit(1).help(card.summary) }
                     }
                     if !card.signals.works.isEmpty {
                         Text(card.signals.works.joined(separator: " · ")).font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1)
@@ -256,10 +345,10 @@ struct FileDropCardView: View {
                     if card.payload.count > 0 {
                         HStack(spacing: 8) {
                             Button { card.choose(.init(id: "auto", label: "알아서 봐줘", profile: card.primaryProfile)) } label: {
-                                Text("알아서 봐줘").font(.system(size: 13, weight: .medium)).frame(maxWidth: .infinity).frame(height: 32)
+                                Text("알아서 봐줘").font(.system(size: 13, weight: .medium)).frame(maxWidth: .infinity).frame(height: 32).contentShape(Capsule())
                             }.buttonStyle(.plain).background(Color.blue.opacity(scheme == .dark ? 0.17 : 0.1), in: Capsule())
                             Button { card.choose(.init(id: "opinion", label: "의견", profile: card.primaryProfile)) } label: {
-                                ReplyActionLabel(word: "의견").frame(width: 32, height: 32)
+                                ReplyActionLabel(word: "의견").frame(width: 32, height: 32).contentShape(Circle())
                             }.buttonStyle(.plain).background(fill, in: Circle()).accessibilityLabel("의견")
                         }
                     }
@@ -273,13 +362,11 @@ struct FileDropCardView: View {
     func action(_ suggestion: FileDropSuggestion, first: Bool) -> some View {
         Button { card.choose(suggestion) } label: {
             HStack(spacing: 8) {
-                if let image = card.avatar(suggestion.profile) { Image(nsImage: image).resizable().frame(width: 22, height: 22).clipShape(Circle()) }
-                else { Image(systemName: suggestion.profile == "app" ? "macwindow" : "person.crop.circle.fill").font(.system(size: 20)).foregroundStyle(.secondary) }
-                Text(suggestion.label).font(.system(size: 13, weight: .medium)).lineLimit(1)
+                FileDropFace(profile: suggestion.profile, name: card.profileName(suggestion.profile), avatar: card.avatar(suggestion.profile))
+                FileDropShimmerText(text: suggestion.label, active: !card.status.isEmpty && !card.sending, highlight: .primary.opacity(0.25)).font(.system(size: 13, weight: .medium)).lineLimit(1)
                 Spacer(minLength: 2)
                 if card.sensitive && suggestion.profile != "app" { Image(systemName: "exclamationmark.triangle").foregroundStyle(.yellow) }
                 Text(card.profileName(suggestion.profile)).font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1)
-                if first { Text("↩").font(.system(size: 11)).foregroundStyle(.secondary) }
             }.padding(.horizontal, 8).frame(height: 38).contentShape(RoundedRectangle(cornerRadius: 12))
         }.buttonStyle(.plain).background(fill.opacity(first ? 1.7 : 1), in: RoundedRectangle(cornerRadius: 12))
             .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.primary.opacity(first ? 0.15 : 0), lineWidth: 1))
@@ -333,11 +420,17 @@ private final class FileDropTextView: NSTextView {
 
 private struct FileDropEditor: NSViewRepresentable {
     let card: FileDropCard
+    final class Coordinator: NSObject, NSTextViewDelegate {
+        let card: FileDropCard
+        init(_ card: FileDropCard) { self.card = card }
+        func textDidChange(_ notification: Notification) { if let text = notification.object as? NSTextView { card.draft = text.string } }
+    }
+    func makeCoordinator() -> Coordinator { Coordinator(card) }
     func makeNSView(context: Context) -> NSScrollView {
         let scroll = NSScrollView(); scroll.hasVerticalScroller = true; scroll.drawsBackground = false; scroll.contentView.drawsBackground = false
         let text = FileDropTextView(); text.card = card; text.isRichText = false; text.font = .systemFont(ofSize: 13); text.drawsBackground = false
         text.textColor = .labelColor; text.insertionPointColor = .labelColor; text.textContainerInset = NSSize(width: 4, height: 4); text.textContainer?.lineFragmentPadding = 0
-        text.string = card.draft
+        text.string = card.draft; text.delegate = context.coordinator
         text.isVerticallyResizable = true; text.autoresizingMask = [.width]; text.textContainer?.widthTracksTextView = true
         scroll.documentView = text
         DispatchQueue.main.async { text.window?.makeKeyAndOrderFront(nil); text.window?.makeFirstResponder(text) }

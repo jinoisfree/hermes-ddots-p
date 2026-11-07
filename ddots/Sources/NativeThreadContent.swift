@@ -106,6 +106,7 @@ extension ChatView {
                 list.append(.stack(faces: Array(faces), title: title, toggle: { slack.toggle(thread) }, identifier: "stack-" + thread.id))
             }
             for reply in shown.replies { list += pieces(for: reply) + extras(for: reply) }
+            if inputs.interrupted { list.append(host("interrupted:" + thread.id) { interruptedCaption }) }
             for indicator in writing { list.append(host("typing:" + indicator.id) { typingBubble(indicator, compact: true) }) }
             if let control = AgentStop.control(working: AgentStop.working(thread, typing: writing), stopped: slack.stopped.contains(thread.id)) {
                 list.append(host("stop:" + thread.id) { stopControl(original, control: control) })

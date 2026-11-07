@@ -13,6 +13,10 @@ struct DraftEditor: View {
     var focus: Binding<Bool>
     var onPaste: (() -> Bool)?
     var onSubmit: () -> Void
+    /// The composer grows to this many lines, then scrolls.
+    var maxLines = 5
+    /// The height the field has now, for a host that makes room for it.
+    var onHeight: ((CGFloat) -> Void)?
     @AppearanceRevisionState private var appearanceRevision = ChatAppearance.revision
     @DraftHeightState private var height: CGFloat = 16
     @DraftFormatState private var formatting = DraftFormatController()
@@ -25,9 +29,10 @@ struct DraftEditor: View {
                     Text(prompt).font(.system(size: ChatMetrics.bodyFont)).foregroundColor(.secondary).allowsHitTesting(false)
                 }
                 NativeDraft(text: $text, focused: focus, height: $height, formatting: formatting,
-                            prompt: prompt, onPaste: onPaste, onSubmit: onSubmit)
+                            prompt: prompt, maxLines: maxLines, onPaste: onPaste, onSubmit: onSubmit)
             }.frame(height: height)
-        }.onReceive(NotificationCenter.default.publisher(for: ChatAppearance.didChange)) { _ in appearanceRevision = ChatAppearance.revision }
+        }.onChange(of: height) { onHeight?($0) }
+        .onReceive(NotificationCenter.default.publisher(for: ChatAppearance.didChange)) { _ in appearanceRevision = ChatAppearance.revision }
     }
 }
 
@@ -37,6 +42,7 @@ private struct NativeDraft: NSViewRepresentable {
     @Binding var height: CGFloat
     let formatting: DraftFormatController
     let prompt: String
+    var maxLines = 5
     var bodySize = ChatMetrics.bodyFont
     var onPaste: (() -> Bool)?
     var onSubmit: () -> Void
@@ -44,6 +50,7 @@ private struct NativeDraft: NSViewRepresentable {
     func makeCoordinator() -> Coordinator { Coordinator(self) }
     func makeNSView(context: Context) -> DraftScrollView {
         let scroll = DraftScrollView()
+        scroll.maxLines = maxLines
         scroll.editor.delegate = context.coordinator
         formatting.editor = scroll.editor
         scroll.editor.formattingController = formatting
@@ -181,6 +188,7 @@ final class DraftTextView: NSTextView {
 final class DraftScrollView: NSScrollView {
     let editor = DraftTextView(frame: .zero)
     var onHeight: ((CGFloat) -> Void)?
+    var maxLines = 5
     private var measuring = false
     override init(frame: NSRect) {
         super.init(frame: frame)
@@ -218,6 +226,6 @@ final class DraftScrollView: NSScrollView {
         let used = max(line, ceil(max(layout.usedRect(for: container).maxY, layout.extraLineFragmentRect.maxY)))
         let height = max(used, contentSize.height)
         if abs(editor.frame.height - height) > 0.5 { editor.setFrameSize(NSSize(width: width, height: height)) }
-        onHeight?(min(used, line * 5))
+        onHeight?(min(used, line * CGFloat(maxLines)))
     }
 }

@@ -247,7 +247,16 @@ def guard(home, learning, *, tool_name, args, session_id, turn_id="", tool_call_
         tool_name.startswith('diagnosis_') or tool_name in {'team_project', 'skill_view', 'skills_list',
             'team_recall', 'team_learn', 'team_learn_review', 'team_skill_review', 'memory', 'request_usage_lookup'}
     ):
-        return {'action': 'block', 'message': _owner_text('<<doctor_name>>은 ddots·Hermes 시스템 진단만 맡는다. 문서 도구는 <<work_name>>에게 넘긴다.')}
+        if tool_name == 'paseo':
+            # Same single owner decision the execution layer enforces; the diagnosis-only
+            # direct-request restriction stays with the diagnosis turn (2026-11-07).
+            from hermes_governance import paseo_authority
+            try:
+                paseo_authority.require(home, session_id=session_id)
+            except Exception:
+                return {'action': 'block', 'message': 'Paseo는 현재 소유자의 직접 요청에서만 쓴다.'}
+        else:
+            return {'action': 'block', 'message': _owner_text('<<doctor_name>>은 ddots·Hermes 시스템 진단만 맡는다. 문서 도구는 <<work_name>>에게 넘긴다.')}
     if turn.get("ambiguous_approval") and tool_name != "team_project" and not gmail_native_write(tool_name, args):
         return {"action": "block", "message": "승인할 작업을 먼저 선택해야 한다."}
     # Native search has no enforceable cross-profile/project ACL. Project recall

@@ -1,7 +1,7 @@
 import Foundation
 import Darwin
 
-enum FileDropServiceError: Error { case unavailable, sensitive }
+enum FileDropServiceError: Error { case unavailable, sensitive, notConnected }
 
 /// The process boundary accepts/returns JSON only; diagnostics never contain input or stderr.
 enum FileDropRunner {
