@@ -60,7 +60,85 @@ struct ConversationTests {
         check(!record.overlapped && record.offMain && record.answeredOnMain, "sends run one at a time off the main thread and answer on it")
     }
 
+    static func checkChatAppearance() {
+        let suite = "chat-appearance-test-" + UUID().uuidString
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        check(ChatAppearance.color(defaults) == .blue && ChatAppearance.fontSize(defaults) == 14, "missing appearance preferences use defaults")
+        defaults.set("unknown", forKey: ChatAppearance.colorKey)
+        check(ChatAppearance.color(defaults) == .blue, "unknown color uses blue")
+        for value in [-1.0, 0, 11, 17, 21, 200] {
+            defaults.set(value, forKey: ChatAppearance.fontKey)
+            check(ChatAppearance.fontSize(defaults) == 14, "unsupported font sizes use 14pt")
+        }
+        var notices = 0
+        let observer = NotificationCenter.default.addObserver(forName: ChatAppearance.didChange, object: nil, queue: nil) { _ in notices += 1 }
+        defer { NotificationCenter.default.removeObserver(observer) }
+        for value in ChatAppearance.fontSizes {
+            ChatAppearance.setFontSize(value, defaults: defaults)
+            check(ChatAppearance.fontSize(defaults) == value, "seven font sizes persist")
+            let draft = MessageFormat.editor("크기를 바꿔도 보낼 글은 그대로", bodySize: value)
+            check((draft.attribute(.font, at: 0, effectiveRange: nil) as? NSFont)?.pointSize == value, "composer uses selected absolute size")
+            check(MessageFormat.serialize(draft, baseSize: value) == "크기를 바꿔도 보낼 글은 그대로", "local size is never serialized into the message")
+            let body = MessageFormat.renderNative("본문 확인", bodySize: value)
+            check((body.attribute(.font, at: 0, effectiveRange: nil) as? NSFont)?.pointSize == value, "native body uses selected absolute size")
+            let code = MessageFormat.renderNative("`code`", bodySize: value)
+            check((code.attribute(.font, at: 0, effectiveRange: nil) as? NSFont)?.pointSize == value - 1, "code uses body minus one")
+        }
+        for color in UserBubbleColor.allCases {
+            ChatAppearance.setColor(color, defaults: defaults)
+            check(ChatAppearance.color(defaults) == color, "color identifier persists")
+        }
+        let explicitlySized = "<span style=\"font-size:20px\">직접 고른 크기</span>"
+        check(MessageFormat.serialize(MessageFormat.editor(explicitlySized, bodySize: 20), baseSize: 20) == explicitlySized, "explicit size survives even when equal to the local display size")
+        check(notices == 21, "font and color changes notify observers")
+        check(ChatMetrics.nameFont == 14 && ChatMetrics.auxiliaryFont == 11, "supporting fonts stay unchanged")
+        func blend(_ color: PaletteRGB, over base: PaletteRGB) -> PaletteRGB {
+            PaletteRGB(r: color.r * 0.6 + base.r * 0.4, g: color.g * 0.6 + base.g * 0.4, b: color.b * 0.6 + base.b * 0.4)
+        }
+        // Independent WCAG calculation: do not use the palette's contrast property as the oracle.
+        func ratio(_ a: PaletteRGB, _ b: PaletteRGB) -> Double {
+            func luminance(_ c: PaletteRGB) -> Double {
+                let channels = [c.r, c.g, c.b].map { $0 <= 0.04045 ? $0 / 12.92 : pow(($0 + 0.055) / 1.055, 2.4) }
+                return zip(channels, [0.2126, 0.7152, 0.0722]).map(*).reduce(0, +)
+            }
+            let x = luminance(a), y = luminance(b)
+            return (max(x, y) + 0.05) / (min(x, y) + 0.05)
+        }
+        print("appearance mode color fill text normal pending-text pending")
+        for dark in [false, true] {
+            let backdrop = PaletteRGB(r: dark ? 0.15 : 0.93, g: dark ? 0.15 : 0.93, b: dark ? 0.15 : 0.93)
+            var systemBlue = PaletteRGB.black
+            NSAppearance(named: dark ? .darkAqua : .aqua)!.performAsCurrentDrawingAppearance {
+                let c = NSColor.systemBlue.usingColorSpace(.sRGB)!
+                systemBlue = PaletteRGB(r: c.redComponent, g: c.greenComponent, b: c.blueComponent)
+            }
+            for color in UserBubbleColor.allCases {
+                let palette = UserBubblePalette(color: color, dark: dark)
+                let pending = UserBubblePalette(color: color, dark: dark, pending: true)
+                check(ratio(palette.background, palette.foreground) >= 4.5, "T-02 every resolved user color has AA text contrast")
+                check(palette.link == palette.foreground && pending.link == pending.foreground, "links use the contrast-tested text color")
+                let blended = blend(palette.background, over: backdrop)
+                check(pending.alpha == 0.6 && palette.alpha == 1, "pending changes only fill alpha")
+                check(ratio(blended, pending.foreground) >= 4.5, "T-03 all pending colors have AA text contrast")
+                if color == .blue {
+                    check(palette.foreground == .white, "default blue retains white text")
+                    let scale = palette.background.b / systemBlue.b
+                    check(abs(palette.background.r - systemBlue.r * scale) < 1e-12 && abs(palette.background.g - systemBlue.g * scale) < 1e-12, "default blue preserves hue and saturation")
+                    let brighter = PaletteRGB(r: systemBlue.r * (scale + 1e-7), g: systemBlue.g * (scale + 1e-7), b: systemBlue.b * (scale + 1e-7))
+                    check(ratio(brighter, .white) < 4.55, "a brighter default blue fails the rounding margin")
+                    let rounded = PaletteRGB(r: (palette.background.r * 255).rounded() / 255, g: (palette.background.g * 255).rounded() / 255, b: (palette.background.b * 255).rounded() / 255)
+                    check(ratio(rounded, .white) >= 4.5, "C-4 rounded 8-bit default blue retains AA contrast")
+                    print(String(format: "default-blue %@ sRGB %.12f %.12f %.12f white %.12f", dark ? "dark" : "light", palette.background.r, palette.background.g, palette.background.b, ratio(palette.background, .white)))
+                }
+                print(String(format: "%@ %@ %@ %@ %.6f %@ %.6f", dark ? "dark" : "light", color.rawValue,
+                    palette.background.hex, palette.foreground.hex, ratio(palette.background, palette.foreground), pending.foreground.hex, ratio(blended, pending.foreground)))
+            }
+        }
+    }
+
     static func main() throws {
+        checkChatAppearance()
         var memo = ChatTimelineMemo()
         var sample = [message("memo1", "first", at: 1), message("memo2", "second", at: 2)]
         check(memo.merge(sample, pending: []) == ChatTimeline.merge(sample, pending: []), "memo preserves merge")

@@ -160,7 +160,9 @@ extension AppDelegate {
                          #selector(toggleBubbleAlwaysShown(_:)), #selector(toggleThreeTap)] {
             smokeCheck(actions.contains(NSStringFromSelector(selector)), "Settings preserve " + NSStringFromSelector(selector))
         }
-        smokeCheck(chatThemePicker?.itemTitles == ChatTheme.allCases.map(\.title), "All three theme choices remain")
+        if let picker = chatThemePicker {
+            smokeCheck((0..<picker.segmentCount).compactMap { picker.label(forSegment: $0) } == ["시스템 설정", "라이트", "다크"], "All three theme choices remain")
+        } else { smokeFailed("Theme control missing") }
         NSApp.terminate(nil)
     }
 }

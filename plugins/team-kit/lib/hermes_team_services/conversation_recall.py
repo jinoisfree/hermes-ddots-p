@@ -222,6 +222,48 @@ def candidates(db, terms):
     return result
 
 
+def search_digests(home, query, cfg, *, now, limit=10):
+    """Sessionless hints with retrieve's safety gates; no seen state or file writes."""
+    terms = terms_for(query)
+    if not terms or not cfg:
+        return []
+    deadline = time.monotonic() + cfg['timeout_ms'] / 1000
+    found = []
+    with closing(connect(home, deadline)) as db:
+        sessions, roots = groups(db)
+        members = {}
+        for sid, group in roots.items():
+            members.setdefault(group, []).append(sid)
+        latest = {}
+        for d in read_digests(home):
+            check(deadline)
+            ids = d['session_ids']
+            if not ids or any(sid not in sessions for sid in ids):
+                continue
+            if d['source'] not in ('slack', 'photon') or any(sessions[sid]['source'] not in ('slack', 'photon') for sid in ids):
+                continue
+            if d.get('timestamp', 0) > now or d.get('exclude_tools') != sorted(cfg['exclude_tools']):
+                continue
+            group = roots[ids[0]]
+            if any(roots[sid] != group for sid in ids):
+                continue
+            if group not in latest:
+                lineage = members[group]
+                marks = ','.join('?' * len(lineage))
+                latest[group] = db.execute(f'SELECT COALESCE(MAX(id),0) FROM messages WHERE session_id IN ({marks})', lineage).fetchone()[0]
+            if latest[group] > d['last_message_id']:
+                continue
+            text = ' '.join([d['title'], d['summary'], *d['keywords']]).casefold()
+            matches = sum(t in text for t in terms)
+            if matches >= 2:
+                found.append((matches, d['timestamp'], group, d))
+    found.sort(key=lambda row: (-row[0], -row[1], row[2]))
+    unique = {}
+    for _, _, group, d in found:
+        unique.setdefault(group, d)
+    return list(unique.values())[:max(0, min(limit, 10))]
+
+
 def retrieve(home, session_id, user_message, cfg, *, now, deadline, bridged=True):
     """Internal pure retrieval; returns (block, group ids). Used by time-sliced evaluation."""
     with closing(connect(home, deadline)) as db:

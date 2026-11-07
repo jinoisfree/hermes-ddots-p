@@ -58,6 +58,23 @@ final class ClipboardAttachments {
         board.availableType(from: [.fileURL, .png, .tiff]) != nil
     }
 
+    /// Shared by conversation attachments and the folded pet. Only metadata is read here.
+    static func validate(_ urls: [URL], available: Int) -> Result {
+        var result = Result(), notices: [String] = []
+        for url in urls {
+            guard let values = try? url.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey]), values.isRegularFile == true,
+                  FileManager.default.isReadableFile(atPath: url.path) else {
+                notices.append("읽을 수 있는 파일만 첨부할 수 있어요. 폴더는 압축한 뒤 첨부해 주세요."); continue
+            }
+            guard (values.fileSize ?? 0) <= SlackFileStore.largest else { notices.append("200MB보다 큰 파일은 뺐어요."); continue }
+            guard !result.files.contains(url) else { continue }
+            guard result.files.count < available else { notices.append("사진·파일은 한 번에 10개까지 첨부할 수 있어요."); continue }
+            result.files.append(url)
+        }
+        result.notice = notices.isEmpty ? nil : Array(NSOrderedSet(array: notices)).compactMap { $0 as? String }.joined(separator: " ")
+        return result
+    }
+
     /// nil leaves ordinary text paste to the text editor.
     func read(_ board: NSPasteboard, available: Int, temporary: SlackTemporaryFiles? = nil) -> Result? {
         let urls = (board.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL]) ?? []
@@ -65,17 +82,7 @@ final class ClipboardAttachments {
         guard !urls.isEmpty || board.availableType(from: imageTypes) != nil else { return nil }
         guard available > 0 else { return Result(notice: "사진·파일은 한 번에 10개까지 첨부할 수 있어요.") }
         if !urls.isEmpty {
-            var result = Result()
-            for url in urls {
-                guard result.files.count < available else { result.notice = "사진·파일은 한 번에 10개까지 첨부할 수 있어요."; break }
-                guard let values = try? url.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey]), values.isRegularFile == true,
-                      FileManager.default.isReadableFile(atPath: url.path) else {
-                    result.notice = "읽을 수 있는 파일만 첨부할 수 있어요. 폴더는 압축한 뒤 첨부해 주세요."; continue
-                }
-                guard (values.fileSize ?? 0) <= SlackFileStore.largest else { result.notice = "200MB보다 큰 파일은 첨부할 수 없어요."; continue }
-                if !result.files.contains(url) { result.files.append(url) }
-            }
-            return result
+            return Self.validate(urls, available: available)
         }
         guard let type = board.availableType(from: imageTypes), let data = board.data(forType: type),
               data.count <= SlackFileStore.largest,

@@ -16,6 +16,8 @@ trap 'rm -r "$TEST_CONFIG"' EXIT
 export DDOTS_CONFIG_ROOT="$TEST_CONFIG/record" HERMES_HOME="$TEST_CONFIG/hermes"
 mkdir -p "$HERMES_HOME"
 python3 "$ROOT/Tests/prepare_config.py" "$DDOTS_CONFIG_ROOT"
+xcrun swiftc -swift-version 5 "$ROOT/Sources/AppIdentity.swift" "$ROOT/Sources/SettingsSync.swift" "$ROOT/Sources/FileDropHistory.swift" "$ROOT/Tests/FileDropHistoryTests.swift" -o "$ROOT/.build/FileDropHistoryTests"
+"$ROOT/.build/FileDropHistoryTests"
 xcrun swiftc -swift-version 5 "$ROOT/Sources/OptionsLayout.swift" "$ROOT/Tests/OptionsLayoutTests.swift" -o "$ROOT/.build/OptionsLayoutTests"
 "$ROOT/.build/OptionsLayoutTests"
 xcrun swiftc -swift-version 5 "$ROOT/Sources/UpdateIdlePolicy.swift" "$ROOT/Sources/UpdateReminder.swift" "$ROOT/Tests/UpdateIdlePolicyTests.swift" -o "$ROOT/.build/UpdateIdlePolicyTests"
@@ -81,8 +83,10 @@ xcrun swiftc "$ROOT/Sources/HermesRouting.swift" "$ROOT/Sources/DdotsConfig.swif
 bash "$ROOT/scripts/compare_pet_rendering.sh"
 xcrun swiftc "$ROOT/Sources/HermesRouting.swift" "$ROOT/Sources/DdotsConfig.swift" "$ROOT/Sources/HermesLocator.swift" -swift-version 5 -module-cache-path "$ROOT/.build/module-cache" "$ROOT/Sources/AppIdentity.swift" "$ROOT/Sources/LoginLaunch.swift" "$ROOT/Tests/LoginLaunchTests.swift" -o "$ROOT/.build/LoginLaunchTests"
 "$ROOT/.build/LoginLaunchTests"
-xcrun swiftc "$ROOT/Sources/HermesRouting.swift" "$ROOT/Sources/DdotsConfig.swift" -swift-version 5 -module-cache-path "$ROOT/.build/module-cache" "$ROOT/Sources/AppIdentity.swift" "$ROOT/Sources/PetLayout.swift" "$ROOT/Sources/CalendarMatch.swift" "$ROOT/Sources/Conversation.swift" "$ROOT/Sources/MessageFormat.swift" "$ROOT/Sources/ProfileAvatar.swift" "$ROOT/Sources/ChatStyle.swift" "$ROOT/Sources/BubbleOpacity.swift" "$ROOT/Sources/HermesLocator.swift" "$ROOT/Sources/HermesBridge.swift" "$ROOT/Sources/LoginLaunch.swift" "$ROOT/Sources/ThreeTap.swift" "$ROOT/Sources/ThreeTapNotice.swift" "$ROOT/Sources/Usage.swift" "$ROOT/Sources/UsageSources.swift" "$ROOT/Sources/StreamPreview.swift" "$ROOT/Sources/HermesRelay.swift" "$ROOT/Sources/SettingsSync.swift" "$ROOT/Sources/HermesRelayServer.swift" "$ROOT/Sources/RemoteHermes.swift" "$ROOT/Sources/RelayPortraits.swift" "$ROOT/Tests/RelayTests.swift" -o "$ROOT/.build/RelayTests"
+xcrun swiftc "$ROOT/Sources/HermesRouting.swift" "$ROOT/Sources/DdotsConfig.swift" -swift-version 5 -module-cache-path "$ROOT/.build/module-cache" "$ROOT/Sources/AppIdentity.swift" "$ROOT/Sources/PetLayout.swift" "$ROOT/Sources/CalendarMatch.swift" "$ROOT/Sources/Conversation.swift" "$ROOT/Sources/MessageFormat.swift" "$ROOT/Sources/ProfileAvatar.swift" "$ROOT/Sources/ChatStyle.swift" "$ROOT/Sources/BubbleOpacity.swift" "$ROOT/Sources/HermesLocator.swift" "$ROOT/Sources/HermesBridge.swift" "$ROOT/Sources/LoginLaunch.swift" "$ROOT/Sources/ThreeTap.swift" "$ROOT/Sources/ThreeTapNotice.swift" "$ROOT/Sources/Usage.swift" "$ROOT/Sources/UsageSources.swift" "$ROOT/Sources/StreamPreview.swift" "$ROOT/Sources/AgentConnections.swift" "$ROOT/Sources/HermesRelay.swift" "$ROOT/Sources/SettingsSync.swift" "$ROOT/Sources/FileDropHistory.swift" "$ROOT/Sources/FileDropService.swift" "$ROOT/Sources/HermesRelayServer.swift" "$ROOT/Sources/RemoteHermes.swift" "$ROOT/Sources/RelayPortraits.swift" "$ROOT/Tests/RelayTests.swift" -o "$ROOT/.build/RelayTests"
 "$ROOT/.build/RelayTests"
+xcrun swiftc "$ROOT/Sources/HermesRouting.swift" "$ROOT/Sources/DdotsConfig.swift" -swift-version 5 -module-cache-path "$ROOT/.build/module-cache" "$ROOT/Sources/AppIdentity.swift" "$ROOT/Sources/PetLayout.swift" "$ROOT/Sources/CalendarMatch.swift" "$ROOT/Sources/Conversation.swift" "$ROOT/Sources/MessageFormat.swift" "$ROOT/Sources/ProfileAvatar.swift" "$ROOT/Sources/ChatStyle.swift" "$ROOT/Sources/BubbleOpacity.swift" "$ROOT/Sources/HermesLocator.swift" "$ROOT/Sources/HermesBridge.swift" "$ROOT/Sources/LoginLaunch.swift" "$ROOT/Sources/ThreeTap.swift" "$ROOT/Sources/ThreeTapNotice.swift" "$ROOT/Sources/Usage.swift" "$ROOT/Sources/UsageSources.swift" "$ROOT/Sources/StreamPreview.swift" "$ROOT/Sources/AgentConnections.swift" "$ROOT/Sources/HermesRelay.swift" "$ROOT/Sources/SettingsSync.swift" "$ROOT/Sources/FileDropHistory.swift" "$ROOT/Sources/FileDropService.swift" "$ROOT/Sources/HermesRelayServer.swift" "$ROOT/Sources/RemoteHermes.swift" "$ROOT/Sources/RelayPortraits.swift" "$ROOT/Tests/FileDropRelayTests.swift" -o "$ROOT/.build/FileDropRelayTests"
+"$ROOT/.build/FileDropRelayTests"
 xcrun swiftc "$ROOT/Sources/HermesRouting.swift" "$ROOT/Sources/DdotsConfig.swift" "$ROOT/Sources/HermesLocator.swift" -swift-version 5 -module-cache-path "$ROOT/.build/module-cache" "$ROOT/Sources/CalendarMatch.swift" "$ROOT/Sources/MacCalendar.swift" "$ROOT/Tests/CalendarTests.swift" -o "$ROOT/.build/CalendarTests"
 "$ROOT/.build/CalendarTests"
 # The hook checks run the app itself. It is built here from these sources, so they never judge whatever build dist happens to hold.
@@ -95,3 +99,10 @@ xcrun swiftc "$ROOT/Sources/HermesRouting.swift" "$ROOT/Sources/DdotsConfig.swif
 "$ROOT/.build/GenieTraceTests"
 xcrun swiftc "$ROOT/Sources/HermesRouting.swift" "$ROOT/Sources/DdotsConfig.swift" "$ROOT/Sources/HermesLocator.swift" -swift-version 5 -module-cache-path "$ROOT/.build/module-cache" "$ROOT/Sources/StallTrace.swift" "$ROOT/Tests/StallTraceTests.swift" -o "$ROOT/.build/StallTraceTests"
 "$ROOT/.build/StallTraceTests"
+
+xcrun swiftc -swift-version 5 "$ROOT/Sources/AgentConnections.swift" "$ROOT/Tests/AgentConnectionsTests.swift" -o "$ROOT/.build/AgentConnectionsTests"
+if [ -f "$ROOT/../hermes/schemas/connections-status.json" ]; then
+  "$ROOT/.build/AgentConnectionsTests" "$ROOT/../hermes/schemas/connections-status.json" "$ROOT/Sources"
+else
+  "$ROOT/.build/AgentConnectionsTests"
+fi

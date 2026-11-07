@@ -1,0 +1,124 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "checked_at",
+    "agents"
+  ],
+  "properties": {
+    "schema": {
+      "const": "hermes-connections/1"
+    },
+    "checked_at": {
+      "type": "string"
+    },
+    "agents": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "profile",
+          "display_name",
+          "connections"
+        ],
+        "properties": {
+          "profile": {
+            "type": "string"
+          },
+          "display_name": {
+            "type": "string"
+          },
+          "connections": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "id": {
+                  "type": "string"
+                },
+                "service": {
+                  "type": "string"
+                },
+                "label": {
+                  "type": "string"
+                },
+                "reason": {
+                  "type": "string"
+                },
+                "checked_at": {
+                  "type": "string"
+                },
+                "group": {
+                  "enum": [
+                    "account",
+                    "mac",
+                    "channel"
+                  ]
+                },
+                "state": {
+                  "enum": [
+                    "connected",
+                    "needs_reconnect",
+                    "not_connected",
+                    "unknown",
+                    "off"
+                  ]
+                },
+                "account": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "scope": {
+                  "enum": [
+                    "personal",
+                    "company",
+                    null
+                  ]
+                },
+                "reconnect": {
+                  "enum": [
+                    "personal",
+                    "company",
+                    null
+                  ]
+                },
+                "capabilities": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "rules": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              },
+              "required": [
+                "id",
+                "service",
+                "label",
+                "reason",
+                "checked_at",
+                "group",
+                "state",
+                "account",
+                "scope",
+                "reconnect",
+                "capabilities",
+                "rules"
+              ]
+            }
+          }
+        }
+      }
+    }
+  }
+}

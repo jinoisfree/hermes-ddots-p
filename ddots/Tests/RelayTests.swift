@@ -157,6 +157,11 @@ import SQLite3
                     ServiceUsage(observedAt: usageNow, maxAge: 3600, windows: [UsageWindow(weekly: false, usedPercent: 2), UsageWindow(weekly: true, usedPercent: 41)]))
         }
         var server = HermesRelayServer(home: home, token: token, interval: 0.1, sendsMessages: true, readUsage: fakeUsage)
+        let connectionCommand = home.appendingPathComponent("bin/hermes-connections")
+        try FileManager.default.createDirectory(at: connectionCommand.deletingLastPathComponent(), withIntermediateDirectories: true)
+        let connectionJSON = #"{"schema":"hermes-connections/1","checked_at":"2026-11-07T00:00:00Z","agents":[]}"#
+        try Data("#!/bin/sh\nprintf '%s' '\(connectionJSON)'\n".utf8).write(to: connectionCommand)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: connectionCommand.path)
         let maintenanceLock = NSLock()
         var maintenance: [ThreeTapFailure] = []
         server.onTapFailure = { failure in maintenanceLock.lock(); maintenance.append(failure); maintenanceLock.unlock() }
@@ -170,6 +175,7 @@ import SQLite3
         intruder.start()
         check(wait(3) { intruder.poll(unreadSince: nil).status == .unavailable(RemoteHermes.denied) } != nil, "wrong code is told so")
         check(intruder.poll(unreadSince: nil).messages.isEmpty && intruder.search("합성").isEmpty, "wrong code receives no conversation")
+        do { _ = try intruder.connectionStatus(); check(false, "wrong code cannot read connections") } catch {}
         intruder.stop()
         check(server.polls == 0, "wrong code never triggers a read")
         check({ usageLock.lock(); defer { usageLock.unlock() }; return usageReads == 0 }(), "usage is not read before a Mac is authorized")
@@ -199,6 +205,14 @@ import SQLite3
         client.start(); client.start(); client.reportTapFailure(tapFailure)
         check(wait(3) { client.poll(unreadSince: nil).messages.count == 3 } != nil, "conversation arrives after connecting")
         check(wait(3) { client.usage != nil } != nil, "sharing Mac's Paseo usage arrives with the state")
+        let connectionDocument = try client.connectionStatus()
+        check(connectionDocument.schema == "hermes-connections/1", "authenticated connections round trip")
+        var connectionFrame = RelayFrame(op: "result"); connectionFrame.connections = connectionDocument
+        check(connectionFrame.line().count < RelayFrame.maximumAuthorizedLine, "connection result fits authorized frame limit")
+        // A cached reply is still available after the underlying command disappears.
+        try FileManager.default.removeItem(at: connectionCommand)
+        let cachedDocument = try client.connectionStatus()
+        check(cachedDocument.checked_at == connectionDocument.checked_at, "relay reuses the recent status")
         let streamFolder = home.appendingPathComponent("cache/ddots-streams")
         try FileManager.default.createDirectory(at: streamFolder, withIntermediateDirectories: true)
         let streamFile = streamFolder.appendingPathComponent("preview.json")
@@ -339,8 +353,39 @@ import SQLite3
         check(wait(15) { !quiet.poll(unreadSince: nil).characters.isEmpty } != nil, "default server still sends names")
         check(quiet.poll(unreadSince: nil).messages.isEmpty && quiet.search("답변").isEmpty, "default server sends no message bodies or search results")
         quiet.stop(); server.stop()
+        try legacyConnectionsCheck(token: token)
         try syncChecks(home: home, token: token)
         print("PASS: \(passed) relay wire, code, live delivery, request, reconnect and shared settings checks")
+    }
+
+    /// A genuine TCP peer with the old protocol: accepts hello, ignores the new operation.
+    static func legacyConnectionsCheck(token: String) throws {
+        let queue = DispatchQueue(label: "relay-test-legacy")
+        let listener = try NWListener(using: .tcp, on: .any)
+        let ready = DispatchSemaphore(value: 0)
+        var peer: NWConnection?
+        listener.stateUpdateHandler = { if case .ready = $0 { ready.signal() } }
+        listener.newConnectionHandler = { connection in
+            peer = connection
+            connection.start(queue: queue)
+            connection.receive(minimumIncompleteLength: 1, maximumLength: 8192) { data, _, _, _ in
+                guard var data, RelayFrame.take(from: &data).first??.token == token else { return }
+                connection.send(content: RelayFrame(op: "welcome").line(), completion: .contentProcessed { _ in })
+            }
+        }
+        listener.start(queue: queue)
+        defer { queue.sync { peer?.cancel() }; listener.cancel() }
+        check(ready.wait(timeout: .now() + 3) == .success, "legacy listener starts")
+        let client = RemoteHermes(host: "127.0.0.1", port: listener.port!.rawValue, token: token)
+        client.start()
+        defer { client.stop() }
+        check(wait(3) { client.linked } != nil, "legacy peer accepts authenticated hello")
+        let start = Date()
+        do { _ = try client.connectionStatus(); check(false, "legacy peer cannot produce connections") }
+        catch ConnectionFailure.oldRelay {
+            check(Date().timeIntervalSince(start) < 10, "legacy silence produces update guidance within ten seconds")
+            check(client.linked, "new request timeout preserves the existing relay link")
+        }
     }
 
     static func syncChecks(home: URL, token: String) throws {

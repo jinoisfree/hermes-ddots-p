@@ -91,6 +91,11 @@ final class ChatModel: ObservableObject {
         if searchOpen { closeSearch() }
         focusDraftRevision += 1
     }
+    func appearanceChanged() {
+        rendering.removeAll(); displayMemo.removeAll()
+        replyHeights.removeAll(); replyHeightBases.removeAll()
+        objectWillChange.send()
+    }
     private var replyHeights: [String: CGFloat] = [:]
     private var replyHeightBases: [String: CGFloat] = [:]
     var onReplyLayout: (() -> Void)?
@@ -351,7 +356,7 @@ final class ChatModel: ObservableObject {
     }
     private func renderedText(_ message: ChatMessage) -> AttributedString {
         if rendering[message.id]?.0 != message.body {
-            let text = MessageFormat.render(message.body)
+            let text = MessageFormat.render(message.body, bodySize: ChatMetrics.bodyFont)
             rendering[message.id] = (message.body,ChatText.linkified(text))
         }
         return rendering[message.id]!.1

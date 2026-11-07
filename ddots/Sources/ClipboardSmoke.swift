@@ -8,6 +8,8 @@ private enum ClipboardSmokeCleanup {
 
 extension AppDelegate {
     @MainActor func verifyClipboard(destination: URL) async {
+        let dropEnabled = fileDrop.enabled; fileDrop.enabled = false
+        defer { fileDrop.enabled = dropEnabled }
         let fm = FileManager.default
         let base = fm.temporaryDirectory.appendingPathComponent("ddots-clipboard-smoke-" + UUID().uuidString)
         do { try fm.createDirectory(at: base, withIntermediateDirectories: true) }

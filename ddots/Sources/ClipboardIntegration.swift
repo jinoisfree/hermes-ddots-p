@@ -63,7 +63,8 @@ extension AppDelegate {
         // and transition own the live frame; a hidden clipboard row cannot supply their height.
         if chatExpanded { bubbleSize = folded; pet.foldedHeight = folded.height; return }
         var size = folded
-        if pet.clipboardPresented {
+        if fileDrop.visible { size = fileDrop.size }
+        else if pet.clipboardPresented {
             var screen = panel.screen?.visibleFrame.size ?? clipboardPreferredSize
             screen.height -= PetLayout(scale: pet.petScale).spriteSize.height + 16
             size = ClipboardDrawer.constrained(clipboardPreferredSize, screen: screen)

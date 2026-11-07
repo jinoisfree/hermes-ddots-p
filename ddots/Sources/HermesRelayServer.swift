@@ -6,6 +6,8 @@ import Foundation
 final class HermesRelayServer {
     private final class Client {
         let fd: Int32
+        var drops: [Int: FileDropUpload] = [:]
+        var dropRunning = false
         var source: DispatchSourceRead?
         var buffer = Data()
         var authorized = false
@@ -22,6 +24,8 @@ final class HermesRelayServer {
         var streams: [StreamPreview]?
         var slack: SlackActivity?
         /// The Slack account whose shared choices this Mac follows, and what of them it already has.
+        var dropSyncUser: String?
+        var dropSyncSent: [String: SyncEntry] = [:]
         var syncUser: String?
         var syncSent: [String: SyncEntry] = [:]
         var lastSent = Date.distantPast
@@ -36,12 +40,20 @@ final class HermesRelayServer {
     /// Shared screen choices, one file per Slack account, kept on this Mac. See `SettingsSync.swift`.
     private let syncFolder: URL
     private var syncStores: [String: SettingsStore] = [:]
+    private let connectionHome: URL?
+    private lazy var connectionCache = AgentConnectionCache { [connectionHome] in
+        let home = connectionHome ?? HermesLocator.shared.locate() ?? HermesLocator.shared.fallbackHome
+        return try AgentConnectionDocument.decode(AgentConnectionCommand.run(
+            executable: home.appendingPathComponent("bin/hermes-connections"), arguments: ["status", "--json"]))
+    }
     private var clients: [Int32: Client] = [:]
     private var streamTimer: DispatchSourceTimer?
     private var timer: DispatchSourceTimer?
     private let interval: TimeInterval
     private(set) var polls = 0
     var onTapFailure: ((ThreeTapFailure) -> Void)?
+    var dropSuggest: ((Data) throws -> Data)?
+    var dropOriginalsAllowed: ((Int32) -> Bool)?
     // Paseo usage of this Mac, read off the relay queue at most once a minute while another Mac is connected.
     private let usageQueue = DispatchQueue(label: AppIdentity.bundleID + ".relay-usage", qos: .utility)
     private let readUsage: () -> (codex: ServiceUsage?, claude: ServiceUsage?)?
@@ -57,6 +69,7 @@ final class HermesRelayServer {
          usageInterval: TimeInterval = 60, sendsMessages: Bool = IMessageFeature.enabled,
          readUsage: @escaping () -> (codex: ServiceUsage?, claude: ServiceUsage?)? = UsageSources.paseo) {
         self.syncFolder = syncFolder; self.sendsMessages = sendsMessages
+        self.connectionHome = home
         followsLocation = home == nil
         bridge = HermesBridge(home: home, makesImages: false); self.token = token; self.interval = interval
         self.usageInterval = usageInterval; self.readUsage = readUsage
@@ -166,7 +179,9 @@ final class HermesRelayServer {
             }
             client.authorized = true
             client.unread = frame.unread.map(Date.init(timeIntervalSince1970:)); client.unreadChanged = client.unread != nil
-            send(RelayFrame(op: "welcome"), to: client)
+            var welcome = RelayFrame(op: "welcome")
+            welcome.dropVersion = dropSuggest != nil || FileDropRunner.available(bridge.home) ? 1 : 0
+            send(welcome, to: client)
             if timer == nil {
                 let timer = DispatchSource.makeTimerSource(queue: queue)
                 timer.schedule(deadline: .now() + interval, repeating: interval, leeway: .milliseconds(50))
@@ -182,14 +197,30 @@ final class HermesRelayServer {
         }
         var reply = RelayFrame(op: "result"); reply.id = frame.id
         switch frame.op {
+        case "connections":
+            connectionCache.read { [weak self, weak client] result in
+                guard let self, let client else { return }
+                self.queue.async {
+                    var answer = RelayFrame(op: "result"); answer.id = frame.id
+                    switch result {
+                    case .success(let document): answer.connections = document
+                    case .failure: answer.reason = "CONNECTIONS_READ_FAILED"
+                    }
+                    if answer.line().count <= RelayFrame.maximumAuthorizedLine { self.send(answer, to: client) }
+                }
+            }
+            return
+        case "drop-open", "drop-chunk", "drop-run":
+            receiveDrop(frame, from: client)
+            return
         case "three-tap-failure":
             if let failure = frame.tapFailure, failure.valid { onTapFailure?(failure) }
             return
         case "watch":
             client.unread = frame.unread.map(Date.init(timeIntervalSince1970:)); client.unreadChanged = true
             return
-        case "sync":
-            receiveSync(frame, from: client)
+        case "sync", "drop-sync":
+            receiveSync(frame, from: client, drop: frame.op == "drop-sync")
             return
         case "search", "older", "around":
             // No message bodies leave this Mac while the receiving side shows none (IMessageFeature).
@@ -204,36 +235,94 @@ final class HermesRelayServer {
         send(reply, to: client)
     }
 
-    private func syncStore(_ user: String) -> SettingsStore? {
-        if let store = syncStores[user] { return store }
-        guard let store = SettingsStore(user: user, folder: syncFolder) else { return nil }
-        syncStores[user] = store
-        return store
+    private func receiveDrop(_ frame: RelayFrame, from client: Client) {
+        guard let id = frame.id, id > 0 else { return }
+        func fail() {
+            client.drops[id] = nil
+            var reply = RelayFrame(op: "result"); reply.id = id; reply.reason = "drop_unavailable"
+            send(reply, to: client)
+        }
+        do {
+            switch frame.op {
+            case "drop-open":
+                guard client.drops.isEmpty, !client.dropRunning, let data = frame.drop else { fail(); return }
+                let hasOriginals = ((try? JSONSerialization.jsonObject(with: data)) as? [String: Any])?["uploads"] as? [Any]
+                let encrypted: Bool
+                if hasOriginals?.isEmpty != false { encrypted = false }
+                else if let verify = dropOriginalsAllowed { encrypted = verify(client.fd) }
+                else {
+                    let peer = FileDropEncryptedRoute.peer(client.fd).map(FileDropEncryptedRoute.known) ?? false
+                    let local = FileDropEncryptedRoute.peer(client.fd, local: true).map(FileDropEncryptedRoute.known) ?? false
+                    encrypted = peer && local
+                }
+                client.drops[id] = try FileDropUpload(data: data, originals: encrypted)
+                queue.asyncAfter(deadline: .now() + 15) { [weak self, weak client] in
+                    guard let self, let client, client.drops[id] != nil else { return }
+                    client.drops[id] = nil
+                    var reply = RelayFrame(op: "result"); reply.id = id; reply.reason = "drop_timeout"
+                    self.send(reply, to: client)
+                }
+            case "drop-chunk":
+                guard let upload = client.drops[id], let file = frame.file, let part = frame.part, let data = frame.drop else { fail(); return }
+                try upload.append(data, file: file, part: part)
+            default:
+                guard let upload = client.drops.removeValue(forKey: id), !client.dropRunning else { fail(); return }
+                let data = try upload.finish(), home = bridge.home, suggest = dropSuggest
+                client.dropRunning = true
+                DispatchQueue.global(qos: .userInitiated).async { [weak self, weak client, upload] in
+                    var reply = RelayFrame(op: "result"); reply.id = id
+                    do { reply.drop = try suggest?(data) ?? FileDropRunner.run(data, home: home) }
+                    catch FileDropServiceError.sensitive { reply.reason = "drop_sensitive" }
+                    catch { reply.reason = "drop_unavailable" }
+                    // Retain the request folder through the subprocess, then let its owner remove it.
+                    _ = upload.paths.count
+                    let response = reply
+                    self?.queue.async { [weak self, weak client] in
+                        guard let self, let client else { return }; client.dropRunning = false
+                        self.send(response, to: client)
+                    }
+                }
+            }
+        } catch { fail() }
     }
-    /// Choices made on the other Mac go into this Mac's file; the pet here reads them from it.
-    private func receiveSync(_ frame: RelayFrame, from client: Client) {
-        guard let user = frame.user, let store = syncStore(user) else { return }
-        if client.syncUser != user { client.syncUser = user; client.syncSent = [:] }
-        let entries = frame.entries ?? [:]
+
+    private func syncStore(_ user: String, drop: Bool = false) -> SettingsStore? {
+        let key = (drop ? "drop:" + bridge.home.path + ":" : "screen:") + user
+        if let store = syncStores[key] { return store }
+        let folder = drop ? FileDropHistory.folder(home: bridge.home) : syncFolder
+        guard let store = SettingsStore(user: user, folder: folder) else { return nil }
+        syncStores[key] = store; return store
+    }
+    /// Screen choices and drop history reuse the merge protocol but own separate files.
+    private func receiveSync(_ frame: RelayFrame, from client: Client, drop: Bool) {
+        guard let user = frame.user, let store = syncStore(user, drop: drop) else { return }
+        if drop {
+            if client.dropSyncUser != user { client.dropSyncUser = user; client.dropSyncSent = [:] }
+        } else if client.syncUser != user { client.syncUser = user; client.syncSent = [:] }
+        let entries = drop ? FileDropHistory.valid(frame.entries ?? [:]) : frame.entries ?? [:]
         guard !entries.isEmpty else { return }
         let at = entries.values.map(\.at).max() ?? Date().timeIntervalSince1970, by = entries.values.first?.by ?? ""
-        store.merge(entries, replacing: frame.replace == true, at: at, by: by)
-        // What the other Mac sent and what now stands are the same; it need not hear them back.
-        for (key, entry) in entries where store.entries[key] == entry { client.syncSent[key] = entry }
+        store.merge(entries, replacing: !drop && frame.replace == true, at: at, by: by)
+        for (key, entry) in entries where store.entries[key] == entry {
+            if drop { client.dropSyncSent[key] = entry } else { client.syncSent[key] = entry }
+        }
     }
-    /// Each Mac is sent what it does not have yet of its account's choices.
     private func sendSync(to watchers: [Client]) {
-        var refreshed = Set<String>()
-        for client in watchers {
-            guard let user = client.syncUser, let store = syncStore(user) else { continue }
-            if refreshed.insert(user).inserted { _ = store.refresh() }
-            let missing = SettingsSync.difference(store.entries, from: client.syncSent)
-            guard !missing.isEmpty else { continue }
-            for part in SettingsSync.chunks(missing) {
-                var frame = RelayFrame(op: "sync"); frame.user = user; frame.entries = part
-                send(frame, to: client)
+        for drop in [false, true] {
+            var refreshed = Set<String>()
+            for client in watchers {
+                guard let user = drop ? client.dropSyncUser : client.syncUser, let store = syncStore(user, drop: drop) else { continue }
+                if refreshed.insert(user).inserted { _ = store.refresh() }
+                let seen = drop ? client.dropSyncSent : client.syncSent
+                let missing = SettingsSync.difference(store.entries, from: seen)
+                guard !missing.isEmpty else { continue }
+                for part in SettingsSync.chunks(missing) {
+                    var frame = RelayFrame(op: drop ? "drop-sync" : "sync"); frame.user = user; frame.entries = part
+                    send(frame, to: client)
+                }
+                if drop { client.dropSyncSent.merge(missing) { _, latest in latest } }
+                else { client.syncSent.merge(missing) { _, latest in latest } }
             }
-            client.syncSent.merge(missing) { _, latest in latest }
         }
     }
 

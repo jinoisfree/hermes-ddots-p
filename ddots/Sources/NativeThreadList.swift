@@ -235,13 +235,16 @@ struct NativeThreadList: NSViewRepresentable {
             } else { shrinking.removeValue(forKey: id) }
             return shown
         }
+        private var appearanceRevision = ChatAppearance.revision
         func update(rows next: [NativeThreadRow], stamp: SlackModel.EntryViewportStamp) {
             guard !updating else { return }
             updating = true
             let old = rows
             let oldByID = Dictionary(uniqueKeysWithValues: old.map { ($0.id, $0) })
             let nextIDs = Set(next.map(\.id))
-            let resized = abs(width - scroll.contentSize.width) > 0.5
+            let appearanceChanged = appearanceRevision != ChatAppearance.revision
+            if appearanceChanged { shrinking.removeAll(); appearanceRevision = ChatAppearance.revision }
+            let resized = appearanceChanged || abs(width - scroll.contentSize.width) > 0.5
             width = max(1, scroll.contentSize.width)
             rows = next
             indices.removeAll(keepingCapacity: true)

@@ -1444,11 +1444,12 @@ extension SlackController {
         return ChatFile(id: "local:" + url.path, name: url.lastPathComponent, mimetype: type, size: size, url: url.absoluteString, thumb: url.absoluteString)
     }
 
-    func sendFiles(_ text: String, room: String, thread: SlackThread?, files: [URL]) {
-        guard !closing, let bridge, persists || smokeSends else { return }
+    func sendFiles(_ text: String, room: String, thread: SlackThread?, files: [URL], routedPost: DdotsPost? = nil,
+                   selectedProfile: String? = nil, completion: ((String?, Set<String>, String?) -> Void)? = nil) {
+        guard !closing, let bridge, persists || smokeSends else { completion?(nil, [], "Slack 연결이 필요해요"); return }
         model.pageHold = nil
-        let post = thread == nil ? model.hubPost(text) : nil
-        let pick = thread == nil && model.ddotsPicked ? model.ddotsTarget : nil
+        let post = routedPost ?? (thread == nil ? model.hubPost(text) : nil)
+        let pick = selectedProfile ?? (thread == nil && model.ddotsPicked ? model.ddotsTarget : nil)
         let revision = thread == nil ? model.beginPost() : model.composeRevision
         let attempt = sending(text, room: room, thread: thread, files: files, pick: pick)
         var message = ChatMessage(id: "slack-pending:\(UUID().uuidString)", fromUser: true, speaker: "", body: post?.shown ?? text, date: Date(), pending: true, profile: "")
@@ -1465,11 +1466,13 @@ extension SlackController {
         queue.async { [weak self] in
             // Every file's size is checked before any is read; then they are read and sent one at a time.
             let failure: String?
-            switch SlackOutgoingFile.prepare(files) {
+            if files.isEmpty { failure = bridge.post(room: room, thread: thread?.ts, text: outgoing) }
+            else { switch SlackOutgoingFile.prepare(files) {
             case .failure(let problem): failure = problem.message
             case .success(let payload): failure = bridge.upload(room: room, thread: thread?.ts, text: outgoing, files: payload)
-            }
+            } }
             let uploadedIDs = failure == nil ? bridge.uploadedFileIDs : []
+            let postedTS = files.isEmpty && failure == nil ? bridge.postedRootTS : nil
             // What was sent is kept beside what was received. In a character's conversation the record fetches it like any other file.
             retention.locked {
                 if failure == nil, !recordsRoom, !retention.excludes(room) { for url in files { _ = try? store.keep(copyOf: url, room: name, date: message.date) } }
@@ -1484,8 +1487,16 @@ extension SlackController {
                     self.didSend(to: thread)
                     if thread == nil { self.model.followPost(room: room, ts: nil, files: uploadedIDs, revision: revision) }
                 }
+                completion?(postedTS, uploadedIDs, failure)
                 self.publish(); self.tick()
             }
+        }
+    }
+    var fileDropThreads: [SlackThread] { snapshot.threads.values.flatMap { $0 } }
+    func followFileDrops(_ entries: [FileDropAssignment]) {
+        for entry in entries {
+            followed[entry.room + ":" + (entry.ts ?? "")] = entry.at
+            if let ts = entry.ts { wanted.insert(entry.room + ":" + ts) }
         }
     }
 }

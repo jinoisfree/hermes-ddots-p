@@ -6,6 +6,8 @@ private enum NativeBodyCache {
     struct Key: Equatable {
         var body: String, term: String?, linkColor: String, quoteColors: [String], bar: String
         var folded: Bool, dark: Bool, mine: Bool, streaming: Bool
+        var appearanceRevision = ChatAppearance.revision
+        var pending: Bool
         var checklist: UInt64
     }
     struct Entry { var key: Key; var text: NSAttributedString; var checks: [Int: Bool] }
@@ -215,7 +217,7 @@ extension ChatView {
         let key = MessageChecklist.key(identity, text: message.body)
         let bar = edge ?? SlackOwner.color(message.profile).map(NSColor.init)
         let bodyKey = NativeBodyCache.Key(body: message.body, term: term, linkColor: palette.link.nsColor.description, quoteColors: message.quoteColors, bar: bar?.description ?? "",
-            folded: folded, dark: inputs.dark, mine: message.fromUser, streaming: message.streaming, checklist: MessageChecklist.shared.revision)
+            folded: folded, dark: inputs.dark, mine: message.fromUser, streaming: message.streaming, pending: message.pending, checklist: MessageChecklist.shared.revision)
         let entry: NativeBodyCache.Entry
         if let cached = NativeBodyCache.entries[identity], cached.key == bodyKey { entry = cached }
         else {
@@ -251,7 +253,7 @@ extension ChatView {
                             cacheKey: NativeBodyCache.Key, dark: Bool, bar: NSColor?) -> NativeBodyCache.Entry {
         // A character's post is laid out as Slack lays out its blocks; my own bubble stays plain.
         let layout = message.fromUser ? nil : SlackLayout.strip(body)
-        let native = NSMutableAttributedString(attributedString: ChatText.linkifiedNative(MessageFormat.renderNative(layout?.source ?? body)))
+        let native = NSMutableAttributedString(attributedString: ChatText.linkifiedNative(MessageFormat.renderNative(layout?.source ?? body, bodySize: ChatMetrics.bodyFont)))
         // Synology links read as the file's name, as the SwiftUI line titles them.
         if !message.fromUser {
             native.enumerateAttribute(.link, in: NSRange(location: 0, length: native.length), options: .reverse) { value, range, _ in
@@ -267,7 +269,7 @@ extension ChatView {
         native.addAttribute(.paragraphStyle, value: paragraph, range: full)
         if message.fromUser {
             native.enumerateAttributes(in: full) { attributes, range, _ in
-                if attributes[NSAttributedString.Key("ddots.explicitColor")] == nil { native.addAttribute(.foregroundColor, value: NSColor.white, range: range) }
+                if attributes[NSAttributedString.Key("ddots.explicitColor")] == nil { native.addAttribute(.foregroundColor, value: UserBubblePalette(dark: dark, pending: message.pending).foreground.nsColor, range: range) }
             }
         }
         native.enumerateAttributes(in: full) { attributes, range, _ in
@@ -277,12 +279,12 @@ extension ChatView {
                     .backgroundColor: NSColor.labelColor.withAlphaComponent(0.1)], range: range)
             }
             if attributes[.link] != nil {
-                native.addAttributes([.foregroundColor: message.fromUser ? NSColor(srgbRed: 0.72, green: 0.9, blue: 1, alpha: 1) : palette.link.nsColor,
+                native.addAttributes([.foregroundColor: message.fromUser ? UserBubblePalette(dark: dark, pending: message.pending).link.nsColor : palette.link.nsColor,
                     .underlineStyle: NSUnderlineStyle.single.rawValue], range: range)
             }
         }
         if let layout { SlackLayout.apply(to: native, lines: layout.lines, bar: bar, statuses: SlackLayout.statuses(for: message.body, colors: message.quoteColors), lineSpacing: 2) }
-        if message.streaming { MessageFormat.uniformSize(native, size: ChatMetrics.bodyFont) }
+        if message.streaming { MessageFormat.uniformSize(native, size: ChatMetrics.bodyFont, codeSize: ChatMetrics.bodyFont - 1) }
         if let term, !term.isEmpty {
             let highlighted = SlackSearch.highlighted(AttributedString(native.string), query: term)
             var offset = 0

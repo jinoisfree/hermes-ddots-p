@@ -4,17 +4,19 @@ import SwiftUI
 /// Text-only formatting shared by the composer and received messages. No HTML/WebKit is executed.
 /// Markdown remains readable outside ddots; optional span/u tags carry size, colour and underline.
 enum MessageFormat {
-    static func uniformSize(_ text: NSMutableAttributedString, size: CGFloat) {
+    static func uniformSize(_ text: NSMutableAttributedString, size: CGFloat, codeSize: CGFloat? = nil) {
         text.enumerateAttribute(.font, in: NSRange(location: 0, length: text.length)) { value, range, _ in
             // A zero-width layout sentinel is not visible text.
             if text.attributedSubstring(from: range).string == "\u{200B}" { return }
             let font = value as? NSFont ?? .systemFont(ofSize: size)
-            text.addAttribute(.font, value: NSFontManager.shared.convert(font, toSize: size), range: range)
+            let target = NSFontManager.shared.traits(of: font).contains(.fixedPitchFontMask) ? (codeSize ?? size) : size
+            text.addAttribute(.font, value: NSFontManager.shared.convert(font, toSize: target), range: range)
         }
     }
     static let baseSize: CGFloat = 13
     static let sizes: [CGFloat] = [11, 13, 16, 20, 24, 28]
     static let colors: [(String, String)] = [("빨강", "#E05252"), ("주황", "#CC7A29"), ("초록", "#309968"), ("파랑", "#4285E8"), ("보라", "#A16BDD")]
+    static let explicitSizeKey = NSAttributedString.Key("ddots.explicitSize")
     private static let explicitColor = NSAttributedString.Key("ddots.explicitColor")
     private static let tag = try! NSRegularExpression(pattern: #"`[^`\n]*`|</?(?:b|strong|i|em|u|s|del|span)(?:\s+[^<>]*)?>"#, options: .caseInsensitive)
     private static let heading = try! NSRegularExpression(pattern: #"^(#{1,3})\s+(.+)$"#)
@@ -28,12 +30,14 @@ enum MessageFormat {
 
     struct Style {
         var size = baseSize
+        var explicitSize = false
         var color: NSColor?
         var bold = false, italic = false, underline = false, strike = false, code = false
         var attributes: [NSAttributedString.Key: Any] {
             var font = code ? NSFont.monospacedSystemFont(ofSize: size, weight: bold ? .bold : .regular) : NSFont.systemFont(ofSize: size, weight: bold ? .bold : .regular)
             if italic { font = NSFontManager.shared.convert(font, toHaveTrait: .italicFontMask) }
             var value: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: color ?? NSColor.labelColor]
+            if explicitSize { value[explicitSizeKey] = size }
             if let color { value[explicitColor] = color }
             if underline { value[.underlineStyle] = NSUnderlineStyle.single.rawValue }
             if strike { value[.strikethroughStyle] = NSUnderlineStyle.single.rawValue }
@@ -69,7 +73,7 @@ enum MessageFormat {
         case "u": next.underline = true
         case "s", "del": next.strike = true
         case "span":
-            if let value = property("font-size", in: token), let size = Double(value.replacingOccurrences(of: "px", with: "").replacingOccurrences(of: "pt", with: "")), size.isFinite { next.size = min(32, max(10, size)) }
+            if let value = property("font-size", in: token), let size = Double(value.replacingOccurrences(of: "px", with: "").replacingOccurrences(of: "pt", with: "")), size.isFinite { next.size = min(32, max(10, size)); next.explicitSize = true }
             if let value = property("color", in: token), let color = color(value) { next.color = color }
         default: break
         }
@@ -77,15 +81,17 @@ enum MessageFormat {
     }
 
     /// The editor decodes only explicit rich spans, keeping typed Markdown and punctuation editable as written.
-    static func editor(_ source: String) -> NSAttributedString { parse(source, markdown: false) }
+    static func editor(_ source: String, bodySize: CGFloat = baseSize) -> NSAttributedString { parse(source, markdown: false, bodySize: bodySize) }
     static func plain(_ source: String) -> String {
         guard source.contains("<") else { return source }
         return editor(source).string
     }
-    private static func parse(_ source: String, markdown: Bool) -> NSAttributedString {
+    private static func parse(_ source: String, markdown: Bool, bodySize: CGFloat = baseSize, chatSized: Bool = false) -> NSAttributedString {
         let output = NSMutableAttributedString(string: "")
-        var stack: [(String, Style)] = [], style = Style(), fenced = false
+        var stack: [(String, Style)] = [], style = Style(size: bodySize), fenced = false
         func append(_ raw: String, style: Style, encoded: Bool) {
+            var style = style
+            if chatSized && style.code { style.size = bodySize - 1 }
             let text = encoded ? unescape(raw) : raw
             guard markdown, !style.code else { output.append(NSAttributedString(string: text, attributes: style.attributes)); return }
             let parsed = (try? AttributedString(markdown: normalized(text), options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace))) ?? AttributedString(text)
@@ -96,6 +102,7 @@ enum MessageFormat {
                 runStyle.italic = runStyle.italic || intent.contains(.emphasized)
                 runStyle.strike = runStyle.strike || intent.contains(.strikethrough)
                 runStyle.code = runStyle.code || intent.contains(.code)
+                if chatSized && runStyle.code { runStyle.size = bodySize - 1 }
                 var attributes = runStyle.attributes
                 if let url = run.link { attributes[.link] = url }
                 output.append(NSAttributedString(string: String(parsed[run.range].characters), attributes: attributes))
@@ -113,6 +120,7 @@ enum MessageFormat {
                 let range = NSRange(line.startIndex..., in: line)
                 if let match = heading.firstMatch(in: line, range: range) {
                     lineStyle.size = [24.0, 20.0, 18.0][match.range(at: 1).length - 1]; lineStyle.bold = true
+                    if chatSized { lineStyle.size *= bodySize / 14 }
                     line = (line as NSString).substring(with: match.range(at: 2))
                 } else if let match = check.firstMatch(in: line, range: range) {
                     let checked = (line as NSString).substring(with: match.range(at: 2)).lowercased() == "x"
@@ -139,20 +147,20 @@ enum MessageFormat {
                 position = range.upperBound
             }
             append(String(line[position...]), style: stack.isEmpty ? lineStyle : style, encoded: !stack.isEmpty)
-            if stack.isEmpty { style = Style() }
+            if stack.isEmpty { style = Style(size: bodySize) }
         }
         return output
     }
 
     /// Native text cards use the same parser without a SwiftUI font conversion.
-    static func renderNative(_ source: String) -> NSAttributedString { parse(source, markdown: true) }
+    static func renderNative(_ source: String, bodySize: CGFloat? = nil) -> NSAttributedString { parse(source, markdown: true, bodySize: bodySize ?? baseSize, chatSized: bodySize != nil) }
 
-    static func render(_ source: String) -> AttributedString {
+    static func render(_ source: String, bodySize: CGFloat? = nil) -> AttributedString {
         // Most conversation rows use ordinary Markdown; keep their original parsing and inherited fonts.
-        if extended.firstMatch(in: source, range: NSRange(source.startIndex..., in: source)) == nil {
+        if bodySize == nil && extended.firstMatch(in: source, range: NSRange(source.startIndex..., in: source)) == nil {
             return (try? AttributedString(markdown: normalized(source), options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace))) ?? AttributedString(source)
         }
-        let native = parse(source, markdown: true)
+        let native = parse(source, markdown: true, bodySize: bodySize ?? baseSize, chatSized: bodySize != nil)
         var result = AttributedString()
         native.enumerateAttributes(in: NSRange(location: 0, length: native.length)) { attributes, range, _ in
             var part = AttributedString((native.string as NSString).substring(with: range))
@@ -177,7 +185,7 @@ enum MessageFormat {
     }
 
     /// Keep unformatted drafts byte-for-byte compatible. Formatting is text, so history/relay can preserve it.
-    static func serialize(_ text: NSAttributedString) -> String {
+    static func serialize(_ text: NSAttributedString, baseSize: CGFloat = MessageFormat.baseSize) -> String {
         var result = ""
         var previousOpen = "", previousClose = "", pending = ""
         func flush() {
@@ -190,7 +198,7 @@ enum MessageFormat {
             let font = attrs[.font] as? NSFont ?? NSFont.systemFont(ofSize: baseSize)
             let traits = NSFontManager.shared.traits(of: font)
             var open = "", close = "", properties: [String] = []
-            if abs(font.pointSize - baseSize) > 0.5 { properties.append("font-size:\(Int(font.pointSize))px") }
+            if attrs[explicitSizeKey] != nil || abs(font.pointSize - baseSize) > 0.5 { properties.append("font-size:\(Int(font.pointSize))px") }
             if let color = attrs[explicitColor] as? NSColor, let value = hex(color) { properties.append("color:" + value) }
             if !properties.isEmpty { open += "<span style=\"" + properties.joined(separator: ";") + "\">"; close = "</span>" + close }
             for (active, name) in [(traits.contains(.boldFontMask), "b"), (traits.contains(.italicFontMask), "i"), ((attrs[.underlineStyle] as? Int ?? 0) != 0, "u"), ((attrs[.strikethroughStyle] as? Int ?? 0) != 0, "s")] where active {

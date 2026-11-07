@@ -1,6 +1,7 @@
 import AppKit
 import SwiftUI
 
+private typealias AppearanceRevisionState = SwiftUI.State<UInt64>
 private typealias DraftHeightState = SwiftUI.State<CGFloat>
 private typealias DraftFormatState = SwiftUI.StateObject<DraftFormatController>
 
@@ -12,11 +13,13 @@ struct DraftEditor: View {
     var focus: Binding<Bool>
     var onPaste: (() -> Bool)?
     var onSubmit: () -> Void
+    @AppearanceRevisionState private var appearanceRevision = ChatAppearance.revision
     @DraftHeightState private var height: CGFloat = 16
     @DraftFormatState private var formatting = DraftFormatController()
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 5) {
+        let _ = appearanceRevision
+        return VStack(alignment: .leading, spacing: 5) {
             ZStack(alignment: .topLeading) {
                 if text.isEmpty {
                     Text(prompt).font(.system(size: ChatMetrics.bodyFont)).foregroundColor(.secondary).allowsHitTesting(false)
@@ -24,7 +27,7 @@ struct DraftEditor: View {
                 NativeDraft(text: $text, focused: focus, height: $height, formatting: formatting,
                             prompt: prompt, onPaste: onPaste, onSubmit: onSubmit)
             }.frame(height: height)
-        }
+        }.onReceive(NotificationCenter.default.publisher(for: ChatAppearance.didChange)) { _ in appearanceRevision = ChatAppearance.revision }
     }
 }
 
@@ -34,6 +37,7 @@ private struct NativeDraft: NSViewRepresentable {
     @Binding var height: CGFloat
     let formatting: DraftFormatController
     let prompt: String
+    var bodySize = ChatMetrics.bodyFont
     var onPaste: (() -> Bool)?
     var onSubmit: () -> Void
 
@@ -61,15 +65,16 @@ private struct NativeDraft: NSViewRepresentable {
         editor.onFocus = { [weak coordinator] focused in coordinator?.parent.focused = focused }
         editor.setAccessibilityLabel(prompt)
         // Publishing a marked Korean syllable must not replace the text storage or end composition.
-        if coordinator.published != text, !editor.hasMarkedText() {
+        if coordinator.published != text || coordinator.bodySize != bodySize, !editor.hasMarkedText() {
             let selection = editor.selectedRange()
             let wasAtEnd = NSMaxRange(selection) == (editor.string as NSString).length
             // Sending or changing rooms replaces the draft; old undo ranges no longer refer to this document.
             editor.breakUndoCoalescing()
             editor.undoManager?.removeAllActions()
             coordinator.published = text
-            editor.textStorage?.setAttributedString(MessageFormat.editor(text))
-            if text.isEmpty { editor.typingAttributes = MessageFormat.Style().attributes }
+            coordinator.bodySize = bodySize
+            editor.textStorage?.setAttributedString(MessageFormat.editor(text, bodySize: bodySize))
+            if text.isEmpty { editor.typingAttributes = MessageFormat.Style(size: ChatMetrics.bodyFont).attributes }
             let length = (editor.string as NSString).length
             let start = wasAtEnd ? length : min(selection.location, length)
             editor.setSelectedRange(NSRange(location: start, length: wasAtEnd ? 0 : min(selection.length, length - start)))
@@ -89,11 +94,12 @@ private struct NativeDraft: NSViewRepresentable {
     final class Coordinator: NSObject, NSTextViewDelegate {
         var parent: NativeDraft
         var published: String?
+        var bodySize: CGFloat = 0
         weak var scroll: DraftScrollView?
         init(_ parent: NativeDraft) { self.parent = parent }
         func textDidChange(_ notification: Notification) {
             guard let scroll else { return }
-            let text = MessageFormat.serialize(scroll.editor.attributedString())
+            let text = MessageFormat.serialize(scroll.editor.attributedString(), baseSize: parent.bodySize)
             published = text
             parent.text = text
             scroll.measure()
@@ -149,7 +155,7 @@ final class DraftTextView: NSTextView {
         if hasMarkedText() { unmarkText() }
         breakUndoCoalescing()
         let range = selectedRange()
-        let plain = MessageFormat.Style().attributes
+        let plain = MessageFormat.Style(size: ChatMetrics.bodyFont).attributes
         guard let storage = textStorage, shouldChangeText(in: range, replacementString: text) else { return }
         storage.replaceCharacters(in: range, with: NSAttributedString(string: text, attributes: plain))
         didChangeText()

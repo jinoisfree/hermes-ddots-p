@@ -15,6 +15,108 @@ enum ChatTheme: String, CaseIterable {
     }
 }
 
+/// These two preferences stay on this Mac, outside the relay settings store.
+enum ChatAppearance {
+    static let colorKey = "chatUserBubbleColor"
+    static let fontKey = "chatBodyFontSize"
+    static var preferences = UserDefaults.standard
+    static var transient = false
+    static func store(_ value: Any, key: String, defaults: UserDefaults) {
+        if transient && defaults === preferences {
+            var domain = defaults.volatileDomain(forName: UserDefaults.argumentDomain)
+            domain[key] = value; defaults.setVolatileDomain(domain, forName: UserDefaults.argumentDomain)
+        } else { defaults.set(value, forKey: key) }
+    }
+    static var revision: UInt64 = 0
+    static let didChange = Notification.Name("ddots.chatAppearanceChanged")
+    static let fontSizes: [CGFloat] = [12, 13, 14, 15, 16, 18, 20]
+    static func fontSize(_ defaults: UserDefaults = preferences) -> CGFloat {
+        let value = CGFloat(defaults.double(forKey: fontKey))
+        return fontSizes.contains(value) ? value : 14
+    }
+    static func color(_ defaults: UserDefaults = preferences) -> UserBubbleColor {
+        UserBubbleColor(rawValue: defaults.string(forKey: colorKey) ?? "") ?? .blue
+    }
+    static func setFontSize(_ value: CGFloat, defaults: UserDefaults = preferences) {
+        store(fontSizes.contains(value) ? Double(value) : 14, key: fontKey, defaults: defaults)
+        revision &+= 1
+        NotificationCenter.default.post(name: didChange, object: nil)
+    }
+    static func setColor(_ value: UserBubbleColor, defaults: UserDefaults = preferences) {
+        store(value.rawValue, key: colorKey, defaults: defaults)
+        revision &+= 1
+        NotificationCenter.default.post(name: didChange, object: nil)
+    }
+}
+
+enum UserBubbleColor: String, CaseIterable {
+    case blue, indigo, purple, pink, red, orange, yellow, green, mint, teal, cyan, brown, gray, lightGray
+    var title: String {
+        switch self {
+        case .blue: return "기본"; case .indigo: return "남색"; case .purple: return "보라"
+        case .pink: return "분홍"; case .red: return "빨강"; case .orange: return "주황"
+        case .yellow: return "노랑"; case .green: return "초록"; case .mint: return "민트"
+        case .teal: return "청록"; case .cyan: return "하늘"; case .brown: return "갈색"
+        case .gray: return "회색"; case .lightGray: return "밝은 회색"
+        }
+    }
+    private var systemColor: NSColor {
+        switch self {
+        case .blue: return .systemBlue; case .indigo: return .systemIndigo
+        case .purple: return .systemPurple; case .pink: return .systemPink
+        case .red: return .systemRed; case .orange: return .systemOrange
+        case .yellow: return .systemYellow; case .green: return .systemGreen
+        case .mint: return .systemMint; case .teal: return .systemTeal
+        case .cyan: return .systemCyan; case .brown: return .systemBrown
+        case .gray: return .systemGray
+        // A fixed sRGB 82% gray stays visibly distinct from the light conversation surface.
+        case .lightGray: return NSColor(srgbRed: 0.82, green: 0.82, blue: 0.82, alpha: 1)
+        }
+    }
+    func resolved(dark: Bool) -> PaletteRGB {
+        var rgb = PaletteRGB.black
+        NSAppearance(named: dark ? .darkAqua : .aqua)!.performAsCurrentDrawingAppearance {
+            let color = systemColor.usingColorSpace(.sRGB)!
+            rgb = PaletteRGB(r: Double(color.redComponent), g: Double(color.greenComponent), b: Double(color.blueComponent))
+        }
+        // Keep systemBlue's hue and saturation; lower HSV brightness only as far
+        // as necessary for white text, with a 4.55 margin for 8-bit rounding. Scaling sRGB channels preserves their ratios.
+        if self == .blue, PaletteRGB.contrast(rgb, .white) < 4.55 {
+            let source = rgb
+            var low = 0.0, high = 1.0
+            for _ in 0..<64 {
+                let scale = (low + high) / 2
+                let candidate = PaletteRGB(r: source.r * scale, g: source.g * scale, b: source.b * scale)
+                if PaletteRGB.contrast(candidate, .white) >= 4.55 { low = scale } else { high = scale }
+            }
+            rgb = PaletteRGB(r: source.r * low, g: source.g * low, b: source.b * low)
+        }
+        return rgb
+    }
+}
+
+/// Both renderers and the settings preview use these exact resolved colors.
+struct UserBubblePalette {
+    let background: PaletteRGB
+    let foreground: PaletteRGB
+    let alpha: Double
+    let compositedBackground: PaletteRGB
+    var link: PaletteRGB { foreground } // Links also carry an underline.
+    var contrast: Double { PaletteRGB.contrast(compositedBackground, foreground) }
+    init(color: UserBubbleColor = ChatAppearance.color(), dark: Bool, pending: Bool = false) {
+        background = color.resolved(dark: dark)
+        alpha = pending ? 0.6 : 1
+        // Conversation surface reference used by the pending contrast contract.
+        let surface = dark ? 0.15 : 0.93
+        compositedBackground = PaletteRGB(r: background.r * alpha + surface * (1 - alpha),
+            g: background.g * alpha + surface * (1 - alpha), b: background.b * alpha + surface * (1 - alpha))
+        if color == .blue && !pending { foreground = .white }
+        else {
+            foreground = PaletteRGB.contrast(compositedBackground, .black) >= PaletteRGB.contrast(compositedBackground, .white) ? .black : .white
+        }
+    }
+}
+
 enum ChatMetrics {
     static let avatar: CGFloat = 34
     /// Corner radius of a character picture as a share of its side.
@@ -24,7 +126,7 @@ enum ChatMetrics {
     static let thumbnailPixels = 64
     static let nameFont: CGFloat = 14
     static let auxiliaryFont: CGFloat = 11
-    static let bodyFont: CGFloat = 14
+    static var bodyFont: CGFloat { ChatAppearance.fontSize() }
     static let avatarNameGap: CGFloat = 8
     static let nameBodyGap: CGFloat = 4
     static let speakerInset: CGFloat = 10

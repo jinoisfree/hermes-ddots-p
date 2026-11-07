@@ -103,6 +103,7 @@ extension AppDelegate {
         }
         await clipboardUIWait("T-38 feedback expires", { pet.clipboardCopyFrame == nil })
         let elapsed = ProcessInfo.processInfo.systemUptime - began
+        print("T-38 feedback elapsed seconds=\(elapsed)")
         smokeCheck((3.7...4.3).contains(elapsed), "T-38 actual duration four seconds plus/minus 0.3")
         smokeCheck(pet.headline == normalHeadline && pet.subtitle == normalSubtitle && !pet.bubbleText.isHidden, "T-38 original bubble text restored")
         copy("책상"); await expect("“책상”이 복사되었습니다")

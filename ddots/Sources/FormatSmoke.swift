@@ -93,7 +93,7 @@ extension AppDelegate {
                 editor.setSelectedRange(NSRange(location: 0, length: (editor.string as NSString).length)); controls.heading(1); await settle()
                 smokeCheck((editor.attributedString().attribute(.font, at: 0, effectiveRange: nil) as? NSFont)?.pointSize == 24, "Title paragraph applies its size")
                 controls.clear(); await settle()
-                smokeCheck(MessageFormat.serialize(editor.attributedString()) == "제목 확인", "Clear formatting restores plain text")
+                smokeCheck(MessageFormat.serialize(editor.attributedString(), baseSize: ChatMetrics.bodyFont) == "제목 확인", "Clear formatting restores plain text")
                 controls.lines(.bullet); await settle()
                 smokeCheck(editor.string == "• 제목 확인", "Bulleted paragraph is available")
                 controls.lines(.bullet); controls.lines(.numbered); await settle()
@@ -105,7 +105,7 @@ extension AppDelegate {
             smokeCheck(checks.checked(key, offset: 3, original: false), "A reader can check an agent's task")
             checks.toggle(key, offset: 3, original: false)
             smokeCheck(!checks.checked(key, offset: 3, original: false) && sent.count == sources.count, "Unchecking never sends an extra message")
-            let note = "PASS: enabled composers, selected text size/colour/bold/underline, indentation preserves styles, checkbox insertion/toggle, fold retention, synthetic formatted send, agent reply display and local checklist state; Command-V of RTF/HTML/rich+plain copies inserts default 13pt label-colour text inside formatted text, HTML pre spacing/table cells/named characters/quoted > in attributes, replaces a selection, keeps Korean lines and spaces, later typing plain, undo/redo, empty clipboard ignored, clipboard restored\n"
+            let note = "PASS: enabled composers, selected text size/colour/bold/underline, indentation preserves styles, checkbox insertion/toggle, fold retention, synthetic formatted send, agent reply display and local checklist state; Command-V of RTF/HTML/rich+plain copies inserts selected body-size label-colour text inside formatted text, HTML pre spacing/table cells/named characters/quoted > in attributes, replaces a selection, keeps Korean lines and spaces, later typing plain, undo/redo, empty clipboard ignored, clipboard restored\n"
             try! note.write(to: destination.appendingPathComponent("formatting.txt"), atomically: true, encoding: .utf8)
             print(note); NSApp.terminate(nil)
         }
@@ -133,11 +133,11 @@ extension AppDelegate {
             var ok = true
             text.enumerateAttributes(in: range) { attrs, _, _ in
                 let font = attrs[.font] as? NSFont
-                ok = ok && font?.pointSize == MessageFormat.baseSize && font.map { NSFontManager.shared.traits(of: $0).intersection([.boldFontMask, .italicFontMask]).isEmpty } == true
+                ok = ok && font?.pointSize == ChatMetrics.bodyFont && font.map { NSFontManager.shared.traits(of: $0).intersection([.boldFontMask, .italicFontMask]).isEmpty } == true
                     && (attrs[.foregroundColor] as? NSColor) == NSColor.labelColor && (attrs[.underlineStyle] as? Int ?? 0) == 0
                     && (attrs[.strikethroughStyle] as? Int ?? 0) == 0 && attrs[.backgroundColor] == nil && attrs[.link] == nil
             }
-            return ok && MessageFormat.serialize(text.attributedSubstring(from: range)) == (text.string as NSString).substring(with: range)
+            return ok && MessageFormat.serialize(text.attributedSubstring(from: range), baseSize: ChatMetrics.bodyFont) == (text.string as NSString).substring(with: range)
         }
         let styled = "<span style=\"font-size:20px;color:#4285E8\"><b>앞 서식 뒤</b></span>"
         if source == .imessage { chat.draft = styled } else { slack.model.draft = styled }
@@ -159,7 +159,7 @@ extension AppDelegate {
         check(!plain(NSRange(location: 0, length: 2)) && !plain(NSRange(location: 2 + length, length: 1)), "Text around the paste keeps its own formatting")
         check(draft().contains(copied) && !draft().contains("34px") && !draft().contains("#FF"), "The draft carries the pasted text unstyled: \(draft().debugDescription)")
         check(editor.selectedRange() == NSRange(location: 2 + length, length: 0), "The caret ends after the pasted text")
-        check((editor.typingAttributes[.font] as? NSFont) == NSFont.systemFont(ofSize: MessageFormat.baseSize)
+        check((editor.typingAttributes[.font] as? NSFont) == NSFont.systemFont(ofSize: ChatMetrics.bodyFont)
               && (editor.typingAttributes[.foregroundColor] as? NSColor) == NSColor.labelColor && editor.typingAttributes[.underlineStyle] == nil,
               "The next typed letter after a paste is in the default style")
         editor.undo(nil); await settle()

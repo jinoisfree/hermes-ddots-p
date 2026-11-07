@@ -112,6 +112,7 @@ private struct SlackResizeRow<Content: View>: View {
 /// A retained row's rendering inputs. Callbacks stay live through their model references;
 /// values used to draw the row are copied so equality never reads a mutated model.
 struct SlackThreadInputs: Equatable {
+    var appearanceRevision = ChatAppearance.revision
     var conversationGeneration = DdotsConfig.shared.generation
     var threadID: String
     var threadRevision: UInt64
@@ -140,6 +141,7 @@ struct SlackThreadInputs: Equatable {
 }
 
 struct SlackLineInputs: Equatable {
+    var appearanceRevision = ChatAppearance.revision
     var message: ChatMessage
     var selectable: Bool, opensThread: Bool, dark: Bool, reduceMotion: Bool, expanded: Bool, highlighted: Bool, flashed: Bool
     var findTerm: String?, chatSearch: [String?]
@@ -3452,7 +3454,7 @@ extension ChatView {
 
     /// Inline Markdown with code set apart as Slack does: a tinted chip in a fixed-width face.
     func slackStyled(_ text: String, palette: CharacterPalette) -> AttributedString {
-        let parsed = MessageFormat.render(text)
+        let parsed = MessageFormat.render(text, bodySize: ChatMetrics.bodyFont)
         var styled = SynologyLink.titled(ChatText.linkified(parsed))
         for run in styled.runs {
             if run.inlinePresentationIntent?.contains(.code) == true {

@@ -24,11 +24,29 @@ import time
 import uuid
 from functools import lru_cache
 
-try:
-    from agent.prompt_builder import STEER_MARKER_OPEN, STEER_MARKER_CLOSE
-except ImportError:
-    STEER_MARKER_OPEN = "[OUT-OF-BAND USER MESSAGE"
-    STEER_MARKER_CLOSE = "[/OUT-OF-BAND USER MESSAGE]"
+def _steer_markers():
+    # Importing prompt_builder bootstraps a missing SOUL.md in a new home. Recall
+    # must be read-only: read its two literal constants without executing the core.
+    import ast
+    from importlib.machinery import PathFinder
+    try:
+        parent = PathFinder.find_spec("agent")
+        spec = PathFinder.find_spec("agent.prompt_builder", parent.submodule_search_locations) if parent else None
+        if spec and spec.origin and Path(spec.origin).stat().st_size <= 1_000_000:
+            values = {}
+            for node in ast.parse(Path(spec.origin).read_text()).body:
+                if isinstance(node, ast.Assign):
+                    for target in node.targets:
+                        if isinstance(target, ast.Name) and target.id in {"STEER_MARKER_OPEN", "STEER_MARKER_CLOSE"}:
+                            values[target.id] = ast.literal_eval(node.value)
+            if all(isinstance(values.get(k), str) for k in ("STEER_MARKER_OPEN", "STEER_MARKER_CLOSE")):
+                return values["STEER_MARKER_OPEN"], values["STEER_MARKER_CLOSE"]
+    except (OSError, ValueError, SyntaxError, AttributeError):
+        pass
+    return "[OUT-OF-BAND USER MESSAGE", "[/OUT-OF-BAND USER MESSAGE]"
+
+
+STEER_MARKER_OPEN, STEER_MARKER_CLOSE = _steer_markers()
 
 # A steer and a busy-turn redirect both quote their sender in a gateway origin block; they interrupt a
 # running turn instead of starting one. Every reader of stored user rows decides "is this a new request /

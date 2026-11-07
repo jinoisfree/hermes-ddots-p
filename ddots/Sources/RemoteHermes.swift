@@ -7,7 +7,7 @@ final class RemoteHermes: HermesSource {
     static let lost = "공유하는 Mac에 연결하지 못했어요. 다시 연결하는 중이에요."
     static let denied = "연결 코드가 맞지 않아요. Hermes 연결에서 다시 입력해 주세요."
     private let includeMessages: Bool
-    private final class Pending { let done = DispatchSemaphore(value: 0); var messages: [ChatMessage] = [] }
+    private final class Pending { let done = DispatchSemaphore(value: 0); var reply: RelayFrame? }
     private let host: String, port: UInt16, token: String
     private let portraits: RelayPortraits?
     private let queue = DispatchQueue(label: AppIdentity.bundleID + ".remote", qos: .utility)
@@ -17,6 +17,9 @@ final class RemoteHermes: HermesSource {
     /// True while the sharing Mac has accepted this one and is still heard from.
     var linked: Bool { lock.lock(); defer { lock.unlock() }; return isLinked }
     private var isLinked = false
+    private var dropVersion = 0
+    var dropOriginalsAllowed: ((NWConnection) -> Bool)?
+    var supportsDrop: Bool { lock.lock(); defer { lock.unlock() }; return isLinked && dropVersion == 1 }
     var lastReceivedAt: Date? { lock.lock(); defer { lock.unlock() }; return lastStateAt }
     private var relayedUsage: RelayUsage?
     /// Paseo usage of the sharing Mac. Kept across a lost link; each value expires by its own observation time.
@@ -43,6 +46,7 @@ final class RemoteHermes: HermesSource {
     var onChange: (() -> Void)?
     /// Shared screen choices from the keeping Mac, and the moment the link is up again. Called on an arbitrary queue.
     var onSync: ((String, [String: SyncEntry]) -> Void)?
+    var onDropSync: ((String, [String: SyncEntry]) -> Void)?
     var onLinked: (() -> Void)?
 
     init(host: String, port: UInt16, token: String, portraits: RelayPortraits? = nil, includeMessages: Bool = true) {
@@ -126,15 +130,17 @@ final class RemoteHermes: HermesSource {
         case "denied": startupTapFailure = nil; wasDenied = true
         case "welcome":
             welcomed = true; wasDenied = false; attempts = 0
-            lock.lock(); isLinked = true; lock.unlock()
+            lock.lock(); isLinked = true; dropVersion = frame.dropVersion ?? 0; lock.unlock()
             if let failure = startupTapFailure { startupTapFailure = nil; reportTapFailure(failure) }
             onLinked?()
+        case "drop-sync":
+            if let user = frame.user, let entries = frame.entries { onDropSync?(user, FileDropHistory.valid(entries)) }
         case "sync":
             if let user = frame.user, let entries = frame.entries { onSync?(user, entries) }
         case "result":
             lock.lock()
             let waiter = frame.id.flatMap { pending.removeValue(forKey: $0) }
-            waiter?.messages = (frame.messages ?? []).map(\.message)
+            waiter?.reply = frame
             lock.unlock(); waiter?.done.signal()
         case "streams":
             lock.lock(); relayedStreams = frame.streams ?? []; lock.unlock()
@@ -189,6 +195,11 @@ final class RemoteHermes: HermesSource {
             send(frame)
         }
     }
+    func sendDropSync(user: String, entries: [String: SyncEntry]) {
+        for part in entries.isEmpty ? [[:]] : SettingsSync.chunks(FileDropHistory.valid(entries)) {
+            var frame = RelayFrame(op: "drop-sync"); frame.user = user; frame.entries = part; send(frame)
+        }
+    }
     private func send(_ frame: RelayFrame) {
         queue.async { [self] in
             guard welcomed, let connection else { return }
@@ -197,6 +208,14 @@ final class RemoteHermes: HermesSource {
     }
     private func request(_ frame: RelayFrame) -> [ChatMessage] {
         guard includeMessages else { return [] }
+        return (requestFrame(frame, timeout: 5)?.messages ?? []).map(\.message)
+    }
+    func connectionStatus() throws -> AgentConnectionDocument {
+        guard let reply = requestFrame(RelayFrame(op: "connections"), timeout: 9) else { throw ConnectionFailure.oldRelay }
+        guard let document = reply.connections else { throw ConnectionFailure.command }
+        return try AgentConnectionDocument.decode(JSONEncoder().encode(document))
+    }
+    private func requestFrame(_ frame: RelayFrame, timeout: Double) -> RelayFrame? {
         let waiter = Pending(); var frame = frame
         lock.lock(); nextID += 1; frame.id = nextID; pending[nextID] = waiter; let id = nextID; lock.unlock()
         queue.async { [self] in
@@ -205,10 +224,52 @@ final class RemoteHermes: HermesSource {
             }
             connection.send(content: frame.line(), completion: .contentProcessed { _ in })
         }
-        _ = waiter.done.wait(timeout: .now() + 5)
+        _ = waiter.done.wait(timeout: .now() + timeout)
         lock.lock(); defer { lock.unlock() }
         pending.removeValue(forKey: id)
-        return waiter.messages
+        return waiter.reply
+    }
+
+    /// Called off the main thread. Unknown/old relay versions fail without sending originals.
+    func suggestDrop(_ signals: Data, files: [URL]) throws -> Data {
+        guard signals.count <= 64 * 1024, supportsDrop else { throw CocoaError(.featureUnsupported) }
+        let waiter = Pending()
+        lock.lock(); nextID += 1; let id = nextID; pending[id] = waiter; lock.unlock()
+        queue.async { [self] in
+            guard welcomed, let connection else { waiter.done.signal(); return }
+            let numeric: String?
+            if case .hostPort(let host, _) = connection.currentPath?.remoteEndpoint { numeric = String(describing: host) } else { numeric = nil }
+            let encrypted = !files.isEmpty && (dropOriginalsAllowed?(connection) ?? numeric.map(FileDropEncryptedRoute.known) ?? false)
+            let uploads = encrypted ? Array(files.prefix(5)) : []
+            do {
+                guard var request = try JSONSerialization.jsonObject(with: signals) as? [String: Any] else { throw CocoaError(.fileReadCorruptFile) }
+                var metadata: [[String: Any]] = []
+                for file in uploads {
+                    let size = try file.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? Int.max
+                    guard size <= 20 * 1024 * 1024 else { throw CocoaError(.fileReadTooLarge) }
+                    metadata.append(["name": file.lastPathComponent, "size": size])
+                }
+                request["uploads"] = metadata; request["files"] = nil
+                var open = RelayFrame(op: "drop-open"); open.id = id; open.drop = try JSONSerialization.data(withJSONObject: request)
+                guard open.drop!.count <= 64 * 1024 else { throw CocoaError(.fileReadTooLarge) }
+                connection.send(content: open.line(), completion: .contentProcessed { _ in })
+                for (index, file) in uploads.enumerated() {
+                    let input = try FileHandle(forReadingFrom: file); defer { try? input.close() }
+                    var part = 0
+                    while let chunk = try input.read(upToCount: 512 * 1024), !chunk.isEmpty {
+                        var frame = RelayFrame(op: "drop-chunk"); frame.id = id; frame.file = index; frame.part = part; frame.drop = chunk
+                        connection.send(content: frame.line(), completion: .contentProcessed { _ in }); part += 1
+                    }
+                }
+                var run = RelayFrame(op: "drop-run"); run.id = id
+                connection.send(content: run.line(), completion: .contentProcessed { _ in })
+            } catch { waiter.done.signal() }
+        }
+        _ = waiter.done.wait(timeout: .now() + 15)
+        lock.lock(); pending.removeValue(forKey: id); let result = waiter.reply?.drop; let reason = waiter.reply?.reason; lock.unlock()
+        if reason == "drop_sensitive" { throw FileDropServiceError.sensitive }
+        guard let result else { throw FileDropServiceError.unavailable }
+        return result
     }
 
     // MARK: HermesSource

@@ -20,6 +20,7 @@ final class PetPanel: NSPanel {
     override func constrainFrameRect(_ frameRect: NSRect, to screen: NSScreen?) -> NSRect { frameRect }
     var chatExpanded = false
     var clipboardPresented = false
+    var fileDropPresented = false
     var onClipboardKey: ((NSEvent) -> Bool)?
     var onCollapse: (() -> Void)?
     var onChatKey: ((NSEvent) -> Bool)?
@@ -27,6 +28,7 @@ final class PetPanel: NSPanel {
     var onPageKey: ((NSEvent) -> Bool)?
     var onPasteAttachments: (() -> Bool)?
     override func sendEvent(_ event: NSEvent) {
+        if fileDropPresented, event.type == .keyDown, event.keyCode == 53 { (contentView as? PetView)?.fileDrop?.escape(); return }
         if clipboardPresented, event.type == .keyDown, onClipboardKey?(event) == true { return }
         if clipboardPresented, event.type == .leftMouseDown || event.type == .rightMouseDown,
            let pet = contentView as? PetView, pet.clipboardContains(event.locationInWindow) { makeKey() }
@@ -41,11 +43,14 @@ final class PetPanel: NSPanel {
         super.sendEvent(event)
     }
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        if fileDropPresented, event.modifierFlags.contains(.command), Self.shortcutKey(event) == "v",
+           let card = (contentView as? PetView)?.fileDrop, !card.editing { return card.receive(card.pasteboard(), append: true) }
+
         if clipboardPresented, onClipboardKey?(event) == true { return true }
         if chatExpanded, onPageKey?(event) == true { return true }
         if chatExpanded, event.modifierFlags.contains(.command), Self.shortcutKey(event) == "f", onChatKey?(event) == true { return true }
         if chatExpanded, Self.editAction(for: event) == #selector(NSText.paste(_:)), onPasteAttachments?() == true { return true }
-        if chatExpanded || clipboardPresented, let action = Self.editAction(for: event), NSApp.sendAction(action, to: nil, from: self) { return true }
+        if chatExpanded || clipboardPresented || fileDropPresented, let action = Self.editAction(for: event), NSApp.sendAction(action, to: nil, from: self) { return true }
         return super.performKeyEquivalent(with: event)
     }
     /// The letter a shortcut stands for. A Korean or other non-Latin input source can report its own character,
@@ -69,8 +74,8 @@ final class PetPanel: NSPanel {
         default: return nil
         }
     }
-    override var canBecomeKey: Bool { chatExpanded || clipboardPresented }
-    override func cancelOperation(_ sender: Any?) { if clipboardPresented { (contentView as? PetView)?.dismissClipboard() } else { onCollapse?() } }
+    override var canBecomeKey: Bool { chatExpanded || clipboardPresented || fileDropPresented }
+    override func cancelOperation(_ sender: Any?) { if fileDropPresented { (contentView as? PetView)?.fileDrop?.escape() } else if clipboardPresented { (contentView as? PetView)?.dismissClipboard() } else { onCollapse?() } }
     override var canBecomeMain: Bool { false }
 }
 
@@ -574,7 +579,7 @@ final class PetView: NSView {
         }
         installClipboardEvents()
         clipboardDrop = ClipboardDrop(library: library)
-        if !chatExpanded { registerForDraggedTypes(ClipboardPasteboard.supported) }
+        if !chatExpanded { registerForDraggedTypes(FileDropIntake.types) }
         let host = ClipboardShelfHost(rootView: ClipboardShelf(library: library, holding: { [weak self] value in
             self?.clipboardHolding = value; self?.updateBubbleShown()
         }))
@@ -588,9 +593,9 @@ final class PetView: NSView {
             clipboardShortcutAwaitingEntry = false; clipboardRowEntered = nil; clipboardExitDeadline = nil
             if clipboardResizing { clipboardResizing = false; resizeDrag = nil }
         }
-        let shown = enabled && !clipboardDismissed && (clipboardRequested || clipboardIncoming) && !chatExpanded && !morphing && !genieActive
+        let shown = fileDrop?.visible != true && enabled && !clipboardDismissed && (clipboardRequested || clipboardIncoming) && !chatExpanded && !morphing && !genieActive
             && previewRow == nil && !previewLook && !didDrag
-        let rowShown = enabled && (shown || (clipboardAvailable && !clipboardAttention && !chatExpanded && !morphing && !genieActive && (hovering || clipboardCopyFrame != nil)))
+        let rowShown = fileDrop?.visible != true && enabled && (shown || (clipboardAvailable && !clipboardAttention && !chatExpanded && !morphing && !genieActive && (hovering || clipboardCopyFrame != nil)))
         let rowChanged = clipboardRow.isHidden == rowShown
         if rowShown { clipboardSurfaceActive = true }
         clipboardRow.isHidden = !rowShown
@@ -617,16 +622,50 @@ final class PetView: NSView {
         if rowChanged { onClipboardGeometry?(); needsLayout = true }
         updateClipboardEventScope()
     }
+    var fileDropNotice = false { didSet { if oldValue != fileDropNotice { updateBubbleShown() } } }
+    var fileDrop: FileDropCard?
+    private var fileDropHost: NSHostingView<FileDropCardView>?
+    var fileDropContentFits: Bool {
+        guard let host = fileDropHost else { return false }
+        return bubbleSurface.frame.insetBy(dx: -1, dy: -1).contains(host.frame) && !bubbleText.isHidden && bubbleText.frame.height == FileDropCard.footer
+    }
+    var fileDropPointer: CGPoint?
+    func fileDropContains(_ point: CGPoint) -> Bool { bubbleSurface.frame.contains(convert(point, from: nil)) }
+    func installFileDrop(_ card: FileDropCard) {
+        fileDrop = card
+        fileDropHost?.removeFromSuperview(); fileDropHost = nil
+        registerForDraggedTypes(FileDropIntake.types)
+    }
+    func updateFileDropPresentation() {
+        let shown = fileDrop?.visible == true && !chatExpanded
+        if shown, fileDropHost == nil, let card = fileDrop {
+            let host = NSHostingView(rootView: FileDropCardView(card: card)); host.sizingOptions = []; host.wantsLayer = true
+            addSubview(host); fileDropHost = host
+        } else if !shown { fileDropHost?.removeFromSuperview(); fileDropHost = nil }
+        (window as? PetPanel)?.fileDropPresented = shown
+        if shown { dismissClipboard(); cancelClipboardCopyNotice(); bubbleText.isHidden = false }
+        else { bubbleText.isHidden = chatExpanded || clipboardPresented }
+        updateBubbleShown(); needsLayout = true
+    }
     override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
-        guard !chatExpanded, sender.draggingSourceOperationMask.contains(.copy), clipboardDrop?.accepts(sender.draggingPasteboard) == true else { return [] }
+        guard !chatExpanded, sender.draggingSourceOperationMask.contains(.copy) else { return [] }
+        if let card = fileDrop, card.enabled {
+            guard !(sender.draggingSource is ClipboardCardView) else { return [] }
+            fileDropPointer = window?.convertPoint(toScreen: sender.draggingLocation)
+            return card.target(sender.draggingPasteboard) ? .copy : []
+        }
+        guard clipboardDrop?.accepts(sender.draggingPasteboard) == true else { return [] }
         clipboardIncoming = true; updateBubbleShown(); return .copy
     }
     override func draggingUpdated(_ sender: NSDraggingInfo) -> NSDragOperation { draggingEntered(sender) }
-    override func draggingExited(_ sender: NSDraggingInfo?) { clipboardIncoming = false; updateBubbleShown() }
-    override func prepareForDragOperation(_ sender: NSDraggingInfo) -> Bool { !chatExpanded && clipboardDrop?.accepts(sender.draggingPasteboard) == true }
+    override func draggingExited(_ sender: NSDraggingInfo?) {
+        fileDropPointer = nil; fileDrop?.leave(); clipboardIncoming = false; updateBubbleShown()
+    }
+    override func prepareForDragOperation(_ sender: NSDraggingInfo) -> Bool { draggingEntered(sender) == .copy }
     override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
-        defer { clipboardIncoming = false; updateBubbleShown() }
+        defer { fileDropPointer = nil; clipboardIncoming = false; updateBubbleShown() }
         guard !chatExpanded else { return false }
+        if let card = fileDrop, card.enabled { return card.receive(sender.draggingPasteboard) }
         return clipboardDrop?.receive(sender.draggingPasteboard) == true
     }
     /// Folding the conversation leaves the pointer on the pet or where the bubble lands. That is not a visit:
@@ -635,9 +674,9 @@ final class PetView: NSView {
     private func updateBubbleShown() {
         // The glass is still on its way down from the conversation's size. This goes by the glass itself, not by
         // whether the fold was ever marked as finished.
-        let folding = !clipboardPresented && (bubbleSurface.frame.height > foldedHeight + 1 || bubbleSurface.frame.width > PetLayout.bubbleSize.width + 1)
+        let folding = fileDrop?.visible != true && !clipboardPresented && (bubbleSurface.frame.height > foldedHeight + 1 || bubbleSurface.frame.width > PetLayout.bubbleSize.width + 1)
         if morphing, !chatExpanded, !folding { finishMorph() }
-        var held = chatExpanded || folding || previewRow != nil || previewLook || didDrag
+        var held = fileDropNotice || fileDrop?.visible == true || chatExpanded || folding || previewRow != nil || previewLook || didDrag
             || (!isPaused && (state == .waiting || slackModel?.needsPetApproval == true))
         if !chatExpanded, let window, window.isVisible {
             let head = atlas.interactionRect(in: spriteRect), pointer = pointerLocation()
@@ -907,8 +946,8 @@ final class PetView: NSView {
     var chatExpanded = false { didSet {
         guard chatExpanded != oldValue else { return }
         if clipboardDrop != nil {
-            if chatExpanded { unregisterDraggedTypes() }
-            else { registerForDraggedTypes(ClipboardPasteboard.supported) }
+            if chatExpanded { fileDrop?.close(); unregisterDraggedTypes() }
+            else { registerForDraggedTypes(FileDropIntake.types) }
         }
         // Both stay on screen while the glass moves; each is put away when it has faded. With motion turned down nothing lingers.
         morphing = !reducesMotion
@@ -946,6 +985,7 @@ final class PetView: NSView {
         let local = convert(point, from: superview)
         if spriteContains(local) { return self }
         guard (bubbleShown ? spriteRect.union(bubbleSurface.frame) : spriteRect).insetBy(dx: -12, dy: -12).contains(local) else { return nil }
+        if fileDrop?.visible == true, let host = fileDropHost, host.frame.contains(local) { return host.hitTest(local) ?? host }
         if !resizeEdge(local).isEmpty { return self }
         if hasWidthPicture { return widthHeader.frame.contains(local) ? widthHeader : self }
         if clipboardRowVisible, clipboardRowRect.contains(local) { return clipboardRow }
@@ -1172,11 +1212,21 @@ final class PetView: NSView {
         if spriteSurface.frame.size != previousSize { spriteSurface.needsDisplay = true }
         bubbleSurface.frame = placement?.bubbleRect ?? PetLayout(scale: petScale).bubbleRect
         surfaceContent.frame = NSRect(origin: .zero, size: bubbleSurface.frame.size)
+        if let host = fileDropHost, let card = fileDrop, card.visible {
+            // Full final content while the existing glass morphs; clip to its visible
+            // interior so SwiftUI never lays out against transient tiny dimensions.
+            let rect = bubbleSurface.frame
+            let height = card.size.height - FileDropCard.footer
+            host.frame = NSRect(x: rect.midX - card.size.width / 2, y: rect.maxY - height, width: card.size.width, height: height)
+            let mask = CAShapeLayer()
+            mask.path = CGPath(roundedRect: CGRect(x: max(0, (card.size.width - rect.width) / 2), y: 0, width: min(card.size.width, rect.width), height: max(0, min(height, rect.height - FileDropCard.footer))), cornerWidth: 20, cornerHeight: 20, transform: nil)
+            host.layer?.mask = mask
+        }
         scrim.frame = surfaceContent.bounds
         let rowHeight: CGFloat = clipboardRowVisible ? (clipboardPresented ? ClipboardDrawer.footerHeight : ClipboardDrawer.rowHeight) : 0
         let below = placement?.bubbleBelow == true
         let regions = ClipboardDrawer.regions(in: surfaceContent.bounds, rowHeight: rowHeight, below: below)
-        bubbleText.frame = regions.content
+        bubbleText.frame = fileDrop?.visible == true ? NSRect(x: 0, y: 0, width: surfaceContent.bounds.width, height: min(FileDropCard.footer, surfaceContent.bounds.height)) : regions.content
         clipboardCopyText.frame = bubbleText.frame
         clipboardRow.below = below; clipboardRow.frame = regions.row
         clipboardHost?.frame = regions.content.offsetBy(dx: bubbleSurface.frame.minX, dy: bubbleSurface.frame.minY)
@@ -1260,7 +1310,7 @@ final class PetView: NSView {
         bubbleText.setPulseAllowed(!isPaused && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion)
         guard !isPaused else { return }
         let now = ProcessInfo.processInfo.systemUptime
-        let mouse = NSEvent.mouseLocation
+        let mouse = fileDropPointer ?? NSEvent.mouseLocation
         let rect = window.convertToScreen(convert(atlas.interactionRect(in: spriteRect), to: nil))
         let display = NSScreen.screens.first { $0.frame.contains(CGPoint(x: rect.midX, y: rect.midY)) } ?? window.screen
         let reduced = reducesMotion
@@ -1307,6 +1357,9 @@ final class PetView: NSView {
                                                                    previous: wasLooking ? displayedFrame : nil) {
                 frame = look; looking = true
             }
+        }
+        if let target = fileDropPointer, let look = PetAnimationTimeline.lookFrame(from: CGPoint(x: rect.midX, y: rect.midY), toward: target, previous: wasLooking ? displayedFrame : nil) {
+            frame = look; looking = true
         }
         if wasLooking && !looking { animationStarted = now }
         wasLooking = looking

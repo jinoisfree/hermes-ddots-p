@@ -98,7 +98,7 @@ extension ChatView {
         var text = text
         if message.streaming {
             let native = NSMutableAttributedString(attributedString: NSAttributedString(text))
-            MessageFormat.uniformSize(native, size: ChatMetrics.bodyFont)
+            MessageFormat.uniformSize(native, size: ChatMetrics.bodyFont, codeSize: ChatMetrics.bodyFont - 1)
             text = AttributedString(native)
         }
         guard let term = slack.findTerm(message) else { return text }

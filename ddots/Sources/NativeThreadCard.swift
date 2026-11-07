@@ -210,7 +210,11 @@ final class NativeThreadCard: NSTableCellView, NSTextViewDelegate {
     static let releaseStep: CGFloat = 6
     /// Asks the list to lay a card out again on the next frame while its height eases.
     static var settle: ((String) -> Void)?
+    private static var measuredFont = ChatMetrics.bodyFont
     static func layout(_ content: Content, width: CGFloat) -> Layout {
+        if measuredFont != ChatMetrics.bodyFont {
+            streamHeights.removeAll(); releasing.removeAll(); measuredFont = ChatMetrics.bodyFont
+        }
         let inset = content.style.inset
         let usable = max(1, width - 2 * inset)
         var placed: [Placed] = []
@@ -745,7 +749,8 @@ final class NativeThreadCard: NSTableCellView, NSTextViewDelegate {
                     NSBezierPath(roundedRect: item.frame.offsetBy(dx: dx, dy: 0), xRadius: 8, yRadius: 8).fill()
                 }
                 if post.mine {
-                    NSColor.systemBlue.withAlphaComponent(post.pending ? 0.6 : 1).setFill()
+                    let mine = UserBubblePalette(dark: effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua, pending: post.pending)
+                    mine.background.nsColor.withAlphaComponent(mine.alpha).setFill()
                     NSBezierPath(roundedRect: item.aside.offsetBy(dx: dx, dy: 0), xRadius: 16, yRadius: 16).fill()
                     if post.interrupted { label("답이 중단됐어요", frame: item.fold, font: .systemFont(ofSize: ChatMetrics.auxiliaryFont), color: c.quiet, right: true) }
                     label(post.time, frame: item.time, font: .systemFont(ofSize: ChatMetrics.auxiliaryFont), color: c.quiet, right: true)

@@ -50,7 +50,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
     var pet: PetView!
     var dashboard: NSWindow?
     var homeRoomPicker: NSPopUpButton?
-    var chatThemePicker: NSPopUpButton?
+    var appearanceControls: ChatAppearanceControls?
+    var chatThemePicker: NSSegmentedControl?
+    let fileDrop = FileDropCard()
+    let fileDropWatch = FileDropWatch()
+    var fileDropHistory: FileDropHistory?
+    var fileDropEngines: [String: FileDropCard.Engine] = [:]
+    lazy var fileDropSettings = FileDropSettings(defaults: isSmoke ? nil : .standard)
+    var fileDropLocalEvents: Any?
+    var fileDropGlobalEvents: Any?
     var optionsWindow: NSWindow?
     var settingsTabs: NSTabView?
     var settingsScroll: NSScrollView? { settingsTabs?.selectedTabViewItem?.view as? NSScrollView }
@@ -144,6 +152,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
     var lastSearchMilliseconds = 0.0
     var calendar = MacCalendar(observe: !CommandLine.arguments.contains("--ui-smoke"))
     var calendarWindow: NSWindow?
+    var agentConnectionsWindow: NSWindow?
+    var agentConnectionsModel: AgentConnectionsModel?
     let chat = ChatModel()
     let slack = SlackController()
     let web = WebPaneModel()
@@ -296,6 +306,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary, .ignoresCycle]
         panel.appearance = (isSmoke ? ChatTheme.system : ChatTheme.load()).appearance
         panel.contentView = pet
+        prepareFileDrop()
         pet.autoresizingMask = [.width, .height]
         pet.onClick = { [weak self] count in self?.petClicked(count: count) }
         pet.onPress = { [weak self] in
@@ -458,6 +469,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         restorePosition()
         panel.orderFrontRegardless()
         NotificationCenter.default.addObserver(self, selector: #selector(screensChanged), name: NSApplication.didChangeScreenParametersNotification, object: nil)
+        for name in [NSApplication.didResignActiveNotification, NSApplication.didBecomeActiveNotification] {
+            NotificationCenter.default.addObserver(self, selector: #selector(updateAgentConnectionsLevel(_:)), name: name, object: NSApp)
+        }
         if !CommandLine.arguments.contains("--ui-smoke") {
             connectHermesSource(); slack.restore(); refresh()
             // A `relayPort` changed since the share was turned on takes effect without turning it off and on.
@@ -553,10 +567,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
                     return
                 }
                 self.capture(destination: destination)
-                if CommandLine.arguments.contains("--ui-smoke-clipboard") { Task { @MainActor in await self.verifyClipboard(destination: destination) } }
+                if CommandLine.arguments.contains("--ui-smoke-file-drop") { Task { @MainActor in await self.verifyFileDrop(destination: destination) } }
+                else if CommandLine.arguments.contains("--ui-smoke-clipboard") { Task { @MainActor in await self.verifyClipboard(destination: destination) } }
                 else if CommandLine.arguments.contains("--ui-smoke-hybrid") { self.verifyHybridChat(destination: destination) }
                 else if CommandLine.arguments.contains("--ui-smoke-update-notices") { self.verifyUpdateNotices(destination: destination) }
                 else if CommandLine.arguments.contains("--ui-smoke-update-reminder") { self.verifyUpdateReminder(destination: destination) }
+                else if CommandLine.arguments.contains("--ui-smoke-appearance") { self.verifyChatAppearance(destination: destination) }
+                else if CommandLine.arguments.contains("--ui-smoke-connections") { self.verifyAgentConnections(destination: destination) }
                 else if CommandLine.arguments.contains("--ui-smoke-connect-offer") { self.verifyConnectOffer(destination: destination) }
                 else if CommandLine.arguments.contains("--ui-smoke-streaming") { self.verifyStreaming(destination: destination) }
                 else if CommandLine.arguments.contains("--ui-smoke-faces") { self.verifyDdotsFaces(destination: destination) }
@@ -763,6 +780,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
     }
     private var genieSlackConnected = false
     func slackChanged() {
+        if !isSmoke { bindFileDropHistory(); fileDropHistory?.refresh() }
+        fileDropWatch.update(slack.fileDropThreads)
+        slack.followFileDrops(fileDropWatch.assignments)
         refreshHomeRoomSettings()
         let workStart = StallTrace.now
         defer { StallTrace.shared.record("slack.changed", since: workStart) }
@@ -1044,6 +1064,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
     /// One click opens the conversation and one click folds it; the second click of a double click does nothing more.
     func petClicked(count: Int) {
         guard count == 1 else { return }
+        if let notice = fileDropWatch.notices.first {
+            fileDropWatch.notices.removeFirst(); showChat(); slack.reveal(notice.thread.root.id); updatePet(); return
+        }
         if chatExpanded { collapseChat() } else { showChat() }
     }
     func perform(_ action: PetAction) {
@@ -1187,6 +1210,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         }
         statusItem.button?.toolTip = "ddots · \(model.identity.name) · 작업 중 \(model.tasks.filter { $0.state == .running }.count)개 · 안 읽은 답 \(unreadTotal)개"
         guard !isPreview else { return }
+        pet.fileDropNotice = !fileDropWatch.notices.isEmpty
         pet.bubbleText.avatarName = nil; pet.bubbleText.avatar = nil; pet.chatAnimation = nil
         bubbleAlert = nil
         approvalBubbleMessageID = nil
@@ -1194,6 +1218,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         if model.paused {
             setBubbleActions([])
             pet.state = .idle; pet.headline = "\(model.identity.subject) 쉬고 있어요"; pet.subtitle = "메뉴에서 다시 시작할 수 있어요"; return
+        }
+        if let notice = fileDropWatch.notices.first {
+            let name = fileDrop.profileName(notice.profile)
+            setBubbleActions([]); pet.state = notice.state == .asking ? .waiting : .idle
+            pet.headline = (notice.state == .asking ? "🔴 " : "🟢 ") + name + Ddots.particle(name) + (notice.state == .asking ? " 물어봐요" : " 끝냈어요 · " + notice.label)
+            pet.subtitle = "눌러서 스레드 보기"
+            pet.bubbleText.avatar = Ddots.avatar(chat.avatars[notice.profile], name: name); pet.bubbleText.avatarName = name
+            return
         }
         if let approval = slack.model.petApproval {
             let message = approval.message
@@ -1287,11 +1319,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         menu.addItem(.separator())
         addMenu("펫 숨기기", #selector(togglePet)); petMenuItem = menu.items.last
         addMenu("잠시 쉬기", #selector(togglePause)); pauseMenuItem = menu.items.last
+        addMenu("글 붙여넣어 맡기기", #selector(openFileDropText))
         addMenu("클립보드 기록 멈춤/다시 시작", #selector(toggleClipboardPause))
         addMenu("클립보드 비우기", #selector(clearClipboard))
         menu.addItem(.separator())
-        addMenu("설정…", #selector(showOptions))
-        menu.items.last?.keyEquivalent = ","
+        addMenu("설정…", #selector(showOptions), key: ",")
+        addMenu("에이전트 연결…", #selector(showAgentConnections))
         let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "?"
         let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "?"
         let versionItem = NSMenuItem(title: "ddots \(version) (빌드 \(build))", action: nil, keyEquivalent: "")
@@ -1300,8 +1333,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         addMenu("화면 상태 기록", #selector(recordThreadLayout))
         addMenu("업데이트 확인…", #selector(checkAppUpdate))
         menu.addItem(.separator())
-        addMenu("ddots 종료", #selector(quit))
-        menu.items.last?.keyEquivalent = "q"
+        addMenu("ddots 종료", #selector(quit), key: "q")
         statusItem.menu = menu
     }
     /// Writes how the Slack list is laid out right now (ids, numbers and view classes only) and shows the file.
@@ -1363,8 +1395,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         sender.state = pet.bubbleAlwaysShown ? .on : .off
         if !isSmoke { UserDefaults.standard.set(pet.bubbleAlwaysShown, forKey: BubbleReveal.settingsKey) }
     }
-    func addMenu(_ title: String, _ selector: Selector, to parent: NSMenu? = nil) {
-        let item = NSMenuItem(title: title, action: selector, keyEquivalent: ""); item.target = self; (parent ?? menu).addItem(item)
+    func addMenu(_ title: String, _ selector: Selector, to parent: NSMenu? = nil, key: String = "") {
+        let item = NSMenuItem(title: title, action: selector, keyEquivalent: key); item.target = self; (parent ?? menu).addItem(item)
     }
     /// Any item of the menu or its submenus, by title.
     func menuItem(titled title: String, in parent: NSMenu? = nil) -> NSMenuItem? {
@@ -1377,6 +1409,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
     @objc func showCalendar() {
         guard !isSmoke else { return }
         calendar.browse(); presentCalendar()
+    }
+    @MainActor @objc func showAgentConnections() {
+        if agentConnectionsWindow == nil {
+            let readOnly = !(UserDefaults.standard.string(forKey: RelaySettings.hostKey) ?? "").isEmpty
+            let model = AgentConnectionsModel(remote: remoteHermes, readOnly: readOnly,
+                fixture: isSmoke ? AgentConnectionsSmoke.document : nil,
+                runCommand: isSmoke ? { _ in throw ConnectionFailure.command } : nil,
+                openLogin: { [weak self] url in self?.isSmoke == false && NSWorkspace.shared.open(url) })
+            model.avatars = chat.avatars
+            let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 760, height: 560),
+                                  styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
+            window.title = "에이전트 연결"; window.isReleasedWhenClosed = false
+            window.contentView = NSHostingView(rootView: AgentConnectionsView(model: model))
+            window.minSize = NSSize(width: 760, height: 500); window.center()
+            agentConnectionsModel = model; agentConnectionsWindow = window
+        }
+        agentConnectionsWindow?.appearance = ChatTheme.load().appearance
+        agentConnectionsModel?.avatars = chat.avatars
+        agentConnectionsModel?.refresh()
+        agentConnectionsWindow?.level = NSApp.isActive ? NSWindow.Level(rawValue: panel.level.rawValue + 1) : .normal
+        NSApp.activate(ignoringOtherApps: true); agentConnectionsWindow?.makeKeyAndOrderFront(nil)
     }
     func presentCalendar() {
         if calendarWindow == nil {
@@ -1573,6 +1626,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
 
     /// Uses another Mac's relayed record when one is configured, otherwise this Mac's own.
     func connectHermesSource() {
+        agentConnectionsModel?.close(); agentConnectionsWindow?.close()
+        agentConnectionsModel = nil; agentConnectionsWindow = nil
         let defaults = UserDefaults.standard
         var source: HermesSource = HermesBridge(); var remote: RemoteHermes?
         if let host = defaults.string(forKey: RelaySettings.hostKey).flatMap(RelaySettings.validHost),
@@ -1580,13 +1635,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
             let client = RemoteHermes(host: host, port: RelaySettings.remotePort, token: token, portraits: relayPortraits, includeMessages: IMessageFeature.enabled)
             client.onChange = { [weak self] in DispatchQueue.main.async { self?.refresh() } }
             // Screen choices shared with this Slack account's other Macs travel on the same link.
+            client.onDropSync = { [weak self] user, entries in DispatchQueue.main.async {
+                guard let self, self.fileDropHistory?.store.user == user else { return }; self.fileDropHistory?.receive(entries)
+            } }
             client.onSync = { [weak self] user, entries in DispatchQueue.main.async { self?.slack.receiveSynced(user: user, entries: entries) } }
-            client.onLinked = { [weak self] in DispatchQueue.main.async { self?.slack.syncSendAll() } }
+            client.onLinked = { [weak self] in DispatchQueue.main.async { self?.slack.syncSendAll(); self?.fileDropHistory?.sendAll(); self?.updateFileDropDefaultEngine() } }
             source = client; remote = client
         }
         let old = remoteHermes
         replaceHermesSource(source)
         remoteHermes = remote
+        if !isSmoke { bindFileDropHistory(force: true); updateFileDropDefaultEngine() }
         slack.syncSend = remote.map { client in { entries, user, replace in client.sendSync(user: user, entries: entries, replace: replace) } }
         old?.stop()
         if hermesEnabled { remote?.start() }
@@ -1823,8 +1882,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
             themeTitle.font = .systemFont(ofSize: 14, weight: .semibold)
             themeTitle.frame = NSRect(x:24,y:389,width:120,height:22)
             content.addSubview(themeTitle)
-            let themePicker = NSPopUpButton(frame: NSRect(x:155,y:384,width:183,height:30), pullsDown: false)
-            themePicker.addItems(withTitles: ChatTheme.allCases.map(\.title))
+            let themePicker = NSSegmentedControl(labels: ["시스템 설정", "라이트", "다크"], trackingMode: .selectOne, target: nil, action: nil)
             themePicker.target = self; themePicker.action = #selector(changeChatTheme(_:))
             themePicker.setAccessibilityLabel("대화창 테마")
             content.addSubview(themePicker); chatThemePicker = themePicker
@@ -1854,6 +1912,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
             }
             page("일반", [[usageTitle, paseoStatus], [login, loginStatus, loginSettings],
                          [updateNotices], [action("업데이트 연결…", #selector(connectAppUpdate))]])
+            let dropHost = NSHostingView(rootView: FileDropSettingsView(settings: fileDropSettings))
+            dropHost.frame = NSRect(x: 0, y: 0, width: 500, height: 580)
+            page("끌어놓기", [[dropHost]])
             if let clipboard {
                 let host = NSHostingView(rootView: ClipboardSettingsView(library: clipboard, persist: !isSmoke))
                 host.frame = NSRect(x: 0, y: 0, width: 450, height: 450)
@@ -1864,8 +1925,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
             let tap = check(ThreeTapController.title, #selector(toggleThreeTap)); tapCheckbox = tap
             // Keep the size endpoint labels together with their slider.
             let endpoints = content.subviews.filter { $0 is NSTextField && $0.frame.minY == 65 }
-            page("화면과 펫", [[themeTitle, themePicker], [opacityTitle, opacityValue, opacity, opacityEnds, opacityHint],
-                [resetChat], [nameLabel, nameField, saveName, nameHint],
+            let previewProfile = chat.characters.first
+            let appearance = ChatAppearanceControls(theme: themePicker, opacity: opacity, opacityValue: opacityValue, resetSize: resetChat,
+                name: previewProfile?.name ?? "ddots", palette: { [weak self] dark in
+                    self?.chat.palette(previewProfile?.id ?? "", dark: dark) ?? CharacterPalette.make(hue: nil, dark: dark)
+                }, persist: !isSmoke)
+            appearanceControls = appearance
+            page("화면과 펫", [[appearance], [nameLabel, nameField, saveName, nameHint],
                 [title, value, slider, hint, reset] + endpoints,
                 [bubble], [tap], [action("펫 위치 초기화", #selector(resetPosition))]])
             let homeTitle = NSTextField(labelWithString: "고정 채널")
@@ -1877,6 +1943,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
             homePicker.target = self; homePicker.action = #selector(changeHomeRoom(_:))
             homeRoomPicker = homePicker
             page("연결과 동기화", [
+                [action("에이전트 연결…", #selector(showAgentConnections))],
                 [homeTitle, homePicker],
                 [action("Slack 연결…", #selector(configureSlack))],
                 [action("Hermes 연결…", #selector(configureHermes))],
@@ -1905,7 +1972,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         refreshLoginLaunch()
         updateNoticeCheckbox?.state = updateNoticeSettings.enabled ? .on : .off
         paseoStatusLabel?.stringValue = usage.paseoStatus
-        chatThemePicker?.selectItem(at: ChatTheme.allCases.firstIndex(of: ChatTheme.load()) ?? 0)
+        chatThemePicker?.selectedSegment = ChatTheme.allCases.firstIndex(of: ChatTheme.load()) ?? 0
         let opacityPercent = BubbleOpacity.load()
         opacitySlider?.doubleValue = opacityPercent; opacityValueLabel?.stringValue = "\(Int(opacityPercent))%"
         let percent = (pet.petScale * 100).rounded()
@@ -1913,6 +1980,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         petNameField?.stringValue = model.identity.name
         petNameHint?.stringValue = "1~20자 · 저장하면 모든 화면에 적용됩니다."
         petNameHint?.textColor = .secondaryLabelColor
+        appearanceControls?.refresh()
         NSApp.activate(ignoringOtherApps: true); optionsWindow?.makeKeyAndOrderFront(nil)
     }
     func refreshHomeRoomSettings() {
@@ -1956,6 +2024,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         updateNoticeSettings.setEnabled(sender.state == .on)
         appUpdate?.noticesChanged()
     }
+    @objc func updateAgentConnectionsLevel(_ notification: Notification) {
+        guard let window = agentConnectionsWindow else { return }
+        if notification.name == NSApplication.didResignActiveNotification {
+            window.level = .normal
+        } else if window.isVisible {
+            window.level = NSWindow.Level(rawValue: panel.level.rawValue + 1)
+        }
+    }
+
     func applicationDidBecomeActive(_ notification: Notification) {
         refreshLoginLaunch()
         if !isSmoke { calendar.refresh(force: true) }
@@ -1988,16 +2065,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         petNameHint?.stringValue = "이름을 저장했어요. 모든 화면에 적용했습니다."
         petNameHint?.textColor = .secondaryLabelColor
     }
-    @objc func changeChatTheme(_ sender: NSPopUpButton) {
-        guard ChatTheme.allCases.indices.contains(sender.indexOfSelectedItem) else { return }
-        let theme = ChatTheme.allCases[sender.indexOfSelectedItem]
+    @objc func changeChatTheme(_ sender: NSSegmentedControl) {
+        guard ChatTheme.allCases.indices.contains(sender.selectedSegment) else { return }
+        let theme = ChatTheme.allCases[sender.selectedSegment]
         if !isSmoke { UserDefaults.standard.set(theme.rawValue, forKey: ChatTheme.settingsKey) }
         panel.appearance = theme.appearance
+        agentConnectionsWindow?.appearance = theme.appearance
+        appearanceControls?.refresh()
     }
     @objc func changeChatOpacity(_ sender: NSSlider) {
         let percent = BubbleOpacity.clamped(sender.doubleValue)
         if !isSmoke { UserDefaults.standard.set(percent, forKey: BubbleOpacity.settingsKey) }
         pet.chatOpacityPercent = percent; opacityValueLabel?.stringValue = "\(Int(percent))%"
+        appearanceControls?.refresh()
     }
     @objc func resizePet(_ sender: NSSlider) { applyPetSize(sender.doubleValue) }
     @objc func resetPetSize() { applyPetSize(100) }
@@ -2327,10 +2407,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
     /// UI smoke uses synthetic messages only. Exercise the same panel and view lifetime as a real click.
     func verifyChatInteraction(destination: URL) {
         let savedAppearance = panel.appearance
-        let picker = NSPopUpButton()
-        picker.addItems(withTitles: ChatTheme.allCases.map(\.title))
+        let picker = NSSegmentedControl(labels: ["시스템 설정", "라이트", "다크"], trackingMode: .selectOne, target: nil, action: nil)
         for (index, theme) in ChatTheme.allCases.enumerated() {
-            picker.selectItem(at: index); changeChatTheme(picker)
+            picker.selectedSegment = index; changeChatTheme(picker)
             if let appearance = theme.appearance {
                 smokeCheck(pet.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == appearance.name, "Chat theme reaches the bubble and its content")
             } else {

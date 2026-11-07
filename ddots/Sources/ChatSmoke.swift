@@ -437,3 +437,91 @@ extension AppDelegate {
         try? report.write(to:destination.appendingPathComponent("pet-edges.txt"),atomically:true,encoding:.utf8)
     }
 }
+
+extension AppDelegate {
+    @MainActor func verifyChatAppearance(destination: URL) {
+        Task { @MainActor in
+            showOptions(); settingsTabs?.selectTabViewItem(withIdentifier: "화면과 펫")
+            guard let controls = appearanceControls, let theme = chatThemePicker, let opacity = opacitySlider else { smokeFailed("appearance controls missing") }
+            let originalScale = pet.petScale
+            smokeCheck(theme.segmentCount == 3, "three theme segments")
+            opacity.doubleValue = 65; changeChatOpacity(opacity)
+            func descendants(_ view: NSView) -> [NSView] { [view] + view.subviews.flatMap(descendants) }
+            let buttons = descendants(controls).compactMap { $0 as? NSButton }
+            smokeCheck(buttons.filter { $0.title == "기본값으로" }.count == 1, "one appearance reset")
+            smokeCheck(buttons.filter { $0.toolTip != nil }.count == 14, "fourteen named swatches")
+            smokeCheck(controls.fontSlider.numberOfTickMarks == 7, "seven font stops")
+            func snapshot(_ name: String, _ view: NSView) {
+                view.layoutSubtreeIfNeeded()
+                guard let bitmap = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { smokeFailed("capture bitmap missing") }
+                view.cacheDisplay(in: view.bounds, to: bitmap)
+                if name == "settings-light-14" {
+                    let x = Int(CGFloat(bitmap.pixelsWide) * 270 / view.bounds.width)
+                    let y = Int(CGFloat(bitmap.pixelsHigh) * 50 / view.bounds.height)
+                    guard let color = bitmap.colorAt(x: x, y: y)?.usingColorSpace(.sRGB) else { smokeFailed("preview pixel missing") }
+                    let brightness = 0.2126 * color.redComponent + 0.7152 * color.greenComponent + 0.0722 * color.blueComponent
+                    print("C-8 light preview captured sRGB brightness: \(brightness)")
+                    smokeCheck(brightness >= 0.9, "light preview stays bright over dark settings at 65 percent")
+                }
+                try! bitmap.representation(using: .png, properties: [:])!.write(to: destination.appendingPathComponent(name + ".png"))
+            }
+            let user = ChatMessage(id: "appearance-native-user", fromUser: true, speaker: "나", body: "내 말풍선의 글씨와 색을 확인합니다. https://example.com", date: Date(), pending: false)
+            var agent = ChatMessage(id: "appearance-native-agent", fromUser: false, speaker: "시험 에이전트", body: "## 크기 확인\n- [ ] 체크리스트 줄\n```\nlet example = 1\n```\n스트리밍 본문이 잘리지 않는지 확인합니다.", date: Date(), profile: chat.characters.first?.id)
+            agent.streaming = true
+            let thread = SlackThread(id: "appearance-thread", room: "CCOW", ts: "1000.0", root: user, replies: [agent], replyCount: 1, loaded: true, latest: Date().timeIntervalSince1970, latestFromUser: false)
+            slack.model.open = [thread.id]; slack.model.threads = [thread]
+            var geometry: [CGFloat: CGFloat] = [:]
+            for dark in [false, true] {
+                optionsWindow?.appearance = NSAppearance(named: .darkAqua)
+                theme.selectedSegment = dark ? 2 : 1; changeChatTheme(theme)
+                for size: CGFloat in [14, 12, 20, 18] {
+                    controls.fontSlider.integerValue = ChatAppearance.fontSizes.firstIndex(of: size)!
+                    controls.fontSlider.sendAction(controls.fontSlider.action, to: controls.fontSlider.target)
+                    if size == 18 { buttons.first { $0.toolTip == "노랑" }!.performClick(nil) }
+                    else { buttons.first { $0.toolTip == "기본" }!.performClick(nil) }
+                    if slack.model.threads[0].root.pending != (size == 18) { slack.model.threads[0].root.pending = size == 18 }
+                    try? await Task.sleep(nanoseconds: 600_000_000)
+                    smokeCheck(ChatMetrics.bodyFont == size, "font slider changes shared source")
+                    let mode = dark ? "dark" : "light", tag = mode + "-" + String(Int(size))
+                    let samples = ["agent": "오늘 나눌 이야기를 정리했어요. 함께 살펴볼까요?", "mine": "좋아, 첫 번째 이야기부터 보여 줘"]
+                    for (key, text) in samples {
+                        guard let frame = controls.previewTextFrames[key] else { smokeFailed("preview text geometry missing: " + key) }
+                        let needed = (text as NSString).boundingRect(with: NSSize(width: frame.width, height: .greatestFiniteMagnitude), options: [.usesLineFragmentOrigin, .usesFontLeading], attributes: [.font: NSFont.systemFont(ofSize: size)]).height
+                        smokeCheck(frame.height >= needed, "preview wraps full text: " + key + " " + tag)
+                        smokeCheck(CGRect(origin: .zero, size: controls.previewSize).contains(frame), "preview contains text: " + key + " " + tag)
+                        print("preview geometry \(tag) \(key): visible=\(frame.height) required=\(needed) container=\(controls.previewSize.height)")
+                    }
+                    snapshot("settings-" + tag, controls)
+                    capture(destination: destination.appendingPathComponent(tag))
+                    if let native = slack.model.nativeGeometry as? NativeThreadList.Coordinator {
+                        let state = native.diagnostics
+                        smokeCheck(!state.cardHeights.isEmpty && state.cardHeights.values.allSatisfy { $0.isFinite && $0 > 0 }, "native cards remeasure to finite positive heights")
+                        if !dark { geometry[size] = state.cardHeights.values.reduce(0,+) }
+                    }
+                    // Exercise the Hermes SwiftUI row even when the iMessage transport is disabled.
+                    let view = ChatView(model: chat, slack: slack.model, web: web)
+                    let mine = ChatMessage(id: "appearance-user", fromUser: true, speaker: "나", body: "선택한 색의 **본문**과 https://example.com 링크", date: Date())
+                    var pending = mine; pending.id += "-pending"; pending.pending = true
+                    let sample = NSHostingView(rootView: VStack(spacing: 14) {
+                        view.row(ChatRow(message: mine, showsSpeaker: false, showsDay: false))
+                        view.row(ChatRow(message: pending, showsSpeaker: false, showsDay: false))
+                    }.padding(16).frame(width: 480, height: 240).background(dark ? Color(white: 0.15) : Color(white: 0.93)).environment(\.colorScheme, dark ? .dark : .light))
+                    let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 480, height: 240), styleMask: [.borderless], backing: .buffered, defer: false)
+                    window.contentView = sample; window.orderFront(nil)
+                    try? await Task.sleep(nanoseconds: 120_000_000)
+                    snapshot("hermes-" + tag, sample); window.orderOut(nil)
+                }
+            }
+            if let small = geometry[12], let normal = geometry[14], let large = geometry[20] {
+                smokeCheck(small < normal && normal < large, "unchanged messages shrink and grow after font changes; stream height cache resets")
+            }
+            else { smokeFailed("native geometry was not exercised") }
+            opacity.doubleValue = 90; changeChatOpacity(opacity)
+            controls.resetAppearance()
+            smokeCheck(ChatMetrics.bodyFont == 14 && ChatAppearance.color() == .blue && theme.selectedSegment == 0 && opacity.doubleValue == 65, "reset changes exactly the four appearance defaults")
+            smokeCheck(pet.petScale == originalScale, "appearance reset keeps pet size")
+            try! "PASS appearance: seven font stops, fourteen swatches, live native geometry, SwiftUI rows, light/dark, reset scope; synthetic input only.\n".write(to: destination.appendingPathComponent("appearance.txt"), atomically: true, encoding: .utf8)
+            NSApp.terminate(nil)
+        }
+    }
+}

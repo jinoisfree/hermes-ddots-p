@@ -119,11 +119,14 @@ def request(home, learning, payload, *, turn_id='', **context):
     if not review and (not enabled(home, learning) or not active(home, turn_id) or context.get('aux_task') or context.get('auxiliary')):
         return None
     result = copy.deepcopy(payload)
-    result['model'] = 'claude-opus-5-5'
-    extra = result.get('extra_body') or {}
     effort = learning.extension('work_runtime').fixed_effort(home, learning) or 'high'
-    extra['reasoning'] = {'enabled': True, 'effort': effort}
-    result['extra_body'] = extra
+    # A provider fallback (e.g. openai-codex) keeps its own model and reasoning; only the
+    # read-only tool limit below still applies. A Claude name there fails as an entitlement 400.
+    if context.get('provider') in (None, '', learning.extension('work_runtime').PROVIDER):
+        result['model'] = 'claude-opus-5-5'
+        extra = result.get('extra_body') or {}
+        extra['reasoning'] = {'enabled': True, 'effort': effort}
+        result['extra_body'] = extra
     reads = READS - (learning.extension('org_review_authority').PRIVATE_READS if review else set())
     if os.environ.get('HERMES_DIAGNOSIS_REQUEST'):
         reads = reads - {'diagnosis_shell_read'}

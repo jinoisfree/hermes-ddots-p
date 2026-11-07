@@ -103,6 +103,9 @@ struct ChatView: View {
             }
             .frame(width: window.size.width, height: window.size.height, alignment: .leading)
         }
+        .onReceive(NotificationCenter.default.publisher(for: ChatAppearance.didChange)) { _ in
+            model.appearanceChanged(); slack.objectWillChange.send()
+        }
         .coordinateSpace(name: "chat-surface")
         .environment(\.openURL, OpenURLAction { url in model.onOpenLink?(url); return .handled })
     }
@@ -445,6 +448,7 @@ struct ChatView: View {
         let message = item.message
         let presentation = model.presentation(message)
         let palette = model.palette(message.profile, dark: dark)
+        let mine = UserBubblePalette(dark: dark, pending: message.pending)
         VStack(alignment: message.fromUser ? .trailing : .leading, spacing: ChatMetrics.nameBodyGap) {
             if item.showsSpeaker {
                 speakerLabel(message.speaker, profile: message.profile, key: message.profile).padding(.leading, ChatMetrics.speakerInset).padding(.top, 4)
@@ -454,13 +458,12 @@ struct ChatView: View {
                 ForEach(Array(SlackNotice.visibleMarks(message.marks).enumerated()), id: \.offset) { _, mark in markNote(mark, message: message) }
                 ForEach(message.files) { fileView($0, in: message) }
             }.font(.system(size: ChatMetrics.bodyFont)).selectableText(selectable)
-                .foregroundColor(message.fromUser ? .white : Color(nsColor:palette.foreground.nsColor))
-                .tint(message.fromUser ? .white : Color(nsColor:palette.link.nsColor))
+                .foregroundColor(message.fromUser ? Color(nsColor: mine.foreground.nsColor) : Color(nsColor:palette.foreground.nsColor))
+                .tint(message.fromUser ? Color(nsColor: mine.link.nsColor) : Color(nsColor:palette.link.nsColor))
                 .padding(.horizontal, 12).padding(.vertical, 8)
-                .background(RoundedRectangle(cornerRadius: 16).fill(message.fromUser ? Color.blue : Color(nsColor:palette.background.nsColor)))
+                .background(RoundedRectangle(cornerRadius: 16).fill(message.fromUser ? Color(nsColor: mine.background.nsColor).opacity(mine.alpha) : Color(nsColor:palette.background.nsColor)))
                 .overlay(RoundedRectangle(cornerRadius:16).stroke(model.highlightedID == message.id ? Color.accentColor : .clear,lineWidth:2))
                 .animation(shouldReduceMotion ? nil : .easeInOut(duration:0.2),value:model.highlightedID == message.id)
-                .opacity(message.pending ? 0.6 : 1)
                 .chatMeasure("bubble:" + message.profile, model: model)
             if !message.fromUser && model.needsFolding(message) {
                 Button(model.expandedReplies.contains(message.id) ? "접기" : "더 보기") { model.toggleReply(message.id) }
@@ -525,8 +528,9 @@ struct ChatView: View {
     private func bodyText(_ message: ChatMessage, palette: CharacterPalette) -> AttributedString {
         var text = slackHighlight(model.displayedText(message), message: message)
         for run in text.runs where run.link != nil {
+            text[run.range].underlineStyle = .single
             // Keep search highlights black on yellow; otherwise use the contrast-tested underlined link color.
-            if run.backgroundColor == nil { text[run.range].foregroundColor = message.fromUser ? Color(red: 0.72, green: 0.9, blue: 1) : Color(nsColor:palette.link.nsColor) }
+            if run.backgroundColor == nil { text[run.range].foregroundColor = message.fromUser ? Color(nsColor: UserBubblePalette(dark: dark, pending: message.pending).link.nsColor) : Color(nsColor:palette.link.nsColor) }
         }
         return text
     }

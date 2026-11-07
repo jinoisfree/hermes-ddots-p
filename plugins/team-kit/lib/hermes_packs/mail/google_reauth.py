@@ -53,18 +53,21 @@ def login_url(text):
     return None
 
 
-def check(script, runner=None):
+def check(script, runner=None, account="company"):
+    if account not in {"company", "personal"}:
+        return {"ok": False, "error": "GOOGLE_REAUTH_INVALID_ACCOUNT", "missing_scopes": []}
+    expected = ACCOUNT if account == "company" else vault.text("accounts.personal.gmail")
     try:
-        proc = (runner or subprocess.run)([sys.executable, str(script), '--account', 'company', '--check'],
+        proc = (runner or subprocess.run)([sys.executable, str(script), '--account', account, '--check'],
             capture_output=True, text=True, timeout=60, check=False,
             env={**os.environ, 'HERMES_DISABLE_LAZY_INSTALLS': '1'})
         if proc.returncode == 0:
             data = json.loads(proc.stdout)
-            if data.get('account') != ACCOUNT:
+            if not expected or data.get('account') != expected:
                 return {'ok': False, 'exit_code': 0, 'error': 'GOOGLE_REAUTH_ACCOUNT_MISMATCH', 'missing_scopes': []}
-            return {'ok': True, 'exit_code': 0, 'account': ACCOUNT, 'missing_scopes': []}
+            return {'ok': True, 'exit_code': 0, 'account': expected, 'missing_scopes': []}
         # Whitelist codes/scopes, never return arbitrary subprocess output.
-        missing = re.search(r'COMPANY_SCOPE_MISSING:\s*([^\n]+)', proc.stderr or '')
+        missing = re.search(r'(?:COMPANY|PERSONAL)_SCOPE_MISSING:\s*([^\n]+)', proc.stderr or '')
         scopes = re.findall(r'https://(?:www.googleapis.com/auth/[a-zA-Z0-9._/-]+|mail.google.com/)', missing[1]) if missing else []
         code = re.search(r'\b(?:COMPANY_[A-Z_]+|PERSONAL_[A-Z_]+|PersonalScopeMismatch|RefreshError|GatewayEnvironmentAmbiguous)\b', proc.stderr or '')
         return {'ok': False, 'exit_code': proc.returncode, 'missing_scopes': scopes,
@@ -110,10 +113,12 @@ def alive(state):
         return False
 
 
-def worker(folder, script):
+def worker(folder, script, account="company"):
     """Detached supervisor persists only URL, process metadata and exit code, never raw output."""
+    if account not in {"company", "personal"}:
+        raise ValueError("GOOGLE_REAUTH_INVALID_ACCOUNT")
     try:
-        proc = subprocess.Popen([sys.executable, '-u', str(script), '--account', 'company', '--login'],
+        proc = subprocess.Popen([sys.executable, '-u', str(script), '--account', account, '--login'],
             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
             env={**os.environ, 'HERMES_DISABLE_LAZY_INSTALLS': '1'})
         for line in proc.stdout:
@@ -176,5 +181,5 @@ def run(td, args, runner=None, popen=None):
 
 
 if __name__ == '__main__':
-    if len(sys.argv) == 4 and sys.argv[1] == '--worker':
-        worker(Path(sys.argv[2]), Path(sys.argv[3]))
+    if len(sys.argv) in (4, 5) and sys.argv[1] == '--worker':
+        worker(Path(sys.argv[2]), Path(sys.argv[3]), sys.argv[4] if len(sys.argv) == 5 else 'company')

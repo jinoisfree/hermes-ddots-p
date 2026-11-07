@@ -146,7 +146,12 @@ def snapshot(home, day):
     latest, previous = {}, {}
     for entry in sorted(data["events"], key=lambda e: e["updated_at"]):
         topic = entry["topic"]
-        if start <= entry["updated_at"] < end:
+        # The 03:50 drop review belongs to this morning's existing report,
+        # whose ordinary learning window remains yesterday.
+        drop_this_morning = (entry.get("source", {}).get("origin") == "ddots-drop-review"
+                             and day == datetime.now(KST).date() - timedelta(days=1)
+                             and end <= entry["updated_at"] <= datetime.now(KST).timestamp())
+        if start <= entry["updated_at"] < end or drop_this_morning:
             if entry.get("via") in {"review", "maintenance"}:
                 latest.pop(topic, None)
             else:
@@ -446,6 +451,12 @@ def recover(home, report, part, marker):
 
 def deliver(home, state, key):
     report = state["reports"][key]
+    if not report.get("parts") and not (report["items"] or report.get("skills", {}).get("items")
+                                        or report.get("routing") or report.get("appendices")):
+        report["complete"] = True
+        report["parts"] = []
+        learning.save(path(home), state)
+        return
     auth = slack(home, "auth.test", {}) if not report.get("channel") or not report.get("parts") else {}
     if not report.get("channel"):
         report["owner"] = owner(home)

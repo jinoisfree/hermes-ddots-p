@@ -60,12 +60,15 @@ enum LoginLaunch {
 
 /// Read-only diagnostics and explicit maintenance commands run before the single-instance guard.
 enum AppMaintenance {
+    static func automationStatus() -> OSStatus {
+        let target = NSAppleEventDescriptor(bundleIdentifier: "com.apple.MobileSMS")
+        return AEDeterminePermissionToAutomateTarget(target.aeDesc, typeWildCard, typeWildCard, false)
+    }
     static func run(arguments: [String]) -> Bool {
         if arguments.contains("--check-automation") {
             let finished = DispatchSemaphore(value: 0)
             DispatchQueue.global(qos: .utility).async {
-                let target = NSAppleEventDescriptor(bundleIdentifier: "com.apple.MobileSMS")
-                let status = AEDeterminePermissionToAutomateTarget(target.aeDesc, typeWildCard, typeWildCard, false)
+                let status = automationStatus()
                 let description: String
                 switch status {
                 case noErr: description = "허용됨"

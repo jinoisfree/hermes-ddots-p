@@ -190,7 +190,7 @@ def _safe(text, learning, *, fact=False):
     return text
 
 
-def snapshot(home, learning):
+def snapshot(home, learning, *, persist_cache=True):
     """Stat cache, bounded sources, stable read check. Never trust a saved index as input."""
     home = Path(home).resolve()
     key = str(home)
@@ -271,7 +271,8 @@ def snapshot(home, learning):
                 _CACHE.popitem(last=False)
             # A failed cache write must not stop a correct read from the originals.
             try:
-                learning.save(home / "state/team-memory-index.json", result)
+                if persist_cache:
+                    learning.save(home / "state/team-memory-index.json", result)
             except OSError:
                 pass
             return result

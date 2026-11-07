@@ -61,7 +61,12 @@ struct RelayFrame: Codable {
             return result
         }
     }
+    var dropVersion: Int?
+    var drop: Data?
+    var file: Int?
+    var part: Int?
     var tapFailure: ThreeTapFailure?
+    var connections: AgentConnectionDocument?
     var op: String
     var id: Int?
     var token: String?

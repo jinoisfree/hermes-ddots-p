@@ -3,13 +3,13 @@ import SwiftUI
 
 final class DraftFormatController: ObservableObject {
     weak var editor: DraftTextView?
-    struct Selection: Equatable { var size = 13; var bold = false; var underline = false }
+    struct Selection: Equatable { var size = Int(ChatMetrics.bodyFont); var bold = false; var underline = false }
     @Published private(set) var selection = Selection()
     func refresh() {
         guard let editor else { return }
         let range = editor.selectedRange()
         let attrs = range.length > 0 && range.location < editor.textStorage!.length ? editor.textStorage!.attributes(at: range.location, effectiveRange: nil) : editor.typingAttributes
-        let font = attrs[.font] as? NSFont ?? NSFont.systemFont(ofSize: MessageFormat.baseSize)
+        let font = attrs[.font] as? NSFont ?? NSFont.systemFont(ofSize: ChatMetrics.bodyFont)
         let next = Selection(size: Int(font.pointSize), bold: NSFontManager.shared.traits(of: font).contains(.boldFontMask), underline: (attrs[.underlineStyle] as? Int ?? 0) != 0)
         DispatchQueue.main.async { [weak self] in if self?.selection != next { self?.selection = next } }
     }
@@ -32,7 +32,8 @@ final class DraftFormatController: ObservableObject {
     func size(_ size: CGFloat) {
         change("글자 크기") { attrs in
             var next = attrs
-            next[.font] = NSFontManager.shared.convert(attrs[.font] as? NSFont ?? .systemFont(ofSize: 13), toSize: size)
+            next[MessageFormat.explicitSizeKey] = size
+            next[.font] = NSFontManager.shared.convert(attrs[.font] as? NSFont ?? .systemFont(ofSize: ChatMetrics.bodyFont), toSize: size)
             next.removeValue(forKey: NSAttributedString.Key("NSOriginalFont"))
             return next
         }
@@ -47,7 +48,7 @@ final class DraftFormatController: ObservableObject {
     func bold() {
         let active = !selection.bold
         change("굵게") { attrs in
-            var next = attrs; let font = attrs[.font] as? NSFont ?? .systemFont(ofSize: 13)
+            var next = attrs; let font = attrs[.font] as? NSFont ?? .systemFont(ofSize: ChatMetrics.bodyFont)
             next[.font] = active ? NSFontManager.shared.convert(font, toHaveTrait: .boldFontMask) : NSFontManager.shared.convert(font, toNotHaveTrait: .boldFontMask)
             next.removeValue(forKey: NSAttributedString.Key("NSOriginalFont"))
             return next
@@ -62,12 +63,14 @@ final class DraftFormatController: ObservableObject {
         if !editor.string.isEmpty { editor.setSelectedRange((editor.string as NSString).paragraphRange(for: editor.selectedRange())) }
         change(level == 0 ? "본문" : "제목") { attrs in
             var next = attrs
-            next[.font] = NSFont.systemFont(ofSize: level == 0 ? 13 : [24.0, 20.0, 16.0][level - 1], weight: level == 0 ? .regular : .bold)
+            if level == 0 { next.removeValue(forKey: MessageFormat.explicitSizeKey) }
+            else { next[MessageFormat.explicitSizeKey] = [24.0, 20.0, 16.0][level - 1] }
+            next[.font] = NSFont.systemFont(ofSize: level == 0 ? ChatMetrics.bodyFont : [24.0, 20.0, 16.0][level - 1], weight: level == 0 ? .regular : .bold)
             next.removeValue(forKey: NSAttributedString.Key("NSOriginalFont"))
             return next
         }
     }
-    func clear() { change("서식 지우기") { _ in MessageFormat.Style().attributes } }
+    func clear() { change("서식 지우기") { _ in MessageFormat.Style(size: ChatMetrics.bodyFont).attributes } }
     enum Lines { case indent, outdent, bullet, numbered, checkbox }
     func lines(_ action: Lines) {
         guard let editor else { return }

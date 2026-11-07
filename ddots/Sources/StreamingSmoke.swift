@@ -63,11 +63,21 @@ extension AppDelegate {
             if let rendered = renderedText(pet) {
                 check(rendered.string.contains("회의 안내") && !rendered.string.contains("**") && !rendered.string.contains("##"), "streaming headings and emphasis are formatted")
                 var uniform = true
+                // TextKit substitutes a Korean fallback font without the fixed-pitch trait.
+                // The fixture, rather than the resolved font trait, identifies the code span.
+                let codeRange = (rendered.string as NSString).range(of: "실제 코드")
+                check(codeRange.location != NSNotFound, "inline code remains in rendered text")
                 rendered.enumerateAttribute(.font, in: NSRange(location: 0, length: rendered.length)) { value, range, _ in
                     if rendered.attributedSubstring(from: range).string != "\u{200B}",
-                       let font = value as? NSFont, abs(font.pointSize - ChatMetrics.bodyFont) > 0.01 { uniform = false }
+                       let font = value as? NSFont {
+                        let expected = NSIntersectionRange(range, codeRange).length > 0 ? ChatMetrics.bodyFont - 1 : ChatMetrics.bodyFont
+                        if abs(font.pointSize - expected) > 0.01 {
+                            print("stream font mismatch: \(font.fontName) size=\(font.pointSize) expected=\(expected) text=\(rendered.attributedSubstring(from: range).string.debugDescription)")
+                            uniform = false
+                        }
+                    }
                 }
-                check(uniform, "streaming headings and body use one font size")
+                check(uniform, "streaming body uses selected size and code uses one point less")
                 var hasTable = false
                 rendered.enumerateAttribute(.paragraphStyle, in: NSRange(location: 0, length: rendered.length)) { value, _, _ in
                     if let style = value as? NSParagraphStyle, !style.textBlocks.isEmpty { hasTable = true }
