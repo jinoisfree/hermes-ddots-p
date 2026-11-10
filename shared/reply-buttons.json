@@ -6,7 +6,16 @@
     "의견",
     "확인"
   ],
-  "contexts": [],
+  "contexts": [
+    {
+      "name": "앱 쓰기 결과",
+      "labels": [
+        "확인",
+        "되돌리기"
+      ],
+      "requires_text": "앱 쓰기 결과"
+    }
+  ],
   "checklists": [],
   "labels": [],
   "patterns": []

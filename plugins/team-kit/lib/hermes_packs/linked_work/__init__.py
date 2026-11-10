@@ -1,5 +1,6 @@
 """Linked work execution with injected account, scope and approval services."""
 from __future__ import annotations
+import uuid
 import json, base64, fcntl, hashlib, logging, html, os, re, sqlite3, subprocess, tempfile, sys, threading, time, unicodedata
 from html.parser import HTMLParser
 from datetime import date as date_type, datetime as datetime_type, timedelta
@@ -37,7 +38,6 @@ class Services:
     _bundle_digest: Any
     _bundle_key: Any
     _bundle_native_source: Any
-    _bundle_requires_approval: Any
     _calendar_alarm_error: Any
     _calendar_direct_mutation: Any
     _calendar_identity_error: Any
@@ -50,7 +50,6 @@ class Services:
     _company_notion_page: Any
     _error: Any
     _home_profile: Any
-    _inverse_bundle_operation: Any
     _is_executor: Any
     _latest_personal_rollback_entry: Any
     _link_bundle_sources: Any
@@ -306,18 +305,6 @@ def _validate_bundle(services, args: dict[str, Any]) -> tuple[list[dict[str, Any
         sources.append({"domain": domain, "source_id": source_id})
     return operations, sources, None
 
-def _bundle_requires_approval(services,
-    operations: list[dict[str, Any]], existing_sources: list[dict[str, str]],
-) -> bool:
-    del existing_sources
-    if any(operation["action"] == "delete" for operation in operations):
-        return True
-    # Creating never asks, whatever the request read; changing what is already there does.
-    if all(operation["action"] == "create" for operation in operations):
-        return False
-    return bool(operations) and (
-        services._messages_lookup_in_request() or services._web_read_in_request() or services._request_scope_marked(services._FILE_READ_SCOPES)
-    )
 
 def _bundle_plan_lines(services, operations: list[dict[str, Any]]) -> str:
     """One readable line per operation for the approval gate."""
@@ -361,33 +348,27 @@ def _bundle_native_source(services,
     return {"domain": domain, "source_id": source_id} if source_id else None
 
 def _personal_rollback_path(services) -> Path:
-    return services.COMMON_WORK_DB.with_name("personal-work-rollback.json")
+    from hermes_constants import get_hermes_home
+    from hermes_governance.app_undo import path_for
+    return path_for(get_hermes_home())
+
+
+def _rollback_partition(services):
+    from hermes_governance.app_undo import partition, legacy_paths
+    from hermes_constants import get_hermes_home
+    return partition(services._personal_rollback_path(), 'personal',
+                     legacy=legacy_paths(get_hermes_home()))
+
 
 def _read_personal_rollback_journal(services) -> dict[str, Any]:
-    path = services._personal_rollback_path()
-    payload: Any = None
-    if path.is_file():
-        try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            payload = None
-    if not isinstance(payload, dict) or not isinstance(payload.get("scopes"), dict):
-        payload = {"version": 1, "scopes": {}}
-    if not isinstance(payload.get("entries"), list):
-        payload["entries"] = []
-    return payload
+    with _rollback_partition(services) as (data, save): return data
+
 
 def _write_personal_rollback_journal(services, payload: dict[str, Any]) -> None:
-    path = services._personal_rollback_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.parent.chmod(0o700)
-    temporary = path.with_suffix(f".tmp-{os.getpid()}-{threading.get_ident()}")
-    temporary.write_text(
-        json.dumps(payload, ensure_ascii=False, sort_keys=True), encoding="utf-8",
-    )
-    temporary.chmod(0o600)
-    temporary.replace(path)
-    path.chmod(0o600)
+    with _rollback_partition(services) as (data, save):
+        data['entries'] = payload['entries']
+        save()
+
 
 def _personal_rollback_conversation(services) -> dict[str, str]:
     """Thread-agnostic identity: Slack opens a thread per top-level message, so a rollback posted as a
@@ -404,8 +385,7 @@ def _personal_rollback_conversation(services) -> dict[str, str]:
     }
 
 def _append_personal_rollback_entry(services, entry: dict[str, Any]) -> None:
-    with services._PERSONAL_ROLLBACK_LOCK:
-        journal = services._read_personal_rollback_journal()
+    with services._PERSONAL_ROLLBACK_LOCK, _rollback_partition(services) as (journal, save):
         now = time.time()
         journal["version"] = 2
         journal["entries"] = [
@@ -427,7 +407,7 @@ def _append_personal_rollback_entry(services, entry: dict[str, Any]) -> None:
             "consumed": False,
             **entry,
         })
-        services._write_personal_rollback_journal(journal)
+        save()
 
 def _save_personal_rollback(services, title: str, bundle_key: str, operations: list[dict[str, Any]]) -> None:
     services._append_personal_rollback_entry({
@@ -454,71 +434,6 @@ def _latest_personal_rollback_entry(services,
             return entry
     return None
 
-def _inverse_bundle_operation(services,
-    operation: dict[str, Any], receipt: dict[str, Any],
-) -> dict[str, Any] | None:
-    domain = operation["domain"]
-    action = operation["action"]
-    reconstruction = (receipt.get("result") or {}).get("reconstruction")
-    if domain == "notes" and reconstruction:
-        return {"domain":"notes", "action":"rollback_rebuild", "arguments":{"reconstruction":reconstruction}}
-    source = services._bundle_native_source(domain, action, operation["arguments"], receipt)
-    target_key = {"calendar": "event_id", "notes": "note_id"}[domain]
-    calendar_after = (receipt.get("result") or {}).get("after") or {} if domain == "calendar" else {}
-    identity_fields = ({"expected_title": calendar_after["title"], "expected_start": calendar_after["start"]}
-                       if "title" in calendar_after and "start" in calendar_after else {})
-    if action == "create":
-        if source is None:
-            return None
-        return {
-            "domain": domain,
-            "action": "delete",
-            "arguments": {target_key: source["source_id"], **identity_fields},
-            "unlink_created_source": True,
-        }
-    snapshot = operation.get("_notes_snapshot")
-    rollback_fields = operation.get("rollback_arguments") or {}
-    complete_fields = all(
-        str(rollback_fields.get(key) or "").strip()
-        for key in ("title", "preview_summary", "summary", "original_text")
-    )
-    # Full structured fields re-render the note (images re-attach properly); otherwise fall back
-    # to the exact pre-change body so an incomplete rollback payload can still undo the edit.
-    if domain == "notes" and action == "update" and isinstance(snapshot, dict) and (not complete_fields or services.obsidian_notes.handles(snapshot.get('note_id'))):
-        return {
-            "domain": "notes", "action": "restore",
-            "arguments": {"note_id": snapshot["note_id"], "body_html": snapshot["body_html"]},
-        }
-    if action in {"update", "move"}:
-        rollback_arguments = dict(operation.get("rollback_arguments") or {})
-        rollback_arguments.update(identity_fields)
-        if domain == "calendar":
-            # Editing a recurring series with span=future splits it and EventKit returns a new
-            # calendarItemIdentifier; the pre-change id no longer owns the edited occurrence.
-            new_id = str(calendar_after.get("calendarItemIdentifier") or "").strip()
-            if new_id and new_id != str(rollback_arguments.get("event_id") or "").strip():
-                rollback_arguments["event_id"] = new_id
-            if "span" not in rollback_arguments and operation["arguments"].get("span"):
-                rollback_arguments["span"] = operation["arguments"]["span"]
-        if domain == "calendar" and ("alarms" in operation["arguments"] or operation["arguments"].get("clear_alarms")):
-            before = (receipt.get("result") or {}).get("before") or {}
-            if "alarmDetails" not in before:
-                return None
-            rollback_arguments.pop("alarms", None)
-            rollback_arguments.pop("clear_alarms", None)
-            rollback_arguments["_restore_alarms"] = before["alarmDetails"]
-        return {"domain": domain, "action": action, "arguments": rollback_arguments}
-    if action == "complete":
-        return {
-            "domain": domain, "action": "reopen",
-            "arguments": {target_key: str(operation["arguments"].get(target_key) or "")},
-        }
-    if action == "reopen":
-        return {
-            "domain": domain, "action": "complete",
-            "arguments": {target_key: str(operation["arguments"].get(target_key) or "")},
-        }
-    return None
 
 def _select_personal_rollback(services,
     journal: dict[str, Any], args: dict[str, Any],
@@ -528,6 +443,13 @@ def _select_personal_rollback(services,
         not isinstance(args["bundle_key"], str) or not args["bundle_key"].strip()
     )):
         return None, {"ok": False, "error": "INVALID_ROLLBACK_ARGUMENTS"}
+    from hermes_governance import bundle_undo
+    chosen=bundle_undo.selected()
+    if chosen is not None:
+        entry=next((e for e in journal['entries'] if e.get('key')==chosen),None)
+        if entry is None or not entry.get('app_ready') or entry.get('consumed'):
+            return None, {'ok':False,'error':'APP_BUNDLE_CHANGE_UNVERIFIED'}
+        return entry,None
     entry = services._latest_personal_rollback_entry(journal, window=services._PERSONAL_ROLLBACK_RETENTION_SECONDS)
     if entry is None:
         return None, {"ok": False, "error": "NO_RECENT_PERSONAL_WORK_ROLLBACK"}
@@ -557,8 +479,7 @@ def _personal_work_rollback(services, args: dict[str, Any], **context: Any) -> s
     if services.personal_roles.enabled(services.host):
         if problem := services._personal_owner_error('personal_work_rollback'):
             return problem
-    with services._PERSONAL_ROLLBACK_LOCK:
-        journal = services._read_personal_rollback_journal()
+    with services._PERSONAL_ROLLBACK_LOCK, _rollback_partition(services) as (journal, save):
         entry, error = services._select_personal_rollback(journal, args)
         if error is not None:
             return json.dumps(error, ensure_ascii=False)
@@ -581,6 +502,11 @@ def _personal_work_rollback(services, args: dict[str, Any], **context: Any) -> s
                 continue
             if operation.get("native_done"):
                 result = {"ok": True, "native_mutation_skipped": True}
+            elif operation.get('component') is not None:
+                from hermes_constants import get_hermes_home
+                from hermes_governance import bundle_undo
+                try:result=bundle_undo.restore_change(get_hermes_home(),services.host,operation,entry,save,context)
+                except (ValueError,OSError,KeyError) as error:result={'ok':False,'error':str(error)}
             else:
                 native_args = {
                     **dict(operation["arguments"]),
@@ -603,6 +529,9 @@ def _personal_work_rollback(services, args: dict[str, Any], **context: Any) -> s
             if result.get("ok") is not True:
                 remaining.append(operation)
                 continue
+            if operation.get('component') is not None:
+                operation['native_done']=True
+                save()  # Cleanup failure must not execute the native inverse twice.
             if operation.get("unlink_created_source"):
                 target_key = {
                     "calendar": "event_id", "notes": "note_id",
@@ -621,7 +550,7 @@ def _personal_work_rollback(services, args: dict[str, Any], **context: Any) -> s
         entry["operations"] = remaining
         entry["consumed"] = not remaining
         entry["rolled_back_at"] = time.time() if not remaining else None
-        services._write_personal_rollback_journal(journal)  # entry is a live element of journal["entries"]
+        save()  # entry is a live element of journal["entries"]
         older = services._latest_personal_rollback_entry(journal)
         return json.dumps({
             "ok": not remaining and not skipped,
@@ -745,9 +674,18 @@ def _personal_work_bundle(services, args: dict[str, Any], **context: Any) -> str
             except (ValueError, TypeError) as exc:
                 return services._error(str(exc))
 
+    from hermes_constants import get_hermes_home
+    from hermes_governance import bundle_undo,app_tools,write_policy
+    home=get_hermes_home()
     digest = services._bundle_digest(normalized_args)
     bundle_key = services._bundle_key(digest)
     store = services._common_work_store()
+    try:
+        if not write_policy.owner_chat(home,app_tools.env):raise ValueError('APP_OWNER_CHAT_REQUIRED')
+        replay=store.bundle_receipt(bundle_key=bundle_key,payload_digest=digest)
+        if replay is not None:return json.dumps(replay,ensure_ascii=False)
+        prepared=bundle_undo.admission(home,services.host,args,operations,context)
+    except (ValueError,OSError,sqlite3.Error) as error:return services._error(str(error),mutation_calls=0)
     try:
         replay = store.begin_bundle_execution(bundle_key=bundle_key, payload_digest=digest)
     except (services.CommonWorkError, sqlite3.Error) as exc:
@@ -755,124 +693,121 @@ def _personal_work_bundle(services, args: dict[str, Any], **context: Any) -> str
     if replay is not None:
         return json.dumps(replay, ensure_ascii=False)
 
-    handlers = {
-        "calendar": services._calendar_direct_mutation,
-        "notes": services._apple_notes_direct_mutation,
-    }
-    results: list[dict[str, Any]] = []
-    sources = list(existing_sources)
-    failures: list[dict[str, Any]] = []
-    rollback_operations: list[dict[str, Any]] = []
-    runner = context.get("runner")
-    mutation_calls = 0
-    try:
-        for index, operation in enumerate(operations):
-            if operation["domain"] == "notes" and operation["action"] == "update":
-                # Undo restores the exact pre-change note instead of trusting model-built rollback fields.
-                operation["_notes_snapshot"] = services._note_snapshot(
-                    str(operation["arguments"].get("note_id") or ""), runner or subprocess.run,
-                )
-            native_args = {
-                **operation["arguments"],
-                "action": operation["action"],
-                "approved": True,
-                "_skip_common_work": True,
-            }
-            mutation_calls += 1
-            raw = handlers[operation["domain"]](native_args, runner=runner)
-            try:
-                result = json.loads(raw)
-            except (TypeError, ValueError):
-                result = {"ok": False, "error": "native mutation returned invalid JSON"}
-            results.append({
-                "index": index,
-                "domain": operation["domain"],
-                "action": operation["action"],
-                "receipt": result,
-            })
-            if result.get("ok") is not True:
-                failures.append({
-                    "index": index,
-                    "domain": operation["domain"],
-                    "error": result.get("error") or "native mutation failed",
-                })
-                continue
-            source = services._bundle_native_source(
-                operation["domain"], operation["action"], operation["arguments"], result,
-            )
-            if operation["action"] != "delete" and source is None:
-                failures.append({
-                    "index": index,
-                    "domain": operation["domain"],
-                    "error": "native mutation succeeded without a stable source ID",
-                })
-            elif source is not None:
-                sources.append(source)
-            inverse = services._inverse_bundle_operation(operation, result)
-            if inverse is not None:
-                rollback_operations.insert(0, inverse)
-
-    except Exception as exc:
-        failures.append({"index": index, "domain": operation["domain"],
-                         "error": f"native mutation raised {type(exc).__name__}; verify original state before retrying"})
-
-    common_work = None
-    if not any(operation["action"] == "delete" for operation in operations):
+    with _rollback_partition(services) as (journal,save):
+        entry={'key':uuid.uuid4().hex,'created_at':time.time(),'conversation':services._personal_rollback_conversation(),
+            'app_conversation':app_tools.conversation(),'title':str(normalized_args['title']),'bundle_key':bundle_key,
+            'status':'pending','consumed':False,'components':[],'operations':[],'app_ready':False}
+        journal['entries'].append(entry);save()
+        handlers = {
+            "calendar": services._calendar_direct_mutation,
+            "notes": services._apple_notes_direct_mutation,
+        }
+        results: list[dict[str, Any]] = []
+        sources = list(existing_sources)
+        failures: list[dict[str, Any]] = []
+        rollback_operations: list[dict[str, Any]] = []
+        runner = context.get("runner")
+        mutation_calls = 0
         try:
-            common_work = services._link_bundle_sources(
-                store,
-                title=str(normalized_args["title"]),
-                requested_common_id=str(normalized_args.get("common_id") or ""),
-                sources=sources,
+            for index, operation in enumerate(operations):
+                slot={'plan':{k:v for k,v in prepared[index].items() if k!='before'}}
+                if prepared[index]['kind']!=write_policy.REVERSIBLE and not (operation['domain']=='notes' and operation['action']=='update'):
+                    slot['before']=prepared[index]['before']
+                entry['components'].append(slot);save()
+                mutation_calls += 1
+                result=bundle_undo.call(home,services.host,prepared[index],slot,save,handlers[operation['domain']],context)
+                slot['receipt']=result;save()
+                results.append({
+                    "index": index,
+                    "domain": operation["domain"],
+                    "action": operation["action"],
+                    "receipt": result,
+                })
+                if result.get("ok") is not True:
+                    failures.append({
+                        "index": index,
+                        "domain": operation["domain"],
+                        "error": result.get("error") or "native mutation failed",
+                    })
+                    continue
+                source = services._bundle_native_source(
+                    operation["domain"], operation["action"], operation["arguments"], result,
+                )
+                if operation["action"] != "delete" and source is None:
+                    failures.append({
+                        "index": index,
+                        "domain": operation["domain"],
+                        "error": "native mutation succeeded without a stable source ID",
+                    })
+                elif source is not None:
+                    sources.append(source)
+                changes=slot.get('changes',[])
+                if len(changes)==1 and changes[0].get('status')=='done' and not changes[0].get('reference_only') and source is not None:
+                    target_key={'calendar':'event_id','notes':'note_id'}[operation['domain']]
+                    inverse={'domain':operation['domain'],'action':'app_restore','component':index,
+                        'arguments':{target_key:source['source_id']},'unlink_created_source':operation['action']=='create'}
+                    rollback_operations.insert(0,inverse)
+                    entry['operations']=rollback_operations;save()
+
+        except Exception as exc:
+            failures.append({"index": index, "domain": operation["domain"],
+                             "error": f"native mutation raised {type(exc).__name__}; verify original state before retrying"})
+
+        common_work = None
+        if not any(operation["action"] == "delete" for operation in operations):
+            try:
+                common_work = services._link_bundle_sources(
+                    store,
+                    title=str(normalized_args["title"]),
+                    requested_common_id=str(normalized_args.get("common_id") or ""),
+                    sources=sources,
+                )
+            except (services.CommonWorkError, sqlite3.Error) as exc:
+                failures.append({"domain": "common_work", "error": str(exc)})
+
+        successful_native = sum(result["receipt"].get("ok") is True for result in results)
+        rollback_available=bool(rollback_operations)
+        entry['operations']=rollback_operations
+        entry['barrier']=successful_native>0 and not rollback_available
+        entry['status']='partial' if failures else 'done'
+        entry['app_ready']=bool(rollback_operations) and not failures and all(row['kind']==write_policy.REVERSIBLE for row in prepared)
+        save()
+        status = (
+            "completed" if not failures
+            else "partial" if successful_native or (existing_sources and common_work is not None)
+            else "failed"
+        )
+        receipt = {
+            "ok": status == "completed",
+            "work_type": "personal_work_bundle",
+            "owner_profile": services._personal_actor(),
+            "bundle_key": bundle_key,
+            "payload_digest": digest,
+            "status": status,
+            "approval_calls": int(bundle_undo.kind(prepared) not in (write_policy.READ,write_policy.REVERSIBLE)),
+            "mutation_calls": mutation_calls,
+            "rollback_available": rollback_available,
+            "rollback_limitations":[change['limitation'] for slot in entry['components'] for change in slot.get('changes',[]) if change.get('limitation')],
+            "operations": results,
+            "common_work": common_work,
+            "failures": failures,
+            "replayed": False,
+        }
+        bundle_undo.result(entry,receipt)
+        try:
+            store.finish_bundle_execution(
+                bundle_key=bundle_key,
+                payload_digest=digest,
+                status=status,
+                receipt=receipt,
             )
         except (services.CommonWorkError, sqlite3.Error) as exc:
-            failures.append({"domain": "common_work", "error": str(exc)})
-
-    successful_native = sum(result["receipt"].get("ok") is True for result in results)
-    rollback_available = False
-    if successful_native:
-        try:
-            if rollback_operations:
-                services._save_personal_rollback(
-                    str(normalized_args["title"]), bundle_key, rollback_operations,
-                )
-                rollback_available = True
-            else:
-                services._clear_personal_rollback(str(normalized_args["title"]))
-        except OSError as exc:
-            failures.append({"domain": "rollback_journal", "error": str(exc)})
-    status = (
-        "completed" if not failures
-        else "partial" if successful_native or (existing_sources and common_work is not None)
-        else "failed"
-    )
-    receipt = {
-        "ok": status == "completed",
-        "work_type": "personal_work_bundle",
-        "owner_profile": services._personal_actor(),
-        "bundle_key": bundle_key,
-        "payload_digest": digest,
-        "status": status,
-        "approval_calls": 1 if services._bundle_requires_approval(operations, existing_sources) else 0,
-        "mutation_calls": mutation_calls,
-        "rollback_available": rollback_available,
-        "operations": results,
-        "common_work": common_work,
-        "failures": failures,
-        "replayed": False,
-    }
-    try:
-        store.finish_bundle_execution(
-            bundle_key=bundle_key,
-            payload_digest=digest,
-            status=status,
-            receipt=receipt,
-        )
-    except (services.CommonWorkError, sqlite3.Error) as exc:
-        receipt["ok"] = False
-        receipt["status"] = "partial" if successful_native else "failed"
-        receipt["failures"].append({"domain": "bundle_ledger", "error": str(exc)})
-    return json.dumps(receipt, ensure_ascii=False)
+            entry['app_ready']=False;entry['status']='partial';save()
+            receipt.pop('undo_key',None);receipt.pop('message',None)
+            receipt["ok"] = False
+            receipt["status"] = "partial" if successful_native else "failed"
+            receipt["failures"].append({"domain": "bundle_ledger", "error": str(exc)})
+        return json.dumps(receipt, ensure_ascii=False)
 
 def _common_work_error(services, message: str) -> str:
     return json.dumps({"ok": False, "error": message}, ensure_ascii=False)

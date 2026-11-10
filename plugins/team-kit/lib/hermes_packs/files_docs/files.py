@@ -11,6 +11,7 @@ succeeded. doc_fill (mail merge) checks a template against a data table without 
 one approval for the whole call, writes one new file per row into a new or empty folder.
 """
 from __future__ import annotations
+from hermes_packs.files_docs.undo import make_directories
 
 # Owner-specific text is rendered from private policy; public source stays generic.
 from pathlib import Path as _OwnerPath
@@ -177,6 +178,11 @@ def available(config: Any, name: str) -> bool:
     return not (name == "file_link" and configured or name == "file_location" and not configured)
 
 
+def tool_names(config):
+    """The actual host output, including pack-owned availability decisions."""
+    return [name for name in HANDLERS if available(config,name)]
+
+
 def _location_problem(path: Any, roots: list[Path]) -> str | None:
     target = inside(path, roots)
     if not isinstance(path, str) or not Path(path).is_absolute() or target is None:
@@ -218,7 +224,7 @@ def _folder_cache(folder: Path, scope: str, url: str | None = None) -> str | Non
     target = _folder_state()
     temporary = target.with_name(f".{target.name}.{secrets.token_hex(8)}.tmp")
     try:
-        target.parent.mkdir(parents=True, exist_ok=True)
+        make_directories(target.parent)
         fd = os.open(target.with_suffix(".lock"), os.O_CREAT | os.O_RDWR, 0o600)
         with os.fdopen(fd, "a") as handle:
             fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -316,19 +322,26 @@ def _nas_login(base, settings, home, session, opener, deadline):
         raise
 
 
+def nas_settings(settings):
+    """One address/root boundary shared by file readers and connection setup."""
+    base=settings['api_base'].rstrip('/');parsed=urllib.parse.urlsplit(base)
+    sync_root=Path(settings['sync_root']);host=settings['link_host']
+    if (parsed.scheme!='https' or not (parsed.hostname or '').endswith(_owner_text('.<<relay_domain>>'))
+            or parsed.path or parsed.query or parsed.fragment or parsed.username or parsed.password or parsed.port
+            or not _folder_url(f'https://{host}/d/f/TEST') or not sync_root.is_absolute()
+            or settings['drive_root']!='/mydrive' or settings.get('user')!='SYNOLOGY_DRIVE_USER'
+            or settings.get('password')!='SYNOLOGY_DRIVE_PASSWORD'):
+        raise ValueError('invalid NAS config')
+    return base,sync_root,host
+
+
 def _synology_link(config: dict, folder: Path, opener: Any, deadline: float) -> tuple[str | None, str]:
     settings = config["synology"]
     try:
-        base = settings["api_base"].rstrip("/")
-        parsed = urllib.parse.urlsplit(base)
-        host = settings["link_host"]
-        sync_root = Path(settings["sync_root"])
+        try:base,sync_root,host=nas_settings(settings)
+        except ValueError:return None,'invalid_config'
         drive_root = settings["drive_root"]
-        if (parsed.scheme != "https" or not (parsed.hostname or "").endswith(_owner_text(".<<relay_domain>>"))
-                or parsed.path or parsed.query or parsed.fragment or parsed.username or parsed.password or parsed.port
-                or not _folder_url(f"https://{host}/d/f/TEST") or not sync_root.is_absolute()
-                or drive_root != "/mydrive" or not (folder.is_dir() or folder.is_file())
-                or settings.get("user") != "SYNOLOGY_DRIVE_USER" or settings.get("password") != "SYNOLOGY_DRIVE_PASSWORD"):
+        if not (folder.is_dir() or folder.is_file()):
             return None, "invalid_config"
         relative = folder.relative_to(sync_root.resolve())
         remote_path = drive_root + "/" + relative.as_posix()
@@ -823,22 +836,15 @@ def approval(tool_name: str, args: dict[str, Any], roots: list[Path], plan: dict
             "rule_key": f"team-kit-files:{tool_name}:{hashlib.sha256(call.encode('utf-8')).hexdigest()[:12]}"}
 
 
-NO_APPROVAL_TOOLS = frozenset({'folder_create', 'file_copy'})
-
-
-def _no_approval(config):
-    value = config.get('no_approval', []) if isinstance(config, dict) else []
-    if not isinstance(value, list) or any(not isinstance(name, str) or name not in NO_APPROVAL_TOOLS for name in value):
-        return set(), 'files.no_approval 설정 오류: folder_create·file_copy 목록만 허용하므로 승인을 유지한다.'
-    return set(value), ''
 
 
 def schema(config, name):
-    result = dict(SCHEMAS[name])
-    allowed, error = _no_approval(config)
-    if name in allowed:
+    from copy import deepcopy
+    from hermes_governance import write_policy
+    result = deepcopy(SCHEMAS[name])
+    if write_policy.classify(name,{}) == write_policy.REVERSIBLE:
         result['description'] = result['description'].replace('after the user approves',
-            'immediately when the owner explicitly asks in chat, without another approval')
+            'in the owner chat, followed by confirm/undo')
     return result
 
 
@@ -861,6 +867,11 @@ def guard(config: Any, *, tool_name: str, args: Any, chat: bool) -> dict[str, st
         return {"action": "block", "message": reason}
     if tool_name == "doc_fill" and call.get("action") == "inspect":
         return None  # reading only, like doc_read
+    from hermes_governance import write_policy, app_tools
+    from hermes_constants import get_hermes_home
+    decision = write_policy.gate(tool_name,call,owner=chat and write_policy.owner_chat(get_hermes_home(),app_tools.env),
+                                 unattended=write_policy.background(app_tools.env)) if tool_name in OWN_CHANGE_TOOLS | {'file_link'} else None
+    if decision and decision['action']=='block': return decision
     if tool_name == "doc_fill" and chat:
         if reason := _prepare_document_inputs("doc_fill", call, roots):
             return {"action": "block", "message": reason}
@@ -871,17 +882,12 @@ def guard(config: Any, *, tool_name: str, args: Any, chat: bool) -> dict[str, st
             return {"action": "block", "message": "doc_fill: " + (
                 "the template has no {{tokens}}" if not plan.get("tokens") else "no data rows selected" if not plan.get("selected")
                 else f"{plan['selected']} rows selected; at most {MAX_FILL_ROWS} per call (use start and limit)")}
-        return approval(tool_name, call, roots, plan)
-    if tool_name in OWN_CHANGE_TOOLS:
-        if not chat:
-            return {"action": "block", "message": f"{tool_name} needs the user's approval in chat."}
-        allowed, error = _no_approval(config)
-        if tool_name in allowed:
-            return None
-        result = approval(tool_name, call, roots)
-        if error:
-            result['message'] = error + ' ' + result['message']
-        return result
+        # Validation above is read-only; policy classification is shared with every app.
+    if tool_name in OWN_CHANGE_TOOLS | {'file_link'}:
+        if decision and decision['action']=='approve':
+            decision['message']=(('승인하면 선택한 파일을 이 대화에 공유합니다: '+', '.join(_short(p,roots) for p in call.get('paths',[])))
+                if tool_name=='file_link' else approval(tool_name,call,roots)['message'])+'\n[[버튼: 승인 | 거절]]'
+        return decision
     return None
 
 
@@ -889,44 +895,27 @@ def note(config: Any) -> str:
     roots = folders(config)
     if not roots:
         return ""
-    convert_note = ("doc_convert(from, to)는 PDF→DOCX·DOCX→PDF·XLSX→PDF를 승인받아 새 파일로 만든다. "
+    convert_note = ("doc_convert(from, to)는 PDF→DOCX·DOCX→PDF·XLSX→PDF를 새 파일로 만든다. "
                     if available(config, "doc_convert") else "")
     if isinstance(config, dict) and config.get("extra_only") is True:
-        return (convert_note + _owner_text(f"[추가 파일 도구] 대상 폴더: {_named(roots)}. folder_scan은 하위 목록·중복, doc_read는 문서, "
+        return (convert_note + _owner_text(f"[추가 파일 도구] 폴더: {_named(roots)}. folder_scan은 하위 목록·중복, doc_read는 문서, "
                 "pdf_render는 PDF 쪽 그림, vision_analyze는 지정 폴더·대화 첨부·쪽 그림의 이미지만 읽는다(웹 주소 거부). "
                 "file_location은 지정 폴더의 NAS 내부 링크를 돌려준다. 받은 링크만 쓰고 없으면 받지 못했다고 알린다. "
-                "file_move·file_copy·folder_create·doc_edit·pdf_pages는 이 폴더에서만 변경하며 대화에서 호출마다 승인받는다. "
+                "file_move·file_copy·folder_create·doc_edit·pdf_pages는 이 폴더에서만 변경하며 공통 앱 쓰기 규칙을 따른다. "
                 "예약·배경 변경은 거부한다. 옮기기·복사·새 파일은 덮어쓰지 않으며 doc_edit의 원본 덮어쓰기는 먼저 알린다. "
-                "기존 읽기·쓰기·휴지통 도구의 범위와 승인은 별도 파일 안내를 따른다. 절차는 <<personal_skill_prefix>>-files를 연다."))
-    allowed, config_error = _no_approval(config)
-    approval_note = ('소유자가 분명히 시킨 ' + '·'.join(sorted(allowed)) +
-                     '는 승인 없이 바로 실행한다. 나머지 변경은 호출마다 사용자 승인을 묻는다. ')
-    if not allowed:
-        approval_note = '변경은 호출마다 사용자 승인을 묻는다. '
-    approval_note += config_error
-    location_note = (
-        "위치·링크는 file_location(paths=[절대 경로])에 묶어 조회한다. [파일 이름](file_url)·[폴더 이름](url)로 쓰고 file_url이 없으면 폴더 링크·파일 이름과 미확인을 알린다. "
-        "exact=false면 linked_folder와 below를, unlinked면 링크 없음과 폴더 위치를 알린다. 반복 실패는 기존 진단 절차를 따른다. "
-        "반환된 url만 쓰고 Mac 경로·예상 주소·Slack 업로드로 링크를 대신하지 않는다. 사진을 보여 달라는 요청만 MEDIA로 첨부한다. "
-    ) if available(config, "file_location") else (
-        "파일 링크를 줄 때마다(다시 달라는 요청 포함) 그 턴에서 file_link(paths=[절대 경로])를 호출한다. 대화의 예전 주소를 재사용하지 않고 받은 url을 한 글자도 바꾸지 않아 [파일명](주소)로 적는다. "
-        "파일은 이 대화 스레드에 올라가고 주소를 돌려준다. 같은 방에 공유된 파일만 재사용하며 MEDIA로 다시 첨부하지 않는다. 링크는 마지막 요청 30일 뒤 지워지며, 열리지 않는다고 하면 file_link로 새 주소를 준다. 받은 주소만 쓰고 Mac 경로나 지어낸 주소는 링크로 쓰지 않는다. 예약·배경 실행에서는 쓸 수 없다. "
-    )
+                "절차는 <<personal_skill_prefix>>-files를 연다."))
+    from hermes_governance.write_policy import rule_note
+    approval_note = rule_note()
     return (
-        convert_note + (approval_note if allowed or config_error else "") +
-        f"[파일] 이 Mac에서 열 수 있는 곳은 다음 폴더 안뿐이다: {_named(roots)}. "
-        "file_list는 한 단계 목록, folder_scan은 하위 목록·개수·중복, search_files는 검색, read_file은 일반 파일 읽기다. 허용 폴더의 절대 경로를 쓴다. "
-        "PDF·Word(.docx)·Excel(.xlsx)·한글(.hwp·.hwpx)은 doc_read로 읽는다. PDF는 5쪽씩 pages·next_page로 이어 읽고 textless_pages·잘림은 pdf_render→vision_analyze로 확인한다. 구형 .doc·.xls와 다른 문서는 read_file을 쓴다. 암호·배포용 한글은 PDF를 요청한다. "
-        "사진은 vision_analyze(image_url=절대 경로)로 본다. 사용자 첨부는 메시지의 경로 그대로 읽는다. "
-        + location_note +
-        "옮기기·이름 바꾸기는 file_move(moves=[{from, to}], 한 번에 50건까지), 복사는 file_copy, 새 폴더는 folder_create, "
-        "삭제는 file_trash(휴지통 이동)다. 글 파일 내용은 write_file·patch로, Excel(.xlsx)·Word(.docx) 내용은 doc_edit로 고치고, "
-        + ("같은 양식 여러 부는 doc_fill(inspect 먼저), " if available(config, "doc_fill") else "") +
-        "PDF 합치기·쪽 뽑기·회전은 pdf_pages로 새 PDF를 만든다. "
-        + ("" if allowed or config_error else approval_note) + "여러 파일을 정리할 때는 "
-        "먼저 계획을 보여 주고 한 번의 file_move로 묶는다. 옮기기·복사·새 파일은 기존 파일을 덮어쓰지 않는다. "
-        "doc_edit는 save_as가 없으면 원본을 덮어쓰므로 그 사실을 미리 말한다. 결과는 도구가 돌려준 대로만 말한다."
+        approval_note + '[파일] 허용 폴더는 file_list()로 확인한다. 경로는 절대 경로다. '
+        '문서는 doc_read, 잘림·그림은 pdf_render→vision_analyze다. '
+        + ('변환은 doc_convert, ' if available(config,'doc_convert') else '')
+        + ('양식은 doc_fill(inspect 먼저)다. ' if available(config,'doc_fill') else '')
+        + 'file_move로 정리를 묶고 doc_edit 원본 덮어쓰기는 알린다. 새 파일은 덮어쓰지 않는다. '
+        + ('file_location(paths=...)의 주소만 그대로 쓰고 없으면 미확인을 알린다.' if available(config,'file_location') else
+           '공유는 file_link(paths=...)를 매번 승인받아 호출하고 받은 주소만 쓴다.')
     )
+
 
 
 def _error(message: str) -> str:
@@ -991,7 +980,7 @@ def _link_state() -> Path:
 @contextmanager
 def _link_locked():
     target = _link_state().with_suffix(".lock")
-    target.parent.mkdir(parents=True, exist_ok=True)
+    make_directories(target.parent)
     fd = os.open(target, os.O_CREAT | os.O_RDWR, 0o600)
     with os.fdopen(fd, "a") as handle:
         fcntl.flock(handle, fcntl.LOCK_EX)
@@ -1018,7 +1007,7 @@ def _save_link_records(records: dict) -> None:
     target = _link_state()
     temporary = target.with_name(f".{target.name}.{secrets.token_hex(8)}.tmp")
     try:
-        target.parent.mkdir(parents=True, exist_ok=True)
+        make_directories(target.parent)
         with temporary.open("x", encoding="utf-8") as stream:
             json.dump(records, stream, ensure_ascii=False)
         os.replace(temporary, target)
@@ -1208,7 +1197,7 @@ def folder_create(config: Any, args: dict[str, Any], **_: Any) -> str:
         return _error(reason)
     target = inside(args.get("path"), roots)
     try:
-        target.mkdir(parents=True, exist_ok=False)
+        make_directories(target,exist_ok=False)
     except OSError as exc:
         return _error(f"could not create the folder: {_file_error(exc)}")
     return json.dumps({"ok": True, "created": str(target)}, ensure_ascii=False)
@@ -1263,7 +1252,7 @@ def file_move(config: Any, args: dict[str, Any], **_: Any) -> str:
         try:
             if target.exists():
                 raise FileExistsError(str(target))
-            target.parent.mkdir(parents=True, exist_ok=True)
+            make_directories(target.parent)
             _move_exclusive(source, target)
             moved.append({"from": str(source), "to": str(target)})
         except (OSError, shutil.Error) as exc:
@@ -1380,16 +1369,8 @@ def _nas_inventory(config, top, opener=None):
     from concurrent.futures import ThreadPoolExecutor
     import unicodedata
     settings = config['synology']
-    base = settings['api_base'].rstrip('/')
-    parsed = urllib.parse.urlsplit(base)
-    sync_root = Path(settings['sync_root'])
-    host, drive_root = settings['link_host'], settings['drive_root']
-    if (parsed.scheme != 'https' or not (parsed.hostname or '').endswith(_owner_text('.<<relay_domain>>'))
-            or parsed.path or parsed.query or parsed.fragment or parsed.username or parsed.password or parsed.port
-            or not _folder_url(f'https://{host}/d/f/TEST') or not sync_root.is_absolute()
-            or drive_root != '/mydrive' or settings.get('user') != 'SYNOLOGY_DRIVE_USER'
-            or settings.get('password') != 'SYNOLOGY_DRIVE_PASSWORD'):
-        raise ValueError('invalid NAS config')
+    base,sync_root,host=nas_settings(settings)
+    drive_root=settings['drive_root']
     relative = top.relative_to(sync_root.resolve()).as_posix()
     remote = drive_root + ('/' + relative if relative != '.' else '')
     started = time.monotonic()
@@ -1650,7 +1631,7 @@ def file_copy(config: Any, args: dict[str, Any], **_: Any) -> str:
     source, target = inside(args.get("from"), [*roots, attachments(), image_attachments()]), inside(args.get("to"), roots)
     stage, created = "create_folder", False
     try:
-        target.parent.mkdir(parents=True, exist_ok=True)
+        make_directories(target.parent)
         stage = "open_source"
         with open(source, "rb") as reader:
             stage = "create_target"
@@ -1680,7 +1661,7 @@ def _work(job: dict[str, Any], target: Path, *, replace: bool, runner: Any = Non
         return _error("the document editing environment (~/.local/share/hermes-docs) is missing; "
                       "it has to be rebuilt in the Paseo Hermes-ddots project")
     try:
-        target.parent.mkdir(parents=True, exist_ok=True)
+        make_directories(target.parent)
     except OSError as exc:
         return _error(f"could not create the destination folder: {_file_error(exc)}")
     temporary = target.with_name(f".~{secrets.token_hex(6)}{target.suffix}")
@@ -1699,6 +1680,8 @@ def _work(job: dict[str, Any], target: Path, *, replace: bool, runner: Any = Non
         if not replace and target.exists():
             return _error(f"{target} already exists (nothing is overwritten)")
         if replace:
+            from hermes_packs.files_docs.undo import assert_unchanged
+            assert_unchanged(target)
             os.replace(temporary, target)
         else:
             os.link(temporary, target)  # atomic creation: a concurrent writer cannot be overwritten
@@ -1752,7 +1735,7 @@ def doc_fill(config: Any, args: dict[str, Any], runner: Any = None, **_: Any) ->
     out = inside(args.get("output_dir"), roots)
     made, created = not out.exists(), []
     try:
-        out.parent.mkdir(parents=True, exist_ok=True)
+        make_directories(out.parent)
         staging = out.parent / f".~fill-{secrets.token_hex(6)}"
         staging.mkdir()
     except OSError as exc:
@@ -1770,7 +1753,7 @@ def doc_fill(config: Any, args: dict[str, Any], runner: Any = None, **_: Any) ->
         if (result.returncode != 0 or answer.get("ok") is not True or not written
                 or any(not (staging / item["name"]).is_file() or Path(item["name"]).name != item["name"] for item in written)):
             return _error(str(answer.get("error") or "the files were not written"))
-        out.mkdir(exist_ok=True)
+        make_directories(out)
         for item in written:
             os.link(staging / item["name"], out / item["name"])  # atomic creation: an existing file is never replaced
             created.append(out / item["name"])

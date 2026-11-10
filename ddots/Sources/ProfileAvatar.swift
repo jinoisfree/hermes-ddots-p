@@ -37,6 +37,7 @@ struct ProfileAvatar: Equatable {
 
 /// Confined to HermesBridge's serial background queue. Failed decodes are cached too.
 final class ProfileAvatarCache {
+    static let metadataFilename = "profile.yaml"
     private struct Stamp: Equatable { var path: String; var modified: Date?; var size: UInt64 }
     private struct Entry { var photo: Stamp; var metadata: Stamp; var avatar: ProfileAvatar }
     private var entries: [String: Entry] = [:]
@@ -54,7 +55,7 @@ final class ProfileAvatarCache {
                      size: (attributes?[.size] as? NSNumber)?.uint64Value ?? 0)
     }
     func load(profile: String, root: URL, url: URL?) -> ProfileAvatar {
-        let photo = stamp(url), metadataURL = root.appendingPathComponent("profile.yaml"), metadata = stamp(metadataURL)
+        let photo = stamp(url), metadataURL = root.appendingPathComponent(Self.metadataFilename), metadata = stamp(metadataURL)
         let old = entries[profile]
         if let old, old.photo == photo, old.metadata == metadata { return old.avatar }
         var avatar = old?.avatar ?? ProfileAvatar()

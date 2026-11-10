@@ -124,7 +124,6 @@ def _governance_services():
         _NETWORK_COMMAND_RE=_NETWORK_COMMAND_RE,
         _PAGE_VIEWS=_PAGE_VIEWS,
         _PERSONAL_BUNDLE_APPROVAL_LOCK=_PERSONAL_BUNDLE_APPROVAL_LOCK,
-        _PERSONAL_BUNDLE_APPROVAL_SCOPES=_PERSONAL_BUNDLE_APPROVAL_SCOPES,
         _PLUGIN_CONTEXT=_PLUGIN_CONTEXT,
         _REVIEW_SKILL_LEARNING=_REVIEW_SKILL_LEARNING,
         _RUNTIME=_RUNTIME,
@@ -151,7 +150,6 @@ def _governance_services():
         _browsing=_browsing,
         _bundle_completes=_bundle_completes,
         _bundle_plan_lines=_bundle_plan_lines,
-        _bundle_requires_approval=_bundle_requires_approval,
         _calendar_event_get=_calendar_event_get,
         _card_tool_texts=_card_tool_texts,
         _check_budgets=_check_budgets,
@@ -330,7 +328,6 @@ LEAD_CHAT_TOOLS = contracts.build_LEAD_CHAT_TOOLS(LEAD_BROWSE_TOOLS, LEAD_FILE_C
 DOMAIN_CHANNELS: frozenset[str] = frozenset()
 RECEIPT_VERSION = "1"
 _PERSONAL_BUNDLE_APPROVAL_LOCK = threading.RLock()
-_PERSONAL_BUNDLE_APPROVAL_SCOPES: dict[str, float] = {}
 _PERSONAL_ROLLBACK_LOCK = threading.RLock()
 # Inbound requests that read text messages. Message text is written by third parties, so a
 # write bundle in the same request always goes through the human approval gate.
@@ -742,7 +739,6 @@ def _linked_services():
         _bundle_digest=_bundle_digest,
         _bundle_key=_bundle_key,
         _bundle_native_source=_bundle_native_source,
-        _bundle_requires_approval=_bundle_requires_approval,
         _calendar_alarm_error=_calendar_alarm_error,
         _calendar_direct_mutation=_calendar_direct_mutation,
         _calendar_identity_error=_calendar_identity_error,
@@ -755,7 +751,6 @@ def _linked_services():
         _company_notion_page=_company_notion_page,
         _error=_error,
         _home_profile=_home_profile,
-        _inverse_bundle_operation=_inverse_bundle_operation,
         _is_executor=_is_executor,
         _latest_personal_rollback_entry=_latest_personal_rollback_entry,
         _link_bundle_sources=_link_bundle_sources,
@@ -823,6 +818,7 @@ _REQUEST_USAGE_FIELDS = contracts.build__REQUEST_USAGE_FIELDS()
 
 def _native_services():
     return native_pack.Services(
+        host=sys.modules[__name__],
         CONTACTS_DIRECT_LOOKUP_SCHEMA=CONTACTS_DIRECT_LOOKUP_SCHEMA,
         CONTACTS_DIRECT_MUTATION_SCHEMA=CONTACTS_DIRECT_MUTATION_SCHEMA,
         WIKI_VAULT=WIKI_VAULT,
@@ -1834,8 +1830,8 @@ def _gmail_outage_test() -> bool:
 
 
 
-def _gmail_extra(request: dict[str, Any], runner: Any = None) -> tuple[Any, str]:
-    return mail_pack._gmail_extra(_mail_services(), request, runner)
+def _gmail_extra(request: dict[str, Any], runner: Any = None, *, on_progress=None) -> tuple[Any, str]:
+    return mail_pack._gmail_extra(_mail_services(), request, runner,on_progress=on_progress)
 
 
 
@@ -1948,6 +1944,7 @@ def _calendar_services():
         date_type=date_type,
         datetime_type=datetime_type,
         vault=vault,
+        host=sys.modules[__name__],
     )
 
 
@@ -2048,13 +2045,13 @@ def _contacts_app_ready(runner: Any) -> tuple[bool, str]:
 
 
 
-def _contacts_note(contact_id: str, *, note: str | None = None, runner: Any = None) -> dict[str, Any]:
-    return native_pack._contacts_note(_native_services(), contact_id, note=note, runner=runner)
+def _contacts_note(contact_id: str, *, note: str | None = None, runner: Any = None, expected: str | None = None) -> dict[str, Any]:
+    return native_pack._contacts_note(_native_services(),contact_id,note=note,runner=runner,expected=expected)
 
 
 
-def _contacts_note_set(contact_id: str, note: str, *, runner: Any = None) -> dict[str, Any]:
-    return native_pack._contacts_note_set(_native_services(), contact_id, note, runner=runner)
+def _contacts_note_set(contact_id: str, note: str, *, runner: Any = None, expected: str | None = None) -> dict[str, Any]:
+    return native_pack._contacts_note_set(_native_services(),contact_id,note,runner=runner,expected=expected)
 
 
 
@@ -2188,10 +2185,6 @@ def _validate_bundle(args: dict[str, Any]) -> tuple[list[dict[str, Any]], list[d
 
 
 
-def _bundle_requires_approval(
-    operations: list[dict[str, Any]], existing_sources: list[dict[str, str]],
-) -> bool:
-    return linked_pack._bundle_requires_approval(_linked_services(), operations, existing_sources)
 
 
 
@@ -2257,10 +2250,6 @@ def _latest_personal_rollback_entry(
 
 
 
-def _inverse_bundle_operation(
-    operation: dict[str, Any], receipt: dict[str, Any],
-) -> dict[str, Any] | None:
-    return linked_pack._inverse_bundle_operation(_linked_services(), operation, receipt)
 
 
 
@@ -2475,7 +2464,11 @@ def register(ctx) -> None:
             from copy import deepcopy
             kwargs['schema'] = deepcopy(kwargs['schema'])
             kwargs['schema']['parameters'].setdefault('properties', {})['request_plan'] = request_approvals.PLAN_SCHEMA
-        if personal_roles.enabled(sys.modules[__name__]):
+        from hermes_facility.app_registry import tool_granted
+        from hermes_constants import get_hermes_home
+        app_grant = tool_granted(get_hermes_home(), kwargs.get('name'))
+        if app_grant is False: return None
+        if personal_roles.enabled(sys.modules[__name__]) and app_grant is not True:
             profile_name = str(getattr(ctx, 'profile_name', '') or '')
             name = kwargs.get('name')
             allowed = personal_roles.READS | ((personal_scopes.SCOPED_TOOLS | personal_roles.SECRETARY_FILES | personal_roles.SECRETARY_BROWSER) - {'notion'}
@@ -2564,8 +2557,11 @@ def register(ctx) -> None:
         description="Set one Google Calendar event color immediately and report the result.",
         emoji="🎨",
     )
-    if team.has_role(str(getattr(ctx, 'profile_name', '') or ''), 'work'):
-        register_tool(name='contacts_direct_lookup', toolset='team-delegation',
+    from hermes_facility.app_registry import tool_granted
+    from hermes_constants import get_hermes_home
+    contacts_grant = tool_granted(get_hermes_home(), 'contacts_direct_lookup')
+    if contacts_grant is True or (contacts_grant is None and team.has_role(str(getattr(ctx, 'profile_name', '') or ''), 'work')):
+        register_tool(name='contacts_direct_lookup' , toolset='team-delegation',
                       schema=CONTACTS_DIRECT_LOOKUP_SCHEMA, handler=_contacts_direct_lookup, emoji='📇')
         register_tool(name='contacts_direct_mutation', toolset='team-delegation',
                       schema=CONTACTS_DIRECT_MUTATION_SCHEMA, handler=_contacts_direct_mutation, emoji='📇')
@@ -2743,6 +2739,19 @@ def register(ctx) -> None:
     register_middleware("llm_request", _tiered_personal_request)
     register_middleware("llm_execution", _llm_execution_guard)
     register_middleware("tool_execution", _tool_execution_guard)
+    from hermes_governance import memo_undo
+    from hermes_constants import get_hermes_home
+    memo_undo.register(ctx,Path(get_hermes_home()),sys.modules[__name__])
+    from hermes_governance import bundle_undo
+    bundle_undo.register(ctx,Path(get_hermes_home()),sys.modules[__name__])
+    from hermes_governance import contacts_undo
+    contacts_undo.register(ctx,Path(get_hermes_home()),sys.modules[__name__])
+    from hermes_governance import calendar_undo
+    calendar_undo.register(ctx,Path(get_hermes_home()),sys.modules[__name__])
+    from hermes_governance import mail_undo
+    mail_undo.register(ctx,Path(get_hermes_home()),sys.modules[__name__])
+    from hermes_packs.calendar import color_write
+    color_write.register(ctx,Path(get_hermes_home()),sys.modules[__name__])
     if team.has_role(str(getattr(ctx, 'profile_name', '') or ''), 'work'):
         from functools import partial
         from hermes_constants import get_hermes_home

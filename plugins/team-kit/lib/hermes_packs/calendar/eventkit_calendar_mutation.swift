@@ -21,14 +21,16 @@ struct MutationInput: Codable {
     let alarms: [Int]?
     let clear_alarms: Bool?
     let _restore_alarms: [AlarmSnapshot]?
+    let _app_expected: EventSnapshot?
+    let _app_journal: Bool?
 }
 
-struct AlarmSnapshot: Codable {
+struct AlarmSnapshot: Codable, Equatable {
     let relativeOffset: Double
     let absoluteDate: String?
 }
 
-struct EventSnapshot: Codable {
+struct EventSnapshot: Codable, Equatable {
     let calendarItemIdentifier: String
     let eventIdentifier: String?
     let title: String
@@ -43,6 +45,10 @@ struct EventSnapshot: Codable {
     let url: String?
     let alarms: [Double]
     let alarmDetails: [AlarmSnapshot]
+    let hasRecurrenceRules: Bool
+    let revision: Double?
+    let externalNotifications: Bool
+    let alarmRestorable: Bool
 }
 
 struct MutationOutput: Codable {
@@ -83,7 +89,11 @@ func snapshot(_ event: EKEvent) -> EventSnapshot {
         notes: event.notes,
         url: event.url?.absoluteString,
         alarms: (event.alarms ?? []).filter { $0.absoluteDate == nil }.map { -$0.relativeOffset / 60 },
-        alarmDetails: (event.alarms ?? []).map { AlarmSnapshot(relativeOffset: $0.relativeOffset, absoluteDate: $0.absoluteDate.map(iso)) }
+        alarmDetails: (event.alarms ?? []).map { AlarmSnapshot(relativeOffset: $0.relativeOffset, absoluteDate: $0.absoluteDate.map(iso)) },
+        hasRecurrenceRules: event.hasRecurrenceRules,
+        revision: event.lastModifiedDate?.timeIntervalSinceReferenceDate,
+        externalNotifications: !(event.attendees ?? []).isEmpty,
+        alarmRestorable: !(event.alarms ?? []).contains(where: { $0.structuredLocation != nil || $0.type != .display })
     )
 }
 
@@ -184,6 +194,10 @@ struct CalendarMutation {
                 if let rawURL = input.url { event.url = URL(string: rawURL) }
                 try applyAlarms(input, to: event)
                 try store.save(event, span: .thisEvent, commit: true)
+                if input._app_journal == true {
+                    let progress = try JSONSerialization.data(withJSONObject: ["journal_targets": [event.calendarItemIdentifier]])
+                    FileHandle.standardOutput.write(progress); FileHandle.standardOutput.write(Data("\n".utf8))
+                }
                 after = snapshot(event)
             } else {
                 guard let eventID = input.event_id else {
@@ -227,6 +241,9 @@ struct CalendarMutation {
                 }
                 event = matches[0]
                 before = snapshot(event)
+                if let expected = input._app_expected, before != expected {
+                    throw NSError(domain: "APP_CALENDAR_ORIGINAL_CHANGED", code: 65)
+                }
                 if input.action == "delete" {
                     try store.remove(event, span: span, commit: true)
                 } else if input.action == "update" {
@@ -256,6 +273,10 @@ struct CalendarMutation {
                     }
                     try applyAlarms(input, to: event)
                     try store.save(event, span: span, commit: true)
+                    if input._app_journal == true {
+                        let progress = try JSONSerialization.data(withJSONObject: ["journal_targets": [event.calendarItemIdentifier]])
+                        FileHandle.standardOutput.write(progress); FileHandle.standardOutput.write(Data("\n".utf8))
+                    }
                     after = snapshot(event)
                 } else {
                     fputs("TE_CALENDAR_MUTATION_ACTION_INVALID\n", stderr)

@@ -21,6 +21,7 @@ import threading
 import time
 from hermes_facility import team_registry as team
 
+BASIC = frozenset({'label_create','label_apply','inbox_restore','filter_create','filter_delete','mail_organize'})
 MAIL_READS = frozenset({'mailboxes', 'rules_list'})
 MAIL_WRITES = frozenset({'mailbox_create', 'mail_move', 'mail_mark', 'mail_trash',
     'rule_create', 'rule_delete', 'mail_app_organize'})
@@ -32,6 +33,11 @@ EXECUTION = ContextVar('full_mail_native_dispatch', default='')
 SNAPSHOTS, LOCK = {}, threading.RLock()
 COMMON = {'action', 'account', 'approved', 'request_plan'}
 FIELDS = {
+    'label_create':{'label_name'},
+    'filter_create':{'criteria','label_id','skip_inbox','mark_read'},
+    'filter_delete':{'filter_id'},
+    'mail_organize':{'rules','delete_filter_ids','restore_inbox_queries'},
+    'label_apply': {'query','label_id','skip_inbox'}, 'inbox_restore': {'query'},
     'mailboxes': set(), 'rules_list': set(), 'mailbox_create': {'mailbox'},
     'mail_move': {'ids', 'mail_conditions', 'match', 'source_mailbox', 'mailbox'},
     'mail_mark': {'ids', 'mail_conditions', 'match', 'source_mailbox', 'read', 'flagged'},
@@ -49,27 +55,48 @@ FIELDS = {
 
 def account(td, args):
     cfg = td.personal_scopes.config(td)
+    if args.get('action') in BASIC:
+        chosen=td.personal_scopes.mailbox(td,args,cfg) if cfg is not None else args.get('account') or td._gmail_account()
+        return td.personal_scopes.normalize_mail_account(td,chosen,cfg)
     return td.personal_scopes.normalize_mail_account(td,
         args.get('account') or (cfg or {}).get('company', {}).get('gmail') or td._gmail_account(), cfg)
 
 
+def app_grant(td):
+    from hermes_facility.app_registry import tool_granted
+    from hermes_constants import get_hermes_home
+    return tool_granted(get_hermes_home(), 'gmail_direct') is True
+
+
 def is_mail(td, args):
+    from hermes_facility.app_scope import selection
+    from hermes_constants import get_hermes_home
+    selected = selection(get_hermes_home(), 'mail_accounts')
+    if selected is not None:
+        return str(args.get('account') or '').casefold() in {str(v).casefold() for v in selected}
     cfg = td.personal_scopes.config(td) or {}
     return account(td, args) in {str(x).casefold() for x in cfg.get('company', {}).get('mail_accounts', [])}
 
 
 def handles(td, args):
-    return args.get('action') in ACTIONS or (args.get('action') == 'send' and is_mail(td, args))
+    return args.get('action') in ACTIONS | BASIC or (args.get('action') == 'send' and is_mail(td, args))
 
 
 def problem(td, args):
     if p := td.personal_scopes.role_problem(td, 'gmail_direct', args):
         return p
+    if args.get('action') in BASIC and (denied:=td._personal_owner_error('gmail_direct')):
+        return json.loads(denied).get('error','APP_OWNER_CHAT_REQUIRED')
     if td.personal_scopes.background(td):
         return 'PERSONAL_SCOPE_BACKGROUND_REFUSED: 새 메일 쓰기·폴더·규칙 조회는 소유자 대화에서만 가능하다.'
+    if args.get('action') in BASIC:
+        if td.get_session_env('HERMES_SESSION_PLATFORM','') not in {'slack','photon'} or not td.get_session_env('HERMES_SESSION_USER_ID','') or not td.get_session_env('HERMES_SESSION_CHAT_ID',''):
+            return 'PERSONAL_SCOPE_OWNER_CHAT_REQUIRED'
+        if is_mail(td,args):return 'MAIL_BACKEND_ACTION_MISMATCH'
+        return None
     cfg = td._PLUGIN_CONTEXT.get_config('gmail', {}) if td._PLUGIN_CONTEXT else {}
     scopes = td.personal_scopes.config(td) or {}
-    if (not team.has_role(td.personal_roles.profile(td), 'work') or cfg.get('full_mail_tools') is not True
+    if not (app_grant(td) and is_mail(td, args)) and (not team.has_role(td.personal_roles.profile(td), 'work') or cfg.get('full_mail_tools') is not True
             or not scopes.get('enabled') or scopes.get('invalid')):
         return _owner_text('FULL_MAIL_TOOLS_DISABLED: <<work_name>> 회사 메일 전용이다.')
     if (td.get_session_env('HERMES_SESSION_PLATFORM', '') not in {'slack', 'photon'}
@@ -89,6 +116,9 @@ def validate(args, mail=False):
     action = args.get('action')
     if action not in FIELDS or set(args) - COMMON - FIELDS[action]:
         raise ValueError('MAIL_UNSUPPORTED_FIELDS_OR_ACTION')
+    if action in BASIC:
+        from . import gmail_rules
+        gmail_rules.validate_operation(action,args)
     for field in ('read', 'flagged', 'starred', 'archive', 'spam', 'mark_read'):
         if field in args and type(args[field]) is not bool:
             raise ValueError('MAIL_INVALID_BOOLEAN')
@@ -148,7 +178,7 @@ def key(td, args, context=None):
     from tools.approval_context import _approval_session_id, _approval_turn_id
     context = context or {}
     identity = [td.personal_roles.profile(td), td.get_session_env('HERMES_SESSION_USER_ID', ''),
-                td.get_session_env('HERMES_SESSION_CHAT_ID', ''),
+                td.get_session_env('HERMES_SESSION_CHAT_ID', ''), td.get_session_env('HERMES_SESSION_THREAD_ID', ''),
                 context.get('session_id') or _approval_session_id.get(), context.get('turn_id') or _approval_turn_id.get()]
     canonical = {k: v for k, v in args.items() if k not in {'approved', 'request_plan'}}
     canonical['account'] = account(td, args)
@@ -171,15 +201,23 @@ def prepare(td, args, runner=None, mail_runner=None):
         for field in ('to', 'cc'):
             if args.get(field):
                 td.mail_app.recipients(args[field])
+    if request['action'] in {'filter_create','mail_organize'}:
+        if failed:=td._gmail_scope_preflight(request,runner):raise ValueError(json.dumps(failed,ensure_ascii=False))
     if mail:
         result = td.mail_app.full_tools(request, preview=True, runner=mail_runner)
     else:
-        result, error = td._gmail_extra({'op': 'full_preview', **request}, runner)
+        result, error = api(td,{'op':'full_preview',**request},runner)
         if error:
             raise ValueError(error)
     if not isinstance(result, dict) or result.get('ok') is not True:
         raise ValueError(json.dumps(result, ensure_ascii=False))
     return request, result
+
+
+def api(td,request,runner=None,**kwargs):
+    token=td.personal_scopes.MAIL_ACCOUNT.set(request['account'])
+    try:return td._gmail_extra(request,runner,**kwargs)
+    finally:td.personal_scopes.MAIL_ACCOUNT.reset(token)
 
 
 def approval(td, args, context=None):
@@ -194,10 +232,15 @@ def approval(td, args, context=None):
         # Concurrent identical calls must not replace the selection already on an approval card.
         row = SNAPSHOTS.setdefault(key(td, args, context), (time.monotonic(), request, preview))
         _, request, preview = row
+    from hermes_constants import get_hermes_home
+    from hermes_governance import write_policy
+    decision=write_policy.gate('gmail_direct',request,owner=write_policy.owner_chat(get_hermes_home(),td.get_session_env),
+        unattended=td.personal_scopes.background(td),state=preview)
+    if decision is None or decision['action']=='block':return decision
+    plan=td._gmail_mutation_plan(request) if request['action'] in BASIC else '승인하면 아래 메일 작업을 한 번 실행합니다.\n계정: '+request['account']+'\n계획: '+json.dumps(request,ensure_ascii=False)
     return {'action': 'approve', 'rule_key': 'full-mail:' + key(td, args, context),
-            'message': '승인하면 아래 메일 작업을 한 번 실행합니다.\n계정: ' + request['account'] +
-            '\n계획: ' + json.dumps(request, ensure_ascii=False) +
-            '\n대상·확인: ' + json.dumps(preview, ensure_ascii=False) +
+            'message': plan +
+            '\n대상·확인: ' + json.dumps({k:v for k,v in preview.items() if not k.startswith('_')}, ensure_ascii=False) +
             '\n부분·미확인 결과는 자동 재실행하지 않습니다.'}
 
 
@@ -226,12 +269,12 @@ def run(td, args, runner=None, mail_runner=None):
                 return td._error('MAIL_APPROVAL_SNAPSHOT_MISSING', mutation_calls=0)
             _, request, preview = row
             frozen = {**request, '_snapshot': preview}
-            if is_mail(td, args):
-                result = td.mail_app.full_tools(frozen, runner=mail_runner)
-            else:
-                result, error = td._gmail_extra({'op': 'full_write', **frozen}, runner)
-                if error:
-                    return td._error(error, mutation_calls=None, modified_count=None, verified=None)
+            from hermes_governance import mail_undo
+            result = mail_undo.execute(td,frozen,runner,mail_runner)
+        result={key:value for key,value in result.items() if not key.startswith('_')}
+        if args.get('action') in BASIC and type(result.get('ok')) is bool:
+            receipt=json.loads(td._gmail_success_receipt(args['action'],{'response':result}))
+            result={**receipt,**result,'approved':preview.get('inverse_ready') is not True}
         return json.dumps({'action': args['action'], 'account': account(td, args),
                            'authority': 'Mac Mail app' if is_mail(td, args) else 'Gmail API via Hermes local OAuth',
                            'fallback_used': False, **result}, ensure_ascii=False)
@@ -245,7 +288,7 @@ def extend_schema(schema):
         'rule_create/rule_delete(Hermes: rule_name), mail_app_organize(rule + existing INBOX move). '
         'Gmail trash/untrash/modify(ids OR query, max500), label_delete/label_rename(user labels only), '
         'reply/forward(message_id, body, optional subject, to required for forward), draft_create(to,subject,body). '
-        'Every write needs one native approval button; no permanent deletion, background writes or automatic retries. '
+        'Verified reversible state changes run in the owner conversation and offer confirm/undo; deletion and outgoing actions need native approval. No permanent deletion, background writes or automatic retries. '
         'Approval shows exact frozen IDs/sample, destinations and complete outgoing text. Mail account must accompany every call.'))
     props = schema['parameters']['properties']
     props['action']['enum'] += sorted(ACTIONS)
@@ -268,7 +311,7 @@ def profile_schema(td, schema, profile):
     from copy import deepcopy
     result = deepcopy(schema)
     settings = td._PLUGIN_CONTEXT.get_config('gmail', {}) if td._PLUGIN_CONTEXT else {}
-    if not team.has_role(profile, 'work') or settings.get('full_mail_tools') is not True:
+    if not app_grant(td) and (not team.has_role(profile, 'work') or settings.get('full_mail_tools') is not True):
         props = result['parameters']['properties']
         props['action']['enum'] = [a for a in props['action']['enum'] if a not in ACTIONS]
         for name in ('mailbox', 'source_mailbox', 'rule_name', 'match', 'mail_conditions', 'read', 'flagged',

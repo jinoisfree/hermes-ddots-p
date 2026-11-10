@@ -13,6 +13,7 @@ from dataclasses import dataclass
 @dataclass(frozen=True)
 class Services:
     """One call's dependencies. No profile or gateway modules are imported here."""
+    host: Any
     CONTACTS_DIRECT_LOOKUP_SCHEMA: Any
     CONTACTS_DIRECT_MUTATION_SCHEMA: Any
     WIKI_VAULT: Any
@@ -380,7 +381,8 @@ def _messages_direct_lookup(services, args: dict[str, Any], **context: Any) -> s
     return json.dumps(payload, ensure_ascii=False)
 
 def _contacts_image_root(services) -> Path:
-    return services.team.home_of_role('work', Path.home() / '.hermes') / 'cache' / 'images'
+    from hermes_constants import get_hermes_home
+    return Path(get_hermes_home()) / 'cache' / 'images'
 
 def _contacts_arguments(services, args: dict[str, Any], *, mutation: bool) -> tuple[dict[str, Any], str | None]:
     schema = services.CONTACTS_DIRECT_MUTATION_SCHEMA if mutation else services.CONTACTS_DIRECT_LOOKUP_SCHEMA
@@ -408,6 +410,8 @@ def _contacts_arguments(services, args: dict[str, Any], *, mutation: bool) -> tu
                     row.get('label') not in labels or not isinstance(row.get('value'), str) or
                     not row['value'].strip() for row in value)):
                 return payload, 'CONTACTS_INVALID_ARGUMENTS:' + key
+        if key=='address' and isinstance(value,dict) and (not value or set(value)-properties[key]['properties'].keys()):
+            return payload,'CONTACTS_ADDRESS_UNSUPPORTED: 연락처 앱에서 이 주소 항목을 쓸 수 없어요. 거리·도시·시도·우편번호·나라를 골라 주세요.'
         if kind == 'object' and (not isinstance(value, dict) or set(value) - properties[key]['properties'].keys()
                                  or any(not isinstance(v, str) for v in value.values())):
             return payload, 'CONTACTS_INVALID_ARGUMENTS:' + key
@@ -535,7 +539,7 @@ def _contacts_app_ready(services, runner: Any) -> tuple[bool, str]:
     except (OSError, ValueError) as exc:
         return False, services._contacts_note_detail(str(exc))
 
-def _contacts_note(services, contact_id: str, *, note: str | None = None, runner: Any = None) -> dict[str, Any]:
+def _contacts_note(services, contact_id: str, *, note: str | None = None, runner: Any = None, expected: str | None = None) -> dict[str, Any]:
     """Contacts.app is the note authority; values are argv, never AppleScript source."""
     writing = note is not None
     outcome_key = 'note_applied' if writing else 'note_available'
@@ -547,6 +551,7 @@ def _contacts_note(services, contact_id: str, *, note: str | None = None, runner
                'set' if writing else 'get', contact_id]
     if writing:
         command.append(note)
+        if expected is not None:command.append(expected)
     for attempt in range(2):
         try:
             proc = execute(command, capture_output=True, text=True, timeout=30, check=False)
@@ -586,8 +591,8 @@ def _contacts_note(services, contact_id: str, *, note: str | None = None, runner
                 'note_verification_mismatch': True, 'note': actual, 'note_source': 'contacts_app', **detail_fields}
     return {outcome_key: True, 'note': actual, 'note_source': 'contacts_app'}
 
-def _contacts_note_set(services, contact_id: str, note: str, *, runner: Any = None) -> dict[str, Any]:
-    return services._contacts_note(contact_id, note=note, runner=runner)
+def _contacts_note_set(services, contact_id: str, note: str, *, runner: Any = None, expected: str | None = None) -> dict[str, Any]:
+    return services._contacts_note(contact_id,note=note,runner=runner,**({"expected":expected} if expected is not None else {}))
 
 def _contacts_note_get(services, contact_id: str, *, runner: Any = None) -> dict[str, Any]:
     return services._contacts_note(contact_id, runner=runner)
@@ -670,13 +675,21 @@ def _contacts_direct(services, args: dict[str, Any], *, mutation: bool, **contex
         return services._error(message, before=None, after=None, executorVersion='contacts-direct-v2', mutation_calls=0, applied=False, **fields)
     if problem := services._personal_role_problem(tool_name, args):
         return failed(problem)
-    payload, error = services._contacts_arguments(args, mutation=mutation)
-    if error:
-        return failed(error)
+    from hermes_governance import contacts_undo
+    private = contacts_undo.private_request(context)
+    payload,error = ({'action':private['action']},None) if private else services._contacts_arguments(args,mutation=mutation)
+    if error:return failed(error)
+    if not private and payload['action'] in ('update','group_rename','group_add','group_remove'):
+        from hermes_constants import get_hermes_home
+        return contacts_undo.update(get_hermes_home(),services.host,payload,context)
     note_requested = mutation and ('note' in payload or payload.get('clear_note') is True)
     note = '' if payload.get('clear_note') is True else payload.get('note')
     include_note = not mutation and payload.get('include_note') is True
     native_payload = {key: value for key, value in payload.items() if key not in {'note', 'clear_note', 'include_note', 'file_name'}}
+    prepared = contacts_undo.prepared()
+    if prepared:
+        native_payload['_journal']=True
+        if prepared.get('before'):native_payload['_expected']=prepared['before']
     source = Path(__file__).with_name('contacts_direct.swift')
     from hermes_facility.owner_vault import root_home
     private_info = root_home() / 'owner/native/contacts_direct.Info.plist'
@@ -695,14 +708,24 @@ def _contacts_direct(services, args: dict[str, Any], *, mutation: bool, **contex
                 if proc.returncode != 0:
                     return failed('CONTACTS_EXECUTOR_COMPILE_FAILED')
             def native(arguments):
-                proc = runner([str(binary), json.dumps(arguments, ensure_ascii=False)],
-                              capture_output=True, text=True, timeout=60, check=False)
+                encoded=json.dumps(arguments,ensure_ascii=False)
+                stdin=str(arguments.get('action','')).startswith('_') or '_journal' in arguments or len(encoded.encode())>100000
+                proc = runner([str(binary), '--app-journal' if stdin else encoded],
+                              **({'input':encoded} if stdin else {}),capture_output=True,text=True,timeout=60,check=False)
+                lines=str(proc.stdout or '').splitlines()
+                if prepared and lines:
+                    first=json.loads(lines[0])
+                    if isinstance(first,dict) and 'journal_targets' in first:
+                        prepared['record_targets'](first['journal_targets']);lines=lines[1:]
                 if proc.returncode != 0:
                     raise ValueError('executor process failed')
-                result = json.loads(proc.stdout)
+                result = json.loads('\n'.join(lines))
                 if not isinstance(result, dict) or type(result.get('ok')) is not bool:
                     raise ValueError('invalid executor result')
                 return result
+            if private:
+                write_started = private['action']=='_delete_created'
+                return json.dumps(native(private),ensure_ascii=False)
             if payload['action'] in {'delete', 'group_delete'}:
                 try:
                     internal, backup_details = services._contacts_backup(payload, native, runner)
@@ -728,7 +751,7 @@ def _contacts_direct(services, args: dict[str, Any], *, mutation: bool, **contex
                     return failed('CONTACTS_EXPORT_FAILED')
             if result['ok'] and note_requested:
                 contact_id = str(result.get('target_id') or '')
-                note_result = (services._contacts_note_set(contact_id, note, runner=runner) if contact_id else
+                note_result = (services._contacts_note_set(contact_id,note,runner=runner,**({'expected':prepared['note_before']} if prepared and prepared.get('note_before') is not None else {})) if contact_id else
                                {'note_applied': False, 'note_error': 'CONTACTS_NOTE_TARGET_NOT_FOUND', 'note_error_detail': ''})
                 services._contacts_note_snapshot(result, note_result, mutation=True)
                 result['applied'] = True

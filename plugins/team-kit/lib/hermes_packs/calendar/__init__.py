@@ -44,6 +44,7 @@ class Services:
     date_type: Any
     datetime_type: Any
     vault: Any
+    host: Any
 
 
 def _calendar_cache_root(services, owner_profile: str | None = None) -> Path:
@@ -105,9 +106,11 @@ def _calendar_direct_lookup(services, args: dict[str, Any], **context: Any) -> s
         errors: list[str] = []
         while attempts < 2:
             attempts += 1
-            proc = runner(
-                [str(binary), requested_date, timezone], capture_output=True, text=True, timeout=30,
-            )
+            from hermes_facility.app_scope import require_selected
+            allowed = require_selected('calendars')
+            command = [str(binary), requested_date, timezone]
+            if allowed is not None: command.append(json.dumps(allowed))
+            proc = runner(command, capture_output=True, text=True, timeout=30)
             try:
                 parsed = json.loads(proc.stdout) if proc.returncode == 0 else None
             except ValueError:
@@ -417,7 +420,13 @@ def _calendar_direct_mutation(services, args: dict[str, Any], **context: Any) ->
             )
             if compiled.returncode != 0:
                 return services._error("TE_CALENDAR_MUTATION_EXECUTOR_COMPILE_FAILED", mutation_calls=0)
-        payload = dict(args)
+        payload = {k:v for k,v in args.items() if not k.startswith("_app_")}
+        from hermes_governance import calendar_undo
+        prepared=calendar_undo.prepared()
+        if prepared and prepared.get("backend")!="eventkit":raise ValueError("APP_CALENDAR_BACKEND_CHANGED")
+        if prepared:
+            payload["_app_journal"]=True
+            if prepared.get("before"):payload["_app_expected"]=calendar_undo.native_state(prepared["before"])
         payload.pop("approved", None)
         payload.pop("common_id", None)
         payload.pop("_skip_common_work", None)
@@ -426,7 +435,12 @@ def _calendar_direct_mutation(services, args: dict[str, Any], **context: Any) ->
             [str(binary), json.dumps(payload, ensure_ascii=False)],
             capture_output=True, text=True, timeout=30, check=False,
         )
-    except (OSError, subprocess.TimeoutExpired) as exc:
+        if prepared and proc.stdout:
+            lines=proc.stdout.splitlines();first=json.loads(lines[0])
+            if isinstance(first,dict) and 'journal_targets' in first:
+                prepared['record_targets'](first['journal_targets'])
+                proc=SimpleNamespace(returncode=proc.returncode,stdout='\n'.join(lines[1:]),stderr=proc.stderr)
+    except (OSError, ValueError, subprocess.TimeoutExpired) as exc:
         return services._error(f"CALENDAR_NATIVE_UNAVAILABLE:{type(exc).__name__}",
                       **({} if write_started else {"mutation_calls": 0}))
     return services._native_mutation_result(
@@ -582,40 +596,6 @@ def _google_calendar_color_get(services, args: dict[str, Any], **context: Any) -
 def _google_calendar_color_set(services, args: dict[str, Any], **context: Any) -> str:
     if error := services._personal_owner_error("google_calendar_color_set"):
         return json.dumps({**json.loads(error), "mutation_calls": 0}, ensure_ascii=False)
-    color_id = str(args.get("color_id") or "").strip()
-    if not re.fullmatch(r"(?:[1-9]|1[01])", color_id):
-        return services._error("color_id must be a Google Calendar event color ID from 1 through 11", mutation_calls=0)
-    try:
-        service, calendar_id, eventkit_id, i_cal_uid, before, google_event_id = services._google_calendar_color_target(args, context)
-    except Exception as exc:
-        return services._google_calendar_color_failure(exc)
-    try:
-        result = service.events().patch(
-            calendarId=calendar_id, eventId=google_event_id,
-            body={"colorId": color_id}, sendUpdates="none",
-        ).execute()
-        if str(result.get("id") or "") != google_event_id or str(result.get("colorId") or "") != color_id:
-            return services._error("GOOGLE_CALENDAR_COLOR_VERIFICATION_FAILED", mutation_calls=1, reflection_unknown=True)
-    except Exception as exc:
-        return services._google_calendar_color_failure(exc, mutation_calls=1)
-    services._clear_pending_personal_owner()
-    return json.dumps({
-        "ok": True,
-        "authority": "Google Calendar API",
-        "action": "set_color",
-        "calendar_id": calendar_id,
-        "eventkit_id": eventkit_id,
-        "google_event_id": google_event_id,
-        "i_cal_uid": i_cal_uid,
-        "summary": str(result.get("summary") or before.get("summary") or ""),
-        "previous_color_id": str(before.get("colorId") or ""),
-        "color_id": color_id,
-        "color_name": services.GOOGLE_CALENDAR_COLOR_NAMES[color_id],
-        "previous_color_name": services.GOOGLE_CALENDAR_COLOR_NAMES.get(str(before.get("colorId") or ""), "알 수 없음"),
-        "changed_fields": ["colorId"],
-        "mutation_calls": 1,
-        "execution_mode": "immediate_then_report",
-        "send_updates": "none",
-        "fallback_used": False,
-        "tool_search_calls": 0,
-    }, ensure_ascii=False)
+    from hermes_constants import get_hermes_home
+    from . import color_write
+    return color_write.perform(get_hermes_home(),services.host,args,context)

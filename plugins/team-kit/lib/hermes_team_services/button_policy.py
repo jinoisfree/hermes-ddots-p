@@ -23,7 +23,9 @@ VIDEO_MAKE = ('제작해', '수정', '취소')
 VIDEO_MAKE_LEGEND = '제작해 = 이 제작안대로 만들기, 수정 = 고칠 점 말하기, 취소 = 만들지 않기'
 VIDEO_DONE = ('다운', '수정', '종결')
 VIDEO_DONE_LEGEND = '다운 = 받은 파일 저장, 수정 = 고칠 점 말하기, 종결 = 이 작업 끝내기'
-CONTEXTS = ((MAIL, MAIL_LEGEND), (VIDEO_MAKE, VIDEO_MAKE_LEGEND), (VIDEO_DONE, VIDEO_DONE_LEGEND))
+APP_WRITE = ('확인', '되돌리기')
+APP_WRITE_LEGEND = '앱 쓰기 결과'
+CONTEXTS = ((MAIL, MAIL_LEGEND), (VIDEO_MAKE, VIDEO_MAKE_LEGEND), (VIDEO_DONE, VIDEO_DONE_LEGEND), (APP_WRITE, APP_WRITE_LEGEND))
 # 업무비서 task registration checklists (owner decisions 2026-10-24, 2026-10-28).
 CHECKLISTS = ('일정 | 제출: lv1 | lv2 | 확인', '전체 | 노션 | 일정 | 메모')
 

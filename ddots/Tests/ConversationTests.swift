@@ -386,7 +386,12 @@ struct ConversationTests {
         // Hermes record
         let home = FileManager.default.temporaryDirectory.appendingPathComponent("ddots-hermes-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: home) }
-        let bridge = HermesBridge(home: home)
+        let configRoot = home.appendingPathComponent("config-view")
+        try FileManager.default.createDirectory(at: configRoot, withIntermediateDirectories: true)
+        let view: [String: Any] = ["schemaVersion": 1, "members": [["profile": "default", "displayName": "Root From Roster"], ["profile": "archive-helper", "displayName": "Knight From Roster"]], "routing": [:]]
+        try JSONSerialization.data(withJSONObject: view).write(to: configRoot.appendingPathComponent("ddots-config.json"))
+        let viewConfig = DdotsConfig(root: configRoot, hermes: home, home: home)
+        let bridge = HermesBridge(home: home, config: viewConfig)
         if case .unavailable = bridge.poll().status { passed += 1 } else { check(false, "missing Hermes home is unavailable") }
         let schema = ["CREATE TABLE sessions (id TEXT PRIMARY KEY, source TEXT NOT NULL)",
                       "CREATE TABLE messages (id INTEGER PRIMARY KEY, session_id TEXT, role TEXT, content TEXT, tool_calls TEXT, timestamp REAL)",
@@ -408,15 +413,28 @@ struct ConversationTests {
         let charactersOnly = bridge.poll(unreadSince: Date(timeIntervalSince1970: 0), includeMessages: false)
         check(charactersOnly.messages.isEmpty && charactersOnly.typing.isEmpty && charactersOnly.receipts.isEmpty
               && charactersOnly.sessionToken.isEmpty && bridge.rowsRead == 0, "character-only polling never reads photon messages, typing or receipts")
-        check(charactersOnly.characters.contains(ChatCharacter(id: "default", name: "위키담당"))
-              && charactersOnly.characters.contains(ChatCharacter(id: "archive-helper", name: "보관담당")), "character-only polling keeps display names without requiring a message schema")
+        check(charactersOnly.characters.contains(ChatCharacter(id: "default", name: "Root From Roster"))
+              && charactersOnly.characters.contains(ChatCharacter(id: "archive-helper", name: "Knight From Roster")), "character-only polling keeps display names without requiring a message schema")
+        check(bridge.stores().first { $0.profile == "broken" }?.name == "broken", "unlisted stores use their ID")
+        let absentView = DdotsConfig(root: home.appendingPathComponent("absent-view"), hermes: home, home: home)
+        let absentBridge = HermesBridge(home: home, makesImages: false, config: absentView)
+        check(absentBridge.stores().first { $0.profile == "default" }?.name == "Hermes"
+              && absentBridge.stores().first { $0.profile == "archive-helper" }?.name == "archive-helper", "unlisted default uses Hermes; other unlisted stores use their ID")
+        var withoutDefault = view
+        withoutDefault["members"] = (view["members"] as! [[String: Any]]).filter { $0["profile"] as? String != "default" }
+        try JSONSerialization.data(withJSONObject: withoutDefault).write(to: configRoot.appendingPathComponent("ddots-config.json"))
+        viewConfig.refresh()
+        check(bridge.stores().first { $0.profile == "default" }?.name == "Hermes", "cached stores use Hermes when default leaves the view")
+        try JSONSerialization.data(withJSONObject: view).write(to: configRoot.appendingPathComponent("ddots-config.json"))
+        viewConfig.refresh()
+        check(bridge.stores().first { $0.profile == "default" }?.name == "Root From Roster", "cached stores restore the exported default name")
         check(charactersOnly.status == .connected(stores: 3), "character-only status describes discovered character stores")
         var result = bridge.poll()
         check(result.status == .connected(stores: 2), "unknown store formats are skipped, not guessed")
         check(result.messages.map(\.id) == ["default:1", "archive-helper:1", "default:4", "archive-helper:2"], "only iMessage text turns, merged across profiles")
         let receiptPoll = bridge.poll(limit:1,unreadSince:Date(timeIntervalSince1970:100))
         check(receiptPoll.receipts.filter { !$0.fromUser }.count == 2 && receiptPoll.messages.count == 1, "unread metadata is independent of the visible message limit")
-        check(result.messages.map(\.speaker) == ["", "", "위키담당", "보관담당"], "replies carry the profile display name")
+        check(result.messages.map(\.speaker) == ["", "", "Root From Roster", "Knight From Roster"], "replies carry the exported member name")
         check(!result.messages.contains { $0.body.contains("TOOL") || $0.body.contains("SLACK") || $0.body.contains("META") }, "tool output and other platforms are never shown")
         let liveAssets = home.appendingPathComponent("assets")
         try FileManager.default.createDirectory(at: liveAssets, withIntermediateDirectories: true)
@@ -473,7 +491,7 @@ struct ConversationTests {
         makeStore(home.appendingPathComponent("state.db"), statements: [
             "CREATE TABLE session_turn_leases (conversation_id TEXT, holder TEXT, acquired_at REAL, expires_at REAL)",
             "INSERT INTO session_turn_leases VALUES ('s1','writer',450,550),('s2','slack-writer',450,550),('missing','orphan',450,550)"])
-        check(bridge.poll(now: clock).typing.map(\.speaker) == ["위키담당"], "only live photon leases identify the writer")
+        check(bridge.poll(now: clock).typing.map(\.speaker) == ["Root From Roster"], "only live photon leases identify the writer")
         check(bridge.poll(now: Date(timeIntervalSince1970:550)).typing.isEmpty, "expiry is exclusive and evaluated even without database writes")
         makeStore(home.appendingPathComponent("state.db"), statements: ["INSERT INTO messages VALUES (7,'s1','assistant','완료',NULL,480)"])
         check(bridge.poll(now: clock).typing.isEmpty, "reply clears a still-live lease")
@@ -560,9 +578,9 @@ struct ConversationTests {
         makeStore(slackHome.appendingPathComponent("profiles/old/state.db"), statements: [
             "CREATE TABLE sessions (id TEXT PRIMARY KEY, source TEXT NOT NULL)",
             "CREATE TABLE messages (id INTEGER PRIMARY KEY, session_id TEXT, role TEXT, content TEXT, tool_calls TEXT, timestamp REAL)"])
-        let activityBridge = HermesBridge(home: slackHome, makesImages: false)
+        let activityBridge = HermesBridge(home: slackHome, makesImages: false, config: viewConfig)
         let slackActivity = activityBridge.slackActivity(now: Date(timeIntervalSince1970: 1_000), window: 500)
-        check(slackActivity.writers == [SlackActivity.Writer(profile: "default", name: "Hermes", room: "C1", thread: "100.1", since: 940)], "only a live turn in a Slack thread counts as writing")
+        check(slackActivity.writers == [SlackActivity.Writer(profile: "default", name: "Root From Roster", room: "C1", thread: "100.1", since: 940)], "only a live turn in a Slack thread counts as writing")
         check(slackActivity.recent == [SlackActivity.Recent(room: "C1", thread: "100.1", at: 950)], "recent Slack threads carry their newest activity, and a record without thread columns is skipped")
 
         let reads = activityBridge.activityReads

@@ -28,7 +28,7 @@ final class HermesBridge {
     private let avatarCache: ProfileAvatarCache
     private var cachedStores: [Store] = []
     private var discoveryTime = Date.distantPast
-    private var names: [String: (Date, String)] = [:]
+    private let config: DdotsConfig
     private(set) var rowsRead = 0
     private var activityCache: (stamp: String, window: TimeInterval, limit: Int, since: Double, until: Double, result: SlackActivity)?
     private(set) var activityReads = 0
@@ -38,7 +38,8 @@ final class HermesBridge {
             return "\(path):\((attributes?[.modificationDate] as? Date)?.timeIntervalSince1970 ?? 0):\(attributes?[.size] ?? 0):\(attributes?[.systemFileNumber] ?? 0)"
         }.joined(separator: "|")
     }
-    init(home: URL? = nil, makesImages: Bool = true) {
+    init(home: URL? = nil, makesImages: Bool = true, config: DdotsConfig = .shared) {
+        self.config = config
         avatarCache = ProfileAvatarCache(makesImages: makesImages)
         self.home = home ?? HermesLocator.shared.locate() ?? HermesLocator.shared.fallbackHome
     }
@@ -51,28 +52,25 @@ final class HermesBridge {
         cachedStores = roots.compactMap { profile, root in
             let database = root.appendingPathComponent("state.db")
             guard files.fileExists(atPath: database.path) else { return nil }
-            let stamp = ((try? files.attributesOfItem(atPath: root.appendingPathComponent("profile.yaml").path))?[.modificationDate] as? Date) ?? .distantPast
-            if names[profile]?.0 != stamp { names[profile] = (stamp, Self.displayName(root: root) ?? (profile == "default" ? "Hermes" : profile)) }
-            return Store(profile: profile, name: names[profile]!.1, database: database)
+            return Store(profile: profile, name: storeName(profile), database: database)
         }
         discoveryTime = Date()
         return refreshedAvatars()
     }
+    private func storeName(_ profile: String) -> String {
+        if profile == "default" && !config.members.contains(where: { HermesRouting.str($0["profile"]) == profile }) {
+            return "Hermes"
+        }
+        return config.memberName(profile)
+    }
     private func refreshedAvatars() -> [Store] {
         cachedStores = cachedStores.map { store in
             var store = store
+            store.name = storeName(store.profile)
             store.avatarURL = ProfileAvatarCache.avatarURL(root: store.database.deletingLastPathComponent())
             return store
         }
         return cachedStores
-    }
-    static func displayName(root: URL) -> String? {
-        guard let text = try? String(contentsOf: root.appendingPathComponent("profile.yaml"), encoding: .utf8) else { return nil }
-        for line in text.split(whereSeparator: { $0.isNewline }) where line.hasPrefix("display_name:") {
-            let value = line.dropFirst("display_name:".count).trimmingCharacters(in: CharacterSet(charactersIn: " \t'\""))
-            return value.isEmpty ? nil : value
-        }
-        return nil
     }
     func poll(limit: Int = 200, now: Date = Date(), unreadSince: Date? = nil, includeMessages: Bool = true) -> PollResult {
         let found = stores(); rowsRead = 0

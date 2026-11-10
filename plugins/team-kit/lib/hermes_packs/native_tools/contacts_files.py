@@ -1,4 +1,4 @@
-"""Contact exports and recovery files, confined to work-assistant's configured file reach."""
+"""Contact exports and recovery files, confined to the current employee's configured file reach."""
 from __future__ import annotations
 
 import json
@@ -11,9 +11,15 @@ from hermes_facility import owner_vault as vault
 
 def roots() -> list[Path]:
     import hermes_yaml
-    config = team.home_of_role('work', Path.home() / '.hermes') / 'config.yaml'
+    from hermes_constants import get_hermes_home
+    from hermes_facility import app_registry
+    home=Path(get_hermes_home())
+    config = home / 'config.yaml'
     data = hermes_yaml.safe_load(config.read_text())
-    settings = data['plugins']['entries']['team-kit']['settings']['files']
+    settings = data.get('plugins',{}).get('entries',{}).get('team-kit',{}).get('settings',{}).get('files',{})
+    root=app_registry.root_of(home);profile=app_registry.profile_of(home)
+    if app_registry.explicit(root,profile):
+        settings=app_registry.derived_settings(data,app_registry.grants(root,profile,data),app_registry.values(root,profile))['team-kit']['files']
     if settings.get('enabled') is not True:
         raise ValueError('file tools disabled')
     # The same enabled, existing, absolute folders as team-kit.files.folders.

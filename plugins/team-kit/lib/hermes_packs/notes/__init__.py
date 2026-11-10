@@ -139,6 +139,9 @@ def _apple_notes_direct_lookup(services, args: dict[str, Any], **context: Any) -
         query, folder, str(limit), "true" if include_body else "false",
         "true" if args.get("search_body") else "false",
     ]
+    from hermes_facility.app_scope import require_selected
+    allowed = require_selected('note_folders')
+    if allowed is not None: command.append(json.dumps(allowed))
     runner = context.get("runner") or subprocess.run
     try:
         proc = runner(command, capture_output=True, text=True, timeout=30, check=False)
@@ -597,7 +600,7 @@ def _note_snapshot(services, note_id: str, runner: Any) -> dict[str, str] | None
         return None
     if getattr(proc, "returncode", 1) != 0:
         return None
-    title, separator, body_html = str(getattr(proc, "stdout", "") or "").rstrip("\n").partition("\t")
+    title, separator, body_html = str(getattr(proc, "stdout", "") or "").removesuffix("\n").partition("\t")
     if not separator or not body_html:
         return None
     return {"note_id": note_id, "title": title, "body_html": body_html}
@@ -1069,7 +1072,7 @@ def _apple_notes_restore(services, args: dict[str, Any], runner: Any) -> str:
         return services._error("restore needs note_id and body_html")
     script = Path(__file__).with_name("apple_notes_mutation.applescript")
     try:
-        proc = runner(["/usr/bin/osascript", str(script), "restore", note_id, "", "", body_html],
+        proc = runner(["/usr/bin/osascript", str(script), "restore", note_id, "", str(args.get("title") or ""), body_html],
                       capture_output=True, text=True, timeout=30, check=False)
     except (OSError, subprocess.TimeoutExpired) as exc:
         return services._error(f"APPLE_NOTES_NATIVE_UNAVAILABLE:{type(exc).__name__}")
@@ -1097,7 +1100,10 @@ def _apple_notes_direct_mutation(services, args: dict[str, Any], **context: Any)
     if context.get('_linked_title_authority') is not services._LINKED_TITLE_AUTHORITY:
         if error := services._personal_owner_error("apple_notes_direct_mutation"):
             return error
-    if services.obsidian_notes.selected(services.host) or services.obsidian_notes.handles(args.get('note_id')):
+    from hermes_facility.app_scope import note_source
+    if note_source() == 'apple_notes' and services.obsidian_notes.handles(args.get('note_id')):
+        return services._error('APP_SOURCE_MISMATCH')
+    if services.obsidian_notes.selected(services.host) or (note_source() is None and services.obsidian_notes.handles(args.get('note_id'))):
         try:
             return services.obsidian_notes.mutate(services.host, args, context)
         except Exception as exc:
@@ -1283,6 +1289,9 @@ def _apple_notes_direct_mutation(services, args: dict[str, Any], **context: Any)
             layout=services._notes_layout(note_folder), progress=progress,
         ) if action in {"create", "update"} else "",
     ]
+    if action in {'delete','move'} and context.get('_memo_expected') is not None:
+        guard=context['_memo_expected']
+        command.extend([guard['title'],guard['body_html'],guard['folder']['id']])
     command.extend(path for path in attachments if services._is_note_image(path))
     try:
         proc = runner(command, capture_output=True, text=True, timeout=30, check=False)
@@ -1323,8 +1332,14 @@ def _apple_notes_direct_mutation(services, args: dict[str, Any], **context: Any)
                                "target_id": result['note_id'], "attachments_missing": missing,
                                "rollback": recovery, "result": result}, ensure_ascii=False)
     if action == "move":
-        _, actual_folder = services._note_native_info(note_id, runner)
-        if result.get("note_id") != note_id or actual_folder != folder:
+        if folder.startswith('id:'):
+            metadata=services.host.personal_scopes.native_metadata(services.host,'notes',{'note_id':note_id},{'runner':runner})
+            actual_folder=(metadata.get('current') or {}).get('id')
+            expected_folder=folder[3:]
+        else:
+            _, actual_folder = services._note_native_info(note_id, runner)
+            expected_folder=folder
+        if result.get("note_id") != note_id or actual_folder != expected_folder:
             return services._error("APPLE_NOTES_MOVE_NOT_CONFIRMED")
     if action in {"create", "update"} and result.get("note_id"):
         services._remember_note_context(str(result["note_id"]), attachments, original_text)

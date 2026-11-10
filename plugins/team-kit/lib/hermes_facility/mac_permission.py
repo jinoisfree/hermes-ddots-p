@@ -25,9 +25,40 @@ REQUEST_SECONDS = 120
 LABEL_PREFIX = 'ai.hermes.connections-permission.'
 
 # service -> (mechanism, bundle id, name shown in System Settings)
-TARGETS = {'mail_read': ('apple_event', 'com.apple.mail', 'Mail'),
-           'notes_read': ('apple_event', 'com.apple.Notes', '메모'),
-           'calendar_read': ('eventkit', None, '캘린더')}
+def targets():
+    """Catalog-derived targets; legacy service identifiers remain aliases."""
+    table = json.loads((Path(__file__).resolve().parents[1] /
+                        'hermes_packs/mac_apps/app_catalog.json').read_text())
+    result = {}
+    for bundle, item in table.items():
+        kind = {'apple_events': 'apple_event', 'calendar': 'eventkit', 'contacts': 'contacts'}.get(item['permission'])
+        if kind:
+            target = (kind, bundle if kind == 'apple_event' else None, item.get('permission_label') or item.get('service') or bundle)
+            result['app:' + bundle] = target
+            if item.get('service'): result[item['service']] = target
+    # Gmail is independent of Mail.app; this is the existing permission CLI alias only.
+    if 'apple_mail' in result: result['mail_read'] = result['apple_mail']
+    return result
+
+
+class PermissionTargets:
+    def __contains__(self, key):
+        try: self[key]; return True
+        except KeyError: return False
+    def __getitem__(self, key):
+        if key in targets(): return targets()[key]
+        if isinstance(key, str) and key.startswith('app:'):
+            bundle = key[4:]
+            import re
+            if re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]{1,250}', bundle):
+                return ('apple_event', bundle, bundle)
+        raise KeyError(key)
+    def get(self, key, default=None):
+        try: return self[key]
+        except KeyError: return default
+
+
+TARGETS = PermissionTargets()
 
 # AEDeterminePermissionToAutomateTarget results and EKAuthorizationStatus values.
 APPLE_EVENT_STATUS = {0: 'granted', -1743: 'denied', -1744: 'not_determined', -600: 'target_unavailable'}
@@ -53,8 +84,15 @@ def job_script(python, worker, mode, service, result):
 def run_job(root, mode, service, *, timeout, python=None, launchctl=subprocess.run,
             sleep=time.sleep, monotonic=time.monotonic):
     """Run the worker as a one-off launchd job; the job and its files never outlive this call."""
-    if service not in TARGETS or mode not in ('judge', 'request'):
+    if service not in TARGETS or mode not in ('judge', 'request', 'judge_info', 'request_info', 'guide'):
         return dict(outcome='failed', reason='INVALID_ARGUMENTS')
+    return run_worker(root, Path(__file__).resolve(), mode, service, timeout=timeout,
+                      python=python, launchctl=launchctl, sleep=sleep, monotonic=monotonic)
+
+
+def run_worker(root, worker, mode, service, *, timeout, python=None, launchctl=subprocess.run,
+               sleep=time.sleep, monotonic=time.monotonic):
+    """Internal fixed worker launcher; never receives model-supplied executables."""
     python = python or sys.executable
     label = LABEL_PREFIX + uuid.uuid4().hex[:12]
     folder = Path(root) / 'state/connections/jobs' / label
@@ -66,7 +104,7 @@ def run_job(root, mode, service, *, timeout, python=None, launchctl=subprocess.r
         plist.write_bytes(plistlib.dumps({
             'Label': label,
             'ProgramArguments': ['/usr/bin/osascript', '-l', 'JavaScript', '-e',
-                                 job_script(python, Path(__file__).resolve(), mode, service, result_path)],
+                                 job_script(python, worker, mode, service, result_path)],
             'WorkingDirectory': str(root),
             'LimitLoadToSessionType': ['Aqua', 'Background'],
             'RunAtLoad': True}))
@@ -84,7 +122,7 @@ def run_job(root, mode, service, *, timeout, python=None, launchctl=subprocess.r
                     except ValueError:
                         answer = None
                     if isinstance(answer, dict) and isinstance(answer.get('outcome'), str):
-                        return dict(outcome=answer['outcome'], reason=answer.get('reason', 'OK' if answer['outcome'] != 'failed' else 'CHECK_FAILED'))
+                        return answer if mode in ('execute', 'judge_info', 'request_info', 'guide') else dict(outcome=answer['outcome'], reason=answer.get('reason', 'OK' if answer['outcome'] != 'failed' else 'CHECK_FAILED'))
                 sleep(0.2)
             return dict(outcome='failed', reason='TIMEOUT')
         finally:
@@ -98,23 +136,119 @@ def run_job(root, mode, service, *, timeout, python=None, launchctl=subprocess.r
 
 # System Settings pane per mechanism and the entry the owner switches on. "osascript" is the name both panes
 # show for the gateway's wrapper (Automation list and Calendars list, confirmed on screen 2026-11-07, impl-report V-2).
-SETTINGS_PANES = {'apple_event': 'x-apple.systempreferences:com.apple.preference.security?Privacy_Automation',
-                  'eventkit': 'x-apple.systempreferences:com.apple.preference.security?Privacy_Calendars'}
+# Only this facility defines Settings destinations. The screen receives these values.
+PANE_INFO = {
+    'automation': ('x-apple.systempreferences:com.apple.preference.security?Privacy_Automation', '자동화'),
+    'calendars': ('x-apple.systempreferences:com.apple.preference.security?Privacy_Calendars', '캘린더'),
+    'contacts': ('x-apple.systempreferences:com.apple.preference.security?Privacy_Contacts', '연락처'),
+    'full_disk_access': ('x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles', '전체 디스크 접근 권한'),
+    'internet_accounts': ('x-apple.systempreferences:com.apple.Internet-Accounts-Settings.extension', '인터넷 계정'),
+}
+
+SETTINGS_PANES = {kind:PANE_INFO[pane][0] for kind,pane in
+                  [('apple_event','automation'),('eventkit','calendars'),('contacts','contacts')]}
 SETTINGS_ENTRY = 'osascript'
 
 
 def settings_guide(service):
     kind, _, name = TARGETS[service]
-    where = '자동화' if kind == 'apple_event' else '캘린더'
+    where = {'apple_event': '자동화', 'eventkit': '캘린더', 'contacts': '연락처'}[kind]
     target = ' 아래의 "%s"' % name if kind == 'apple_event' else ''
     return dict(url=SETTINGS_PANES[kind],
                 instruction='개인정보 보호 및 보안 > %s 목록에서 "%s"%s을(를) 켜 주세요.' % (where, SETTINGS_ENTRY, target))
+
+
+def internet_accounts():
+    return dict(kind='open_settings', pane='internet_accounts', url=PANE_INFO['internet_accounts'][0],
+                hint='인터넷 계정에서 사용할 계정을 직접 추가한 뒤 이 화면으로 돌아와 다시 골라 주세요.',
+                guide=[dict(n=1,text='인터넷 계정 설정을 여세요.',open_url=PANE_INFO['internet_accounts'][0]),
+                       dict(n=2,text='사용할 계정을 직접 추가하세요.'),dict(n=3,text='이 화면으로 돌아와 계정을 직접 고르세요.')])
+
+
+
+def mac_account_settings(app):
+    if app.get('scope') in ('mail_accounts','calendars','note_folders') or app.get('permission')=='contacts':
+        return internet_accounts()
+    return None
+
+
+def permission_next(pane, observation, reason):
+    url, label = PANE_INFO[pane]
+    target = observation.get('target') if isinstance(observation, dict) else None
+    # Names are observed by the same worker that judged TCC; no guessed process/app labels.
+    hint = ('개인정보 보호 및 보안 → '+label+'에서 '+target+' 항목을 허용해 주세요.' if target else
+            '권한을 사용할 실행 주체를 확인하지 못했어요. 권한 창의 항목을 확인해 주세요.')
+    guide=[dict(n=1,text=hint)]
+    if pane=='automation':
+        guide.extend([dict(n=2,text='토글을 눌러도 켜지지 않으면 시스템 설정을 종료한 뒤 다시 여세요.'),
+                      dict(n=3,text='사진 연결이라면 사진 앱을 한 번 연 뒤 자동화 설정을 다시 확인하세요.'),
+                      dict(n=4,text='허용한 뒤 이 화면으로 돌아와 켰어요 · 다시 확인을 누르세요.')])
+    return dict(kind='open_settings' if reason in ('PERMISSION_DENIED','PERMISSION_REQUIRED') else 'permission_request',
+                pane=pane, url=url, target=target, hint=hint, guide=guide)
+
+
+def connection_step(root, service, permission, resume=None):
+    def probe(ask=False, automation=False):
+        mode='request_info' if ask else 'judge_info'
+        if automation:
+            return run_worker(root,Path(__file__).resolve(),mode,'automation:'+service[4:],
+                              timeout=REQUEST_SECONDS if ask else JUDGE_SECONDS)
+        return run_job(root,mode,service,timeout=REQUEST_SECONDS if ask else JUDGE_SECONDS)
+    if permission=='full_disk_access':
+        answer=run_job(root,'guide',service,timeout=JUDGE_SECONDS)
+        return dict(ok=False,reason='PERMISSION_REQUIRED',next=permission_next('full_disk_access',answer,'PERMISSION_REQUIRED'))
+    asked=False
+    answer=probe()
+    state,reason=outcome_to_state(answer['outcome']) if answer['outcome']!='failed' else ('unknown',answer['reason'])
+    if state!='connected' and resume=='permission_request':
+        answer=probe(ask=True);asked=True
+        state,reason=outcome_to_state(answer['outcome']) if answer['outcome']!='failed' else ('unknown',answer['reason'])
+    pane={'calendar':'calendars','contacts':'contacts'}.get(permission,'automation')
+    if permission=='contacts' and state=='connected':
+        answer=probe(ask=resume=='permission_request' and not asked,automation=True)
+        state,reason=outcome_to_state(answer['outcome']) if answer['outcome']!='failed' else ('unknown',answer['reason'])
+        pane='automation'
+    following=permission_next(pane,answer,reason)
+    return dict(ok=state=='connected',reason=reason,next=following)
+
+
+def worker_target(service, bundle):
+    """Observe the responsible wrapper in this worker's real ancestry and the installed app name."""
+    subject=None;pid=os.getppid()
+    for _ in range(12):
+        if pid<=1:break
+        try:
+            row=subprocess.run(['/bin/ps','-p',str(pid),'-o','ppid=,comm='],capture_output=True,text=True,timeout=2,check=False)
+            parent,executable=row.stdout.strip().split(None,1)
+            if Path(executable).name=='osascript':subject=Path(executable).name;break
+            pid=int(parent)
+        except (ValueError,OSError,subprocess.SubprocessError):break
+    if not bundle and service.startswith('app:'):bundle=service[4:]
+    name=None
+    if bundle:
+        script="ObjC.import('AppKit');const u=$.NSWorkspace.sharedWorkspace.URLForApplicationWithBundleIdentifier(%s);u ? ObjC.unwrap($.NSFileManager.defaultManager.displayNameAtPath(u.path)) : '';"
+        try:
+            row=subprocess.run(['/usr/bin/osascript','-l','JavaScript','-e',script % json.dumps(bundle)],capture_output=True,text=True,timeout=5,check=False)
+            if row.returncode==0:name=row.stdout.strip().removesuffix('.app') or None
+        except (OSError,subprocess.SubprocessError):pass
+    target=(subject+' → '+name if name else subject) if subject else None
+    return dict(target=target)
 
 
 def judge(root, service, **kwargs):
     """No dialog: the worker passes askUserIfNeeded=false."""
     answer = run_job(root, 'judge', service, timeout=JUDGE_SECONDS, **kwargs)
     return outcome_to_state(answer['outcome']) if answer['outcome'] != 'failed' else ('unknown', answer['reason'])
+
+
+def judge_automation(root,bundle,*,ask=False,**kwargs):
+    """Internal second permission for native packs that also use Apple Events."""
+    import re
+    if not isinstance(bundle,str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]{1,250}',bundle):
+        return ('unknown','INVALID_ARGUMENTS')
+    answer=run_worker(root,Path(__file__).resolve(),'request' if ask else 'judge','automation:'+bundle,
+                      timeout=REQUEST_SECONDS if ask else JUDGE_SECONDS,**kwargs)
+    return outcome_to_state(answer['outcome']) if answer['outcome']!='failed' else ('unknown',answer['reason'])
 
 
 def request(root, service, **kwargs):
@@ -177,6 +311,16 @@ def _eventkit_request(folder):
     return answer.stdout.strip() if answer.stdout.strip() in ('granted', 'denied') else 'failed'
 
 
+def _contacts_permission(ask, folder):
+    binary = os.path.join(folder, 'contacts-permission')
+    source = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'contacts_permission.swift')
+    built = subprocess.run(['/usr/bin/swiftc', source, '-o', binary], capture_output=True, timeout=60)
+    if built.returncode: return 'failed'
+    result = subprocess.run([binary, 'request' if ask else 'judge'], capture_output=True, text=True, timeout=45)
+    value = result.stdout.strip()
+    return value if value in ('granted', 'denied', 'not_determined') else 'failed'
+
+
 def _launch_hidden(bundle):
     """AEDeterminePermission needs a running target; the gateway's own JXA launches it the same way."""
     subprocess.run(['/usr/bin/open', '-g', '-j', '-b', bundle], timeout=10, check=False,
@@ -184,9 +328,18 @@ def _launch_hidden(bundle):
 
 
 def worker(mode, service, result_path):
-    kind, bundle, _ = TARGETS[service]
-    ask = mode == 'request'
-    if kind == 'eventkit':
+    if service.startswith('automation:'):
+        import re
+        bundle=service[len('automation:'):]
+        if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]{1,250}',bundle):raise ValueError('INVALID_ARGUMENTS')
+        kind='apple_event'
+    else:kind,bundle,_=TARGETS[service]
+    ask = mode in ('request', 'request_info')
+    if mode == 'guide':
+        outcome = 'not_determined'
+    elif kind == 'contacts':
+        outcome = _contacts_permission(ask, os.path.dirname(result_path))
+    elif kind == 'eventkit':
         status = _eventkit_status()
         outcome = EVENTKIT_STATUS.get(status, 'failed')
         if ask and outcome == 'not_determined':
@@ -203,7 +356,7 @@ def worker(mode, service, result_path):
         outcome = APPLE_EVENT_STATUS.get(status, 'failed')
     temporary = result_path + '.tmp'
     with open(temporary, 'w', encoding='utf-8') as stream:
-        json.dump(dict(outcome=outcome), stream)
+        json.dump(dict(outcome=outcome, **(worker_target(service,bundle) if mode in ('judge_info','request_info','guide') else {})), stream)
     os.replace(temporary, result_path)
 
 

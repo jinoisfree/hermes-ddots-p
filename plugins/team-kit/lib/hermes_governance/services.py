@@ -48,7 +48,6 @@ class Services:
     _NETWORK_COMMAND_RE: Any
     _PAGE_VIEWS: Any
     _PERSONAL_BUNDLE_APPROVAL_LOCK: Any
-    _PERSONAL_BUNDLE_APPROVAL_SCOPES: Any
     _PLUGIN_CONTEXT: Any
     _REVIEW_SKILL_LEARNING: Any
     _RUNTIME: Any
@@ -77,7 +76,6 @@ class Services:
     _browsing: Any
     _bundle_completes: Any
     _bundle_plan_lines: Any
-    _bundle_requires_approval: Any
     _calendar_event_get: Any
     _card_tool_texts: Any
     _check_budgets: Any

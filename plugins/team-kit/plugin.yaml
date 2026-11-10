@@ -16,7 +16,10 @@ provides_hooks:
   - post_auxiliary_call
 provides_middleware:
   - llm_request
+  - tool_execution
 provides_tools:
+  - mac_app
+  - ego_browser
   - news_watch_read
   - morning_report
   - table_analyze

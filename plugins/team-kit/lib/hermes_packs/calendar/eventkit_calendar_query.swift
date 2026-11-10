@@ -64,7 +64,7 @@ func iso(_ value: Date, timezone: TimeZone) -> String {
 @main
 struct CalendarQuery {
     static func main() async {
-        guard CommandLine.arguments.count == 3 else {
+        guard (3...4).contains(CommandLine.arguments.count) else {
             fputs("usage: eventkit_calendar_query YYYY-MM-DD TimeZone\n", stderr)
             exit(64)
         }
@@ -114,7 +114,9 @@ struct CalendarQuery {
                 exit(77)
             }
 
-            let calendars = store.calendars(for: .event)
+            let allowed: Set<String>? = CommandLine.arguments.count > 3
+                ? Set(try JSONDecoder().decode([String].self, from: Data(CommandLine.arguments[3].utf8))) : nil
+            let calendars = store.calendars(for: .event).filter { allowed == nil || allowed!.contains($0.calendarIdentifier) }
             let predicate = store.predicateForEvents(withStart: start, end: end, calendars: calendars)
             let selected = store.events(matching: predicate)
                 .filter { $0.endDate > start && $0.startDate < end }

@@ -7,7 +7,11 @@ import Foundation
         precondition(c.members.isEmpty && c.order.isEmpty && c.excluded.isEmpty)
         func write(_ value:[String:Any],_ path:URL)throws{try FileManager.default.createDirectory(at:path.deletingLastPathComponent(),withIntermediateDirectories:true);try JSONSerialization.data(withJSONObject:value,options:[.sortedKeys]).write(to:path,options:.atomic)}
         try write(["agents":["work-assistant","llm-wiki","system-doctor"],"default":"llm-wiki","destinations":["llm-wiki":".","work-assistant":"profiles/work-assistant","system-doctor":"profiles/system-doctor"]],home.appendingPathComponent(".starter/receipts/0001.json"))
-        c.refresh();precondition(c.members.count==3 && c.recipient=="default")
+        let profile=home.appendingPathComponent("profiles/work-assistant")
+        try FileManager.default.createDirectory(at:profile,withIntermediateDirectories:true)
+        try "display_name: Should Not Be Used\n".write(to:profile.appendingPathComponent("profile.yaml"),atomically:true,encoding:.utf8)
+        c.refresh();precondition(c.members.isEmpty && c.recipient.isEmpty)
+        precondition(c.status.contains("Hermes에서 ddots 설정을 아직 내보내지 않았어요") && c.status.contains("1.") && c.status.contains("--update") && c.status.contains("2.") && c.status.contains("export_config.py --output"))
         let config:[String:Any] = ["schemaVersion":1,"members":[["profile":"helper","displayName":"Helper","slackUserID":"B1"],["profile":"doctor","displayName":"Doctor","slackUserID":"B2"]],"routing":[:],"solo":["team_bots":["B1","B2"],"listener_bots":["B2"],"excluded_rooms":["HOME"]]]
         try write(config,record.appendingPathComponent("ddots-config.json"));c.refresh();precondition(c.members.count==2)
         precondition(c.matching("Helper")=="helper" && c.roomOwner(id:"ROOM",name:"room",users:["B1","B2"])=="helper")
@@ -15,7 +19,7 @@ import Foundation
         try Data("broken".utf8).write(to:record.appendingPathComponent("ddots-config.json"));c.refresh();precondition(c.members.count==2 && !c.status.isEmpty)
         try write(["schemaVersion":1,"order":["helper"],"excluded":["doctor"],"colors":["helper":"#112233"]],record.appendingPathComponent("ddots-local.json"));c.refresh();precondition(c.order==["helper"] && c.excluded==["doctor"])
         try write(config,record.appendingPathComponent("ddots-config.json"));c.refresh();precondition(c.status.isEmpty)
-        try FileManager.default.removeItem(at:record.appendingPathComponent("ddots-config.json"));c.refresh();precondition(c.members.count==3)
+        try FileManager.default.removeItem(at:record.appendingPathComponent("ddots-config.json"));c.refresh();precondition(c.members.isEmpty && c.recipient.isEmpty && !c.status.isEmpty)
         try FileManager.default.removeItem(at:record.appendingPathComponent("ddots-local.json"));c.refresh()
         precondition(c.order.isEmpty && c.excluded.isEmpty && c.appearance.isEmpty)
         var changed=config;changed["members"]=[["profile":"helper","displayName":"Renamed","slackUserID":"B1"]]
@@ -24,11 +28,10 @@ import Foundation
         precondition(c.matching("Renamed")=="helper" && c.matching("Doctor")==nil && c.status.isEmpty)
         if CommandLine.arguments.count > 1 {
             let installed=DdotsConfig(root:root.appendingPathComponent("absent-record"),hermes:URL(fileURLWithPath:CommandLine.arguments[1]),home:root)
-            precondition(installed.members.count==3 && installed.recipient=="default")
-            precondition(Set(installed.members.compactMap{$0["profile"] as? String})==["default","work-assistant","system-doctor"])
+            precondition(installed.members.isEmpty && installed.recipient.isEmpty && installed.status.contains("--update"))
         }
         try ConversationRulesTests.run()
-        print("ConfigTests passed: absent, starter, present, invalid preservation, reload, local values, solo membership changes")
+        print("ConfigTests passed: absent export ignores receipts and profiles, present, invalid preservation, reload, local values, solo membership changes")
     }
 }
 

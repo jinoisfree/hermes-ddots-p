@@ -1567,3 +1567,56 @@ extension SlackController {
         }
     }
 }
+
+extension AppDelegate {
+    /// The pet shows no menu bar, so dialogs such as the token field had no Edit menu to carry ⌘V and friends.
+    /// A main menu works for its shortcuts even though it is never drawn.
+    func installEditMenu() {
+        let edit = NSMenu(title: "편집")
+        edit.addItem(withTitle: "실행 취소", action: Selector(("undo:")), keyEquivalent: "z")
+        let redo = edit.addItem(withTitle: "실행 복귀", action: Selector(("redo:")), keyEquivalent: "z")
+        redo.keyEquivalentModifierMask = [.command, .shift]
+        edit.addItem(.separator())
+        edit.addItem(withTitle: "오려두기", action: #selector(NSText.cut(_:)), keyEquivalent: "x")
+        edit.addItem(withTitle: "복사하기", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
+        edit.addItem(withTitle: "붙여넣기", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
+        edit.addItem(withTitle: "전체 선택", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
+        let main = NSMenu()
+        let item = NSMenuItem(title: "편집", action: nil, keyEquivalent: "")
+        item.submenu = edit
+        main.addItem(NSMenuItem()) // The first item is the application menu.
+        main.addItem(item)
+        NSApp.mainMenu = main
+    }
+
+    @objc func configureSlack() {
+        guard !slack.closing else { return }
+        let dialog = SlackConnectDialog(connected: slack.connected)
+        NSApp.activate(ignoringOtherApps: true)
+        let response = dialog.runModal()
+        guard !slack.closing else { return }
+        switch response {
+        case .alertFirstButtonReturn:
+            let typed = dialog.field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            if typed.isEmpty && slack.connected { return }
+            guard let token = SlackAPI.validToken(typed) else {
+                slackResult("토큰 형식을 확인해 주세요. xoxp-로 시작하는 사용자 토큰이어야 해요. 봇 토큰(xoxb-)으로는 내 이름으로 답글을 달 수 없어요."); return
+            }
+            slack.connect(token: token) { [weak self] failure in
+                guard let self else { return }
+                if let failure { self.slackResult(failure); return }
+                self.slack.model.source = .slack
+                self.showChat()
+            }
+        case .alertThirdButtonReturn: slack.disconnect()
+        default: return
+        }
+    }
+    private func slackResult(_ text: String) {
+        guard !slack.closing else { return }
+        let alert = NSAlert(); alert.messageText = "슬랙에 연결하지 못했어요"; alert.informativeText = text
+        alert.addButton(withTitle: "다시 입력"); alert.addButton(withTitle: "닫기")
+        NSApp.activate(ignoringOtherApps: true)
+        if alert.runModal() == .alertFirstButtonReturn { configureSlack() }
+    }
+}

@@ -1390,6 +1390,7 @@ enum ReplyButtonPolicy {
     static let mailLegendBefore20261031 = "메모 = 개인(Obsidian 메모→미리알림), 메모+노션 = 공용(노션+Obsidian 메모→미리알림), 확인 = 만들지 않음"
     /// 다크개인비서 video buttons, kept as they are (owner, 2026-10-31), each set only under its own legend line.
     static let contexts: [(words: [String], legend: String)] = [
+        (["확인", "되돌리기"], "앱 쓰기 결과"),
         (mail, mailLegend),
         (mail, mailLegendBefore20261031),
         (["제작해", "수정", "취소"], "제작해 = 이 제작안대로 만들기, 수정 = 고칠 점 말하기, 취소 = 만들지 않기"),

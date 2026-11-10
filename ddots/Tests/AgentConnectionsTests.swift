@@ -173,6 +173,13 @@ import Foundation
         let received = try String(contentsOfFile: sink, encoding: .utf8), argumentsSeen = try String(contentsOfFile: sink + ".args", encoding: .utf8)
         assert(received.contains(canary) && !argumentsSeen.contains(canary))
         assert(!ProcessInfo.processInfo.environment.values.contains { $0.contains(canary) })
+        let guideReply = try AgentActionReply.decode(Data(#"{"outcome":"done","reason":"OK","guide":[{"n":4,"text":"복사하세요.","check":{"field":"token","pattern":"^xoxp-[a-z]+$","message":"4번 단계의 사용자 토큰이에요."}}]}"#.utf8))
+        assert(guideReply.guide?.items.count == 1)
+        assert(guideReply.guide?.error(["token":"wrong"]) == "4번 단계의 사용자 토큰이에요.")
+        assert(guideReply.guide?.error(["token":"xoxp-valid"]) == nil)
+        assert(guideReply.guide?.error(["token":"xoxp-valid\n"]) != nil)
+        let legacyGuide = try AgentActionReply.decode(Data(#"{"outcome":"done","reason":"OK","guide":{"steps":["이전 안내"],"link":"https://example.test"}}"#.utf8))
+        assert(legacyGuide.guide?.items.first?.text == "이전 안내")
         print("AgentConnections: action sentences, safe settings URLs, command lines/time limits, stdin-only secret passed")
     }
 }

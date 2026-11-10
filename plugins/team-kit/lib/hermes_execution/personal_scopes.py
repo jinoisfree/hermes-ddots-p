@@ -235,6 +235,9 @@ def native_metadata(td, domain, args, context):
 
 
 def authorize_mutation(td, domain, args, context, *, scope_config=None, owner_scope=None):
+    from hermes_facility.app_scope import mutation
+    selected = mutation(td, domain, args, context)
+    if selected is not None: return selected
     cfg = scope_config if scope_config is not None else config(td)
     if cfg.get('invalid'):
         raise ValueError(UNKNOWN)
@@ -306,6 +309,11 @@ def install(td):
             @wraps(fn)
             def wrapped(args, **context):
                 cfg = config(td)
+                from hermes_facility.app_scope import current as app_selection
+                selected = app_selection('note_folders' if kind == 'notes' else 'calendars')
+                if selected is not None:
+                    try: return fn(authorize_mutation(td, kind, args, context), **context)
+                    except Exception: return td._error('APP_OUT_OF_SCOPE', mutation_calls=0)
                 if cfg is None or current(td) not in OWNERS:return fn(args, **context)
                 try:
                     if problem := role_problem(td, fn.__name__.lstrip('_'), args):raise ValueError(problem)
@@ -352,7 +360,8 @@ def install(td):
             def lookup(args, **context):
                 if problem := read_problem(td, original.__name__.lstrip('_'), args):return td._error(problem)
                 cfg = config(td)
-                if cfg is not None and current(td) in OWNERS:
+                from hermes_facility.app_scope import current as app_selection
+                if cfg is not None and current(td) in OWNERS and app_selection('calendars') is None:
                     try:
                         if original.__name__ == '_google_calendar_color_get':
                             return google_calendar.color(td, args, context, write=False)

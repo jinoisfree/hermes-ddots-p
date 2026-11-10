@@ -1986,6 +1986,8 @@ final class FakeSlack {
         }
         check(SlackNotice.badgeStatus("🟡 처리 중") == "처리 중" && SlackNotice.badgeStatus("✅") == "✅", "The badge keeps words, and an emoji alone stays")
         // Reply buttons (owner decision 2026-10-31): the fixed sets only, mail words only under the mail legend.
+        check(ReplyButtonPolicy.allowed(["확인", "되돌리기"], body: "*🔴 앱 쓰기 결과*\n변경 번호: fixture"), "App result buttons are allowed in their context")
+        check(!ReplyButtonPolicy.allowed(["확인", "되돌리기"], body: "일반 글"), "App result context is required")
         check(ReplyButtonPolicy.allowed(["승인", "거절", "의견", "확인"], body: "질문"), "The common four are buttons")
         check(ReplyButtonPolicy.allowed(["메모", "메모+노션", "확인"], body: "제안\n" + ReplyButtonPolicy.mailLegend), "Mail words under the legend are buttons")
         check(ReplyButtonPolicy.allowed(["메모", "메모+노션", "확인"], body: "제안\n" + ReplyButtonPolicy.mailLegendBefore20261031), "Mail words under the pre-2026-10-31 legend still are buttons")

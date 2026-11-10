@@ -11,7 +11,9 @@ function run(argv) {
     const excludedFolders = new Set(["recently deleted", "최근 삭제된 항목"]);
     const results = [], counts = [];
     let matched = 0;
+    const allowed = argv[9] ? new Set(JSON.parse(argv[9])) : null;
     for (const folder of Application("Notes").folders()) {
+        if (allowed && !allowed.has(String(folder.id()))) continue;
         const folderName = String(folder.name());
         if (excludedFolders.has(folderName.toLocaleLowerCase())) continue;
         if (folderFilter && !folderName.toLocaleLowerCase().includes(folderFilter)) continue;

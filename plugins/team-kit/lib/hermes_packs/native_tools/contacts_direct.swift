@@ -114,6 +114,7 @@ final class Executor {
     var action = ""
     var stage = "arguments"
     var saveVerification: String? = nil
+    var journalMode = false
 
     func envelope(_ fields: [String: Any]) -> [String: Any] {
         var value: [String: Any] = ["before": before, "after": after, "executorVersion": executorVersion,
@@ -122,6 +123,19 @@ final class Executor {
         if let saveVerification { value["save_verification"] = saveVerification }
         if fields["ok"] as? Bool == false { value["failure_stage"] = stage }
         value.merge(fields) { _, new in new }
+        if journalMode && fields["ok"] as? Bool == true && mutationCalls > 0 {
+            do {
+                let ids = (action == "import_vcf" ? (after as? [[String: Any]] ?? []).compactMap { $0["identifier"] as? String } :
+                    [fields["target_id"] as? String ?? (before as? [String: Any])?["identifier"] as? String].compactMap { $0 })
+                // Return authoritative ids before optional snapshot work. A later
+                // native crash must not make the caller guess the created target.
+                let progress = try JSONSerialization.data(withJSONObject: ["journal_targets": ids])
+                FileHandle.standardOutput.write(progress); FileHandle.standardOutput.write(Data("\n".utf8))
+                value["_private_after"] = try ids.map { id -> [String: Any] in
+                    try privateSnapshot(["kind": action.hasPrefix("group_") ? "group" : "contact", "id": id])
+                }
+            } catch { value["_private_after_error"] = "CONTACTS_SNAPSHOT_UNVERIFIED" }
+        }
         return value
     }
     func status() -> String {
@@ -177,6 +191,55 @@ final class Executor {
         value.merge(["note": null, "note_available": false, "note_source": "not_read",
                      "container_names": containers.map { $0.name }]) { _, new in new }
         return value
+    }
+    // Private journal snapshots never enter public tool arguments or display receipts.
+    func undoSnapshot(_ contact: CNContact) throws -> [String: Any] {
+        let groups = try store.groups(matching: nil).filter { group in
+            try members(group.identifier).contains { $0.identifier == contact.identifier }
+        }.map { $0.identifier }.sorted()
+        return try contactRecord(contact, groups: groups)
+    }
+    func contactRecord(_ contact: CNContact, groups: [String]) throws -> [String: Any] {
+        let addresses: [[String:Any]] = contact.postalAddresses.map { row in
+            let v=row.value
+            return ["id":row.identifier,"label":row.label as Any? ?? null,"street":v.street,"city":v.city,
+                "state":v.state,"postal_code":v.postalCode,"country":v.country,"country_code":v.isoCountryCode,
+                "sub_locality":v.subLocality,"sub_administrative_area":v.subAdministrativeArea]
+        }
+        return ["kind":"contact","id":contact.identifier,"state":[
+            "vcf":try vcard([contact]).base64EncodedString(),"image":contact.imageData?.base64EncodedString() ?? "",
+            "groups":groups,"addresses":addresses]]
+    }
+    func undoGroup(_ value: CNGroup) throws -> [String: Any] {
+        ["kind": "group", "id": value.identifier, "state": try groupSnapshot(value)]
+    }
+    func sameState(_ left: [String: Any], _ right: [String: Any]) -> Bool {
+        NSDictionary(dictionary: left["state"] as? [String: Any] ?? [:]).isEqual(to: right["state"] as? [String: Any] ?? [:])
+    }
+    func privateSnapshot(_ args: [String: Any]) throws -> [String: Any] {
+        let id = text(args, "id")
+        if text(args, "kind") == "group" { return try undoGroup(group(id)) }
+        guard let contact = try fetch(id, .vcard).first else { throw ContactsFailure(code: "CONTACTS_NOT_FOUND") }
+        return try undoSnapshot(contact)
+    }
+    // Only a new object's deletion inverse lives here. Existing fields are
+    // modified/restored solely through Contacts.app's field writer.
+    func deleteCreated(_ args: [String:Any]) throws -> [String:Any] {
+        guard args["desired"] == nil || args["desired"] is NSNull,
+              let expected=args["expected"] as? [String:Any],text(expected,"id")==text(args,"id"),
+              text(expected,"kind")==text(args,"kind") else { throw ContactsFailure(code:"CONTACTS_UNDO_INVALID") }
+        let current=try privateSnapshot(args)
+        guard sameState(current,expected) else { throw ContactsFailure(code:"UNDO_CONFLICT") }
+        let save=CNSaveRequest()
+        if text(args,"kind")=="group" { save.delete(try group(text(args,"id")).mutableCopy() as! CNMutableGroup) }
+        else {
+            guard let found=try fetch(text(args,"id")).first else { throw ContactsFailure(code:"CONTACTS_NOT_FOUND") }
+            save.delete(found.mutableCopy() as! CNMutableContact)
+        }
+        try commit(save)
+        let missing=text(args,"kind")=="group" ? try store.groups(matching:CNGroup.predicateForGroups(withIdentifiers:[text(args,"id")])).isEmpty : try fetch(text(args,"id")).isEmpty
+        guard missing else { throw ContactsFailure(code:"APP_UNDO_READBACK_MISMATCH") }
+        return envelope(["ok":true])
     }
     func apply(_ args: [String: Any], to contact: CNMutableContact) throws {
         try rejectNoteWrites(args)
@@ -262,12 +325,10 @@ final class Executor {
                 "member_ids": ids, "container_name": containers.first?.name ?? ""]
     }
     func vcard(_ contacts: [CNContact]) throws -> Data {
-        // NOTE is never fetched; an empty value only satisfies the serializer's key check on a throwaway copy.
-        let clean = contacts.map { contact -> CNContact in
-            let value = contact.mutableCopy() as! CNMutableContact
-            value.note = "" // In-memory serialization only; this copy is never passed to a save request.
-            return value.copy() as! CNContact
-        }
+        // Setting NOTE on a mutable copy of a fetched contact still throws for
+        // an unavailable key. A new throwaway contact has all keys available;
+        // copy fetched writable values and leave its NOTE empty without requesting it.
+        let clean = contacts.map { importedContact($0).copy() as! CNContact }
         guard clean.allSatisfy({ $0.areKeysAvailable([CNContactVCardSerialization.descriptorForRequiredKeys()]) }) else {
             throw ContactsFailure(code: "CONTACTS_EXPORT_KEYS_UNAVAILABLE")
         }
@@ -338,7 +399,8 @@ final class Executor {
     }
     func run(_ args: [String: Any]) async throws -> [String: Any] {
         action = text(args, "action")
-        guard ["access", "search", "get", "list", "groups", "group_members", "containers", "export_vcf", "create", "update", "delete", "group_create", "group_rename", "group_delete", "group_add", "group_remove", "import_vcf"].contains(action) else {
+        journalMode = args["_journal"] as? Bool == true
+        guard ["access", "search", "get", "list", "groups", "group_members", "containers", "export_vcf", "create", "update", "delete", "group_create", "group_rename", "group_delete", "group_add", "group_remove", "import_vcf", "_snapshot", "_delete_created"].contains(action) else {
             throw ContactsFailure(code: "CONTACTS_ACTION_REFUSED")
         }
         if action == "create" || action == "update" { try rejectNoteWrites(args) }
@@ -348,6 +410,12 @@ final class Executor {
             throw ContactsFailure(code: "CONTACTS_PERMISSION_REQUIRED", fields: ["authorization_status": status()])
         }
         stage = "fetch"
+        if action == "_snapshot" { return envelope(["ok": true, "snapshot": try privateSnapshot(args)]) }
+        if action == "_delete_created" { return try deleteCreated(args) }
+        if let expected = args["_expected"] as? [String: Any] {
+            let current = try privateSnapshot(expected)
+            guard sameState(current, expected) else { throw ContactsFailure(code: "CONTACTS_ORIGINAL_CHANGED") }
+        }
         if action == "access" {
             return envelope(["ok": true, "authorization_status": status(), "native_note_keys_requested": false])
         }
@@ -385,6 +453,7 @@ final class Executor {
                              "items": try rows.map { try snapshot($0) }, "notes_included": false])
         }
         if action == "import_vcf" { return try importCards(args) }
+        if ["update","group_rename","group_add","group_remove"].contains(action) { throw ContactsFailure(code: "CONTACTS_APP_WRITER_REQUIRED") }
         if action.hasPrefix("group_") {
             let save = CNSaveRequest()
             if action == "group_create" {
@@ -400,22 +469,6 @@ final class Executor {
             }
             let found = try group(text(args, "group_id"))
             before = try groupSnapshot(found)
-            if action == "group_add" || action == "group_remove" {
-                let ids = args["contact_ids"] as? [String] ?? []
-                guard !ids.isEmpty && ids.count <= 200 else { throw ContactsFailure(code: "CONTACTS_IDS_REQUIRED") }
-                let memberIDs = Set((before as! [String: Any])["member_ids"] as! [String])
-                var changed: [String] = []; var skipped: [String] = []
-                for id in Set(ids).sorted() {
-                    guard let contact = try fetch(id).first else { throw ContactsFailure(code: "CONTACTS_NOT_FOUND") }
-                    if memberIDs.contains(id) == (action == "group_add") { skipped.append(id); continue }
-                    if action == "group_add" { save.addMember(contact, to: found) }
-                    else { save.removeMember(contact, from: found) }
-                    changed.append(id)
-                }
-                if !changed.isEmpty { try commit(save) }
-                after = try groupSnapshot(group(found.identifier))
-                return envelope(["ok": true, "affected": changed, "skipped": skipped])
-            }
             guard !text(args, "expected_name").isEmpty && text(args, "expected_name") == found.name else { throw ContactsFailure(code: "CONTACTS_IDENTITY_MISMATCH") }
             if action == "group_delete" {
                 guard let path = args["_backup_path"] as? String,
@@ -428,15 +481,7 @@ final class Executor {
                 save.delete(found.mutableCopy() as! CNMutableGroup); try commit(save)
                 return envelope(["ok": true, "target_id": found.identifier, "members_deleted": false])
             }
-            let name = text(args, "name")
-            guard !name.isEmpty else { throw ContactsFailure(code: "CONTACTS_GROUP_NAME_REQUIRED") }
-            if try store.groups(matching: nil).contains(where: { $0.identifier != found.identifier && $0.name.localizedCaseInsensitiveCompare(name) == .orderedSame }) {
-                throw ContactsFailure(code: "CONTACTS_GROUP_EXISTS")
-            }
-            let changed = found.mutableCopy() as! CNMutableGroup; changed.name = name
-            save.update(changed); try commit(save)
-            after = try groupSnapshot(group(found.identifier))
-            return envelope(["ok": true, "target_id": found.identifier])
+
         }
         if action == "search" {
             let limit = min(50, max(1, args["limit"] as? Int ?? 20))
@@ -444,9 +489,11 @@ final class Executor {
             let items = try matches.prefix(limit).map { try snapshot($0) }
             return envelope(["ok": true, "items": items, "result_count": items.count, "truncated": matches.count > limit])
         }
-        if action == "get" || action == "update" || action == "delete" {
+        if action == "get" || action == "delete" {
             let id = text(args, "contact_id")
-            guard !id.isEmpty, let contact = try fetch(id, action == "delete" ? .vcard : .snapshot).first else {
+            // Updating imageData also requires fetching that key. A mutable copy
+            // retains the fetched-key restrictions; it does not make missing keys writable.
+            guard !id.isEmpty, let contact = try fetch(id, action == "get" ? .snapshot : .vcard).first else {
                 throw ContactsFailure(code: "CONTACTS_NOT_FOUND")
             }
             before = try snapshot(contact)
@@ -463,15 +510,7 @@ final class Executor {
                 stage = "done"
                 return envelope(["ok": true, "target_id": contact.identifier])
             }
-            stage = "apply"
-            let mutable = contact.mutableCopy() as! CNMutableContact
-            try apply(args, to: mutable)
-            let save = CNSaveRequest(); save.update(mutable)
-            try commit(save)
-            guard let refreshed = try fetch(mutable.identifier).first else { throw ContactsFailure(code: "CONTACTS_READBACK_FAILED") }
-            after = try snapshot(refreshed)
-            stage = "done"
-            return envelope(["ok": true, "target_id": mutable.identifier])
+
         }
         let existing = try fetch()
         let phones = args["phones"] as? [[String: String]] ?? []
@@ -502,13 +541,14 @@ func nativeFailure(_ executor: Executor, _ error: NSError) -> [String: Any] {
     return executor.envelope(fields)
 }
 
+#if !CONTACTS_LIBRARY_TEST
 @main struct ContactsDirect {
     static func main() async {
         let executor = Executor()
         let response: [String: Any]
         do {
             guard CommandLine.arguments.count == 2,
-                  let data = CommandLine.arguments[1].data(using: .utf8),
+                  let data = (CommandLine.arguments[1] == "--app-journal" ? FileHandle.standardInput.readDataToEndOfFile() : CommandLine.arguments[1].data(using: .utf8)),
                   let args = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
                 throw ContactsFailure(code: "CONTACTS_INVALID_ARGUMENTS")
             }
@@ -522,3 +562,5 @@ func nativeFailure(_ executor: Executor, _ error: NSError) -> [String: Any] {
            let string = String(data: data, encoding: .utf8) { print(string) }
     }
 }
+
+#endif

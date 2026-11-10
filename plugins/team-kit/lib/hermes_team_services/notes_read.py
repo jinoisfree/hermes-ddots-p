@@ -54,6 +54,7 @@ def handle(config, home, args, *, runner=None, **_):
 
 SCHEMA = {'name': 'notes_read', 'description': NOTICE + _owner_text('<<work_name>>는 Obsidian <<company_notebook>>, <<personal_name>>는 Apple 메모의 제목·폴더 검색과 선택적인 본문 읽기. 본문은 15000자까지 제공한다. 개수·폴더는 summary=true로 한 번에 센다(검색어·본문 옵션과 함께 쓰지 않는다). offset으로 이어 읽고 next_offset이 null이면 끝이다.'),
           'parameters': {'type': 'object', 'properties': {
+              'source': {'type':'string','enum':['apple_notes','obsidian']},
               'note_id': {'type': 'string', 'maxLength': 1000},
               'save_images': {'type': 'boolean', 'default': False},
               'summary': {'type': 'boolean', 'default': False},
@@ -89,19 +90,21 @@ def query(args, runner=None, home=None):
         raise ReadError('offset은 0 이상 정수여야 합니다.')
     if args.get('summary') and (args.get('query') or args.get('search_body') or args.get('include_body') or offset):
         raise ReadError('summary는 폴더별 전체 개수 조회입니다. 검색어·본문·offset과 함께 쓰지 마세요.')
-    if home is not None and team.home_has_role(home, 'work'):
-        import sys
-        library = str(Path(__file__).resolve().parent.parent)
-        if library not in sys.path:sys.path.insert(0, library)
-        from hermes_packs.notes import obsidian_notes
-        if obsidian_notes.disk.enabled(home):
-            return obsidian_notes.read_tool(args)
+    from hermes_facility.app_scope import note_source
+    from hermes_packs.notes import obsidian_notes
+    if note_source() == 'obsidian' or (note_source() is None and home is not None and team.home_has_role(home, 'work') and obsidian_notes.disk.enabled(home)):
+        return obsidian_notes.read_tool(args)
     command = ['/usr/bin/osascript', '-l', 'JavaScript', str(Path(__file__).with_name('apple_notes_lookup.js')),
                args.get('query', '').strip(), args.get('folder', '').strip(), str(limit),
                str(args.get('include_body', False)).lower(), str(args.get('search_body', False)).lower(),
                str(args.get('summary', False)).lower(), str(offset)]
     if args.get('note_id'):
         command.extend([args['note_id'], str(args.get('save_images', False)).lower()])
+    from hermes_facility.app_scope import require_selected
+    allowed = require_selected('note_folders')
+    if allowed is not None:
+        if not args.get('note_id'): command.extend(['', 'false'])
+        command.append(json.dumps(allowed))
     try:
         proc = (runner or subprocess.run)(command, capture_output=True, text=True, timeout=30, check=False)
     except subprocess.TimeoutExpired:

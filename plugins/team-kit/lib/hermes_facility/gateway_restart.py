@@ -1,4 +1,4 @@
-"""Owner-initiated gateway restart (REQ-05): refuse while a turn is running, at most once per hour,
+"""Owner-initiated gateway restart (REQ-05): refuse while a turn is running,
 and confirm every Slack/iMessage channel reconnected. Never retries on its own.
 
 A turn is "running" when any profile's state.db holds an unexpired row in session_turn_leases —
@@ -7,6 +7,8 @@ the lease the gateway itself takes for the length of a conversation turn.
 from __future__ import annotations
 
 import json
+from datetime import datetime
+import math
 import os
 from pathlib import Path
 import re
@@ -14,7 +16,6 @@ import sqlite3
 import subprocess
 import time
 
-RESTART_INTERVAL_SECONDS = 3600
 RECONNECT_SECONDS = 120
 POLL_SECONDS = 2
 RESTART_SECONDS = 90
@@ -72,21 +73,45 @@ def connected_after(log, offset):
     return events if started else None
 
 
-def read_limit(root):
+def completed_since(root, applied_at, *, runner=None):
+    """Read-only proof that the live gateway loaded this application and reconnected.
+
+    The pid file identifies the gateway; ps supplies its actual start time (not
+    the file's mtime). Rotated logs provide channel events from that process's
+    lifetime. Missing/unreadable evidence never completes a setup step.
+    """
+    root = Path(root)
+    runner = runner or subprocess.run
     try:
-        return float(json.loads((Path(root) / 'state/connections/restart.json').read_text(encoding='utf-8'))['at'])
-    except (OSError, ValueError, KeyError, TypeError):
-        return None
-
-
-def write_limit(root, at):
-    path = Path(root) / 'state/connections/restart.json'
-    path.parent.mkdir(parents=True, exist_ok=True)
-    os.chmod(path.parent, 0o700)
-    temporary = path.with_suffix('.tmp')
-    temporary.write_text(json.dumps(dict(at=at)), encoding='utf-8')
-    os.chmod(temporary, 0o600)
-    os.replace(temporary, path)
+        applied_at = float(applied_at)
+        if not math.isfinite(applied_at): return False
+        identity = json.loads((root / 'gateway.pid').read_text(encoding='utf-8'))
+        pid = identity['pid']
+        if type(pid) is not int or pid <= 0 or identity.get('kind') != 'hermes-gateway': return False
+        process = runner(['/bin/ps', '-p', str(pid), '-o', 'lstart=', '-o', 'command='],
+                         capture_output=True, text=True, timeout=5, check=False,
+                         env={**os.environ, 'LC_ALL': 'C'})
+        if process.returncode != 0: return False
+        match = re.fullmatch(r'\s*(\w{3}\s+\w{3}\s+\d+\s+\d{2}:\d{2}:\d{2}\s+\d{4})\s+(.+?)\s*', process.stdout)
+        if not match or not re.search(r'\bgateway\s+run(?:\s|$)', match[2]): return False
+        started = datetime.strptime(match[1], '%a %b %d %H:%M:%S %Y').timestamp()
+        if started <= applied_at: return False
+        log = root / 'logs/gateway.log'
+        rotated = sorted((p for p in log.parent.glob('gateway.log.*')
+                          if p.name.removeprefix('gateway.log.').isdigit()),
+                         key=lambda p: int(p.name.rsplit('.', 1)[1]), reverse=True)
+        events = set()
+        for path in [*rotated, log]:
+            for line in path.read_text(encoding='utf-8').splitlines():
+                event = re.search(r'✓ (slack|photon) connected(?: \(profile: ([A-Za-z0-9_-]+)\))?', line)
+                if not event: continue
+                stamp = re.match(r'(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d)(?:,(\d{3}))?\s', line)
+                if not stamp: return False
+                at = datetime.strptime(stamp[1], '%Y-%m-%d %H:%M:%S').timestamp() + int(stamp[2] or 0) / 1000
+                if at >= started: events.add((event[2] or 'default', event[1]))
+        return set(expected_channels(root)).issubset(events)
+    except (OSError, ValueError, TypeError, KeyError, subprocess.SubprocessError):
+        return False
 
 
 def restart(root, *, runner=subprocess.run, clock=time.time, sleep=time.sleep):
@@ -97,14 +122,10 @@ def restart(root, *, runner=subprocess.run, clock=time.time, sleep=time.sleep):
         return dict(base, outcome='refused', reason='BUSY_CHECK_FAILED')
     if turns:
         return dict(base, outcome='refused', reason='BUSY')
-    last = read_limit(root)
-    if last is not None and clock() - last < RESTART_INTERVAL_SECONDS:
-        return dict(base, outcome='refused', reason='RATE_LIMITED', last_restart_at=last)
     expected = expected_channels(root)
     log = root / 'logs/gateway.log'
     offset = log.stat().st_size if log.is_file() else 0
     started = clock()
-    write_limit(root, started)   # the attempt counts even when it fails; nothing retries it
     command = [str(root / 'hermes-agent/.hermes/bin/hermes'), '--profile', 'default', 'gateway', 'restart']
     try:
         answer = runner(command, capture_output=True, text=True, timeout=RESTART_SECONDS, check=False,

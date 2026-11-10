@@ -6,6 +6,13 @@ on run argv
     tell application "Contacts"
         set p to person id contactID
         if operation is "set" then
+            if (count argv) > 3 then
+                set observedNote to note of p
+                if observedNote is missing value then set observedNote to ""
+                considering case
+                    if observedNote is not (item 4 of argv) then error "CONTACTS_NOTE_ORIGINAL_CHANGED"
+                end considering
+            end if
             set note of p to requestedNote
             save
         end if

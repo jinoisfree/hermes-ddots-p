@@ -179,6 +179,11 @@ def _missing_prompt_note(*args):
 
 
 def _pre_llm_call(session_id: str = "", platform: str = "", **_: Any) -> dict[str, str] | None:
+    try:
+        from hermes_governance import app_receipts
+        app_receipts.begin(session_id=session_id, **_)
+    except Exception:
+        logger.exception('team-kit app receipt turn start failed')
     # A failure here must never cost the user their reply, so every error ends in "add nothing".
     try:
         settings = _settings()
@@ -758,21 +763,24 @@ def _work_output(response_text="", **context):
 
 
 def _owner_output(response_text="", **context):
-    """The one output transform: other plugins' steps (hermes_facility.output_steps), work halts,
+    """The one output transform: work halts, final steps (hermes_facility.output_steps),
     then only fixed button sets stay buttons.
 
     The core keeps the first transform that returns text, so every step shares this hook."""
     from hermes_facility import output_steps
-    stepped = output_steps.apply(response_text, **context)
-    result = stepped if stepped != response_text else None
+    result = None
     if _WORK_OUTPUT:
         try:
-            worked = _work_output(response_text=stepped, **context)
+            worked = _work_output(response_text=response_text, **context)
             if isinstance(worked, str) and worked:
                 result = worked
         except Exception:
             logger.exception("team-kit work output transform failed")
     text = result if isinstance(result, str) and result else response_text
+    # Final receipt delivery must follow a work-halt rewrite as well.
+    stepped = output_steps.apply(text, **context)
+    if stepped != text: result = stepped
+    text = stepped
     guarded = _BUTTON_POLICY.guard(text) if _BUTTON_POLICY is not None else text
     if guarded != text:
         logger.info("team-kit buttons: a marker outside the fixed sets went out as words")
@@ -813,19 +821,24 @@ def _register_files(ctx) -> None:
     global _FILES
     from hermes_constants import get_hermes_home
     _FILES = None
+    from hermes_facility.app_registry import enabled as app_enabled
     configured = ctx.get_config("files", {})
-    if not isinstance(configured, dict) or configured.get("enabled") is not True or not configured.get("folders"):
+    if not app_enabled(configured) or not configured.get("folders"):
         return
     import importlib.util
     spec = importlib.util.spec_from_file_location("team_kit_files", Path(__file__).parent / "lib/hermes_packs/files_docs/files.py")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
+    from hermes_packs.files_docs import undo as file_undo
+    from hermes_governance import app_results
+    home = Path(get_hermes_home())
+    app_results.register(ctx,home,'files',lambda entry:file_undo.restore(home,_files_config(),module,entry))
     for name, handler in module.HANDLERS.items():
         if not module.available(configured, name):
             continue
         tool_schema = module.schema(configured, name)
         ctx.register_tool(name=name, toolset="team-kit", schema=tool_schema,
-                          handler=lambda args, _handler=handler, **kwargs: _handler(_files_config(), args, **kwargs),
+                          handler=lambda args, _handler=handler, _name=name, **kwargs: file_undo.execute(home,_files_config(),module,_name,args,_handler,**kwargs),
                           description=tool_schema["description"], emoji="📁")
     ctx.register_system_prompt_section("team-kit.files", lambda *_, **__: _PROMPT_GUIDANCE.soul_section(Path(get_hermes_home()), "team-kit.files", module.note(_files_config())), max_chars=1500)
     _FILES = module
@@ -839,8 +852,9 @@ def _register_notion(ctx) -> None:
     """Notion through the profile's integration token (settings.notion): one tool, its note, its guard."""
     global _NOTION
     _NOTION = None
+    from hermes_facility.app_registry import enabled as app_enabled
     configured = ctx.get_config("notion", {})
-    if not isinstance(configured, dict) or configured.get("enabled") is not True or configured.get("token") != "NOTION_API_KEY":
+    if not app_enabled(configured) or configured.get("token") != "NOTION_API_KEY":
         return
     import importlib.util
     from hermes_constants import get_hermes_home
@@ -851,6 +865,8 @@ def _register_notion(ctx) -> None:
                       handler=lambda args, **kwargs: module.handle(_notion_config(), home, args, files_config=_files_config(), chat=_run_kind() == "chat", require_snapshot=True, **kwargs),
                       description=module.schema(configured)["description"], emoji="🗂️")
     ctx.register_system_prompt_section("team-kit.notion", lambda *_, **__: module.note(_notion_config()), max_chars=2000)
+    from hermes_governance import notion_undo
+    notion_undo.register(ctx,home,module,_notion_config)
     _NOTION = module
 
 
@@ -1016,8 +1032,9 @@ def _register_deadline_watch(ctx) -> None:
 
 
 def _register_personal_read(ctx, name) -> None:
+    from hermes_facility.app_registry import enabled as app_enabled
     configured = ctx.get_config(name, {})
-    if not isinstance(configured, dict) or configured.get("enabled") is not True:
+    if not app_enabled(configured):
         return
     import importlib.util
     from hermes_constants import get_hermes_home
@@ -1174,6 +1191,23 @@ def _register_wait(ctx) -> None:
         lambda *_, **__: module.NOTE if _run_kind() == "chat" else "", max_chars=900)
 
 
+def _register_app_packs(ctx):
+    import sys
+    if sys.platform != 'darwin': return
+    if not all(callable(getattr(ctx, method, None)) for method in ('register_tool','register_hook','register_middleware')):
+        return  # Unsupported hosts cannot enforce native approval; expose no app automation.
+    from hermes_constants import get_hermes_home
+    from hermes_governance.app_tools import register as register_app_tool
+    from hermes_packs.mac_apps import tool as mac
+    from hermes_packs import ego_browser
+    from hermes_facility.app_registry import offered
+    if 'mac_app' in offered(get_hermes_home()):
+        mac.register_result(ctx,Path(get_hermes_home()))
+        register_app_tool(ctx, Path(get_hermes_home()), 'mac_app', mac.SCHEMA, mac.handle, mac.approval)
+    if 'ego_browser' in offered(get_hermes_home()):
+        register_app_tool(ctx, Path(get_hermes_home()), 'ego_browser', ego_browser.SCHEMA, ego_browser.handle)
+
+
 def register(ctx) -> None:
     from hermes_facility.pack_selection import scoped_context
     ctx = scoped_context(ctx)
@@ -1300,6 +1334,12 @@ def register(ctx) -> None:
         logger.exception('team-kit prompt probe registration failed')
     ctx.register_hook("pre_llm_call", _pre_llm_call)
     ctx.register_hook("transform_llm_output", _owner_output)
+    try:
+        from hermes_governance import app_receipts
+        app_receipts.register(ctx)
+    except Exception:
+        logger.exception('team-kit app receipt registration failed')
+    _register_app_packs(ctx)
     ctx.register_hook("pre_tool_call", _pre_tool_call)
     try:
         ctx.register_middleware("llm_request", _policy_offer)

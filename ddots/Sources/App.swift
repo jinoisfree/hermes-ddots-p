@@ -519,7 +519,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
             if CommandLine.arguments.contains("--ui-smoke-chat") || CommandLine.arguments.contains("--ui-smoke-perch") {
                 isPreview = true
                 let fixture = ChatSmokeFixture.create(); smokeHome = fixture
-                hermes = HermesBridge(home:fixture)
+                hermes = HermesBridge(home:fixture, config:DdotsConfig(root:fixture, hermes:fixture, home:fixture))
                 let fixtureResult = monitorQueue.sync { (hermes as! HermesBridge).poll(includeMessages: IMessageFeature.enabled) }
                 chat.characters = fixtureResult.characters
                 chat.avatars = fixtureResult.avatars
@@ -1446,6 +1446,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         agentConnectionsWindow?.appearance = ChatTheme.load().appearance
         agentConnectionsModel?.avatars = chat.avatars
         agentConnectionsModel?.refresh()
+        agentConnectionsModel?.loadApps()
         agentConnectionsWindow?.level = NSApp.isActive ? NSWindow.Level(rawValue: panel.level.rawValue + 1) : .normal
         NSApp.activate(ignoringOtherApps: true); agentConnectionsWindow?.makeKeyAndOrderFront(nil)
     }

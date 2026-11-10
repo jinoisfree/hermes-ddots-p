@@ -32,6 +32,11 @@ NOTICE = (_owner_text('<<work_name>>의 모든 메모(ㅁ·Inbox·메일 반영�
           'Apple 메모로 우회하거나 terminal로 승인 경계를 우회하지 않는다. '))
 
 
+def authority():
+    from hermes_facility.app_scope import note_source
+    return 'Obsidian ' + disk.Store().root.name if note_source() == 'obsidian' else AUTHORITY
+
+
 def attachment_cache_roots():
     home=Path.home()/'.hermes'
     homes=[home,*sorted((home/'profiles').glob('*'))]
@@ -86,6 +91,8 @@ def copy_attachment(store, destdir, src, raw):
 
 
 def selected(td):
+    from hermes_facility.app_scope import note_source
+    if note_source() is not None: return note_source() == 'obsidian'
     context=getattr(td,'_PLUGIN_CONTEXT',None)
     cfg=context.get_config('obsidian_notes',{}) if context else {}
     return cfg.get('enabled') is True and team.has_role(td.personal_roles.profile(td), 'work')
@@ -138,7 +145,7 @@ def lookup(td,args):
         rows.append(row)
         if len(rows)>=limit:break
     td._attach_common_work_links(rows,domain='notes',source_id_field='stableNoteIdentifier')
-    value=json.loads(td._direct_receipt('apple_notes_lookup',AUTHORITY,rows))
+    value=json.loads(td._direct_receipt('apple_notes_lookup',authority(),rows))
     value.update(stable_note_identifier_available=True,common_id_link_allowed=True)
     return json.dumps(value,ensure_ascii=False)
 
@@ -152,7 +159,7 @@ def read_tool(args):
     if args.get('summary'):
         from collections import Counter
         counts=Counter(r['folder'] for r in rows)
-        return {'ok':True,'folders':[{'folder':k,'count':v} for k,v in sorted(counts.items())],'total':len(rows),'authority':AUTHORITY}
+        return {'ok':True,'folders':[{'folder':k,'count':v} for k,v in sorted(counts.items())],'total':len(rows),'authority':authority()}
     offset=int(args.get('offset') or 0);limit=min(20,max(1,int(args.get('limit') or 10)));items=[]
     for r in rows[offset:offset+limit]:
         item={'stableNoteIdentifier':r['note_id'],'note_id':r['note_id'],'title':r['title'],'folder':r['folder'],'url':r['url'],'backend':'obsidian'}
@@ -160,11 +167,11 @@ def read_tool(args):
         if args.get('save_images'):item['images']=[{'path':p,'bytes':Path(p).stat().st_size} for p in r['attachment_paths'] if Path(p).suffix.lower() in {'.png','.jpg','.jpeg','.gif','.webp','.heic'}]
         items.append(item)
     more=offset+len(items)<len(rows)
-    return {'ok':True,'items':items,'count':len(items),'limit_reached':more,'next_offset':offset+len(items) if more else None,'authority':AUTHORITY}
+    return {'ok':True,'items':items,'count':len(items),'limit_reached':more,'next_offset':offset+len(items) if more else None,'authority':authority()}
 
 
 def scope(td,args,owner):
-    if owner!='company':raise ValueError(AUTHORITY+_owner_text('은 <<work_name>> 회사 메모 범위다.'))
+    if owner!='company':raise ValueError(authority()+_owner_text('은 <<work_name>> 회사 메모 범위다.'))
     store=disk.Store();sid=args.get('note_id')
     if sid and not handles(sid):raise ValueError(_owner_text('OBSIDIAN_REQUIRED: <<work_name>>는 Apple 메모를 수정하지 않는다.'))
     if sid:store.read(sid)
@@ -190,11 +197,11 @@ def sync_properties(td,row,common=None):
 
 def mutate(td,args,context):
     action=str(args.get('action') or '').lower();store=disk.Store();sid=str(args.get('note_id') or '')
-    if action=='pending_choices':return json.dumps({'ok':True,'choices':[],'authority':AUTHORITY})
+    if action=='pending_choices':return json.dumps({'ok':True,'choices':[],'authority':authority()})
     if action not in {'create','update','move','delete','restore'}:raise ValueError('OBSIDIAN_ACTION_INVALID')
     if action!='create' and not handles(sid):raise ValueError('OBSIDIAN_NOTE_ID_REQUIRED')
     if not args.get('approved') and not td._owner_chat_no_approval('apple_notes_direct_mutation',action,args):
-        return td._mutation_preview(AUTHORITY,action,{k:args[k] for k in ('title','note_id','folder','summary') if k in args})
+        return td._mutation_preview(authority(),action,{k:args[k] for k in ('title','note_id','folder','summary') if k in args})
     before=store.read(sid) if sid else None
     if action=='update':preserved_attachments(before)
     skipped_existing=0
@@ -208,7 +215,7 @@ def mutate(td,args,context):
     elif action=='delete':
         result=store.delete(sid,before)
         if not args.get('_skip_common_work'):td._unlink_owner_deleted_source('notes',sid)
-        return json.dumps({'ok':True,'authority':AUTHORITY,'action':action,'target_id':sid,'result':result,'approved':True,'mutation_calls':1,'fallback_used':False,'tool_search_calls':0},ensure_ascii=False)
+        return json.dumps({'ok':True,'authority':authority(),'action':action,'target_id':sid,'result':result,'approved':True,'mutation_calls':1,'fallback_used':False,'tool_search_calls':0},ensure_ascii=False)
     elif action=='move':
         if not args.get('folder'):raise ValueError('OBSIDIAN_FOLDER_REQUIRED')
         row=store.write(sid,before['markdown'],before=before,folder=args['folder'])
@@ -293,7 +300,7 @@ def mutate(td,args,context):
     td._clear_pending_personal_owner()
     result={'note_id':sid,'title':row['title'],'url':row['url'],'path':row['path'],'attachments':len(row['attachment_paths']),
             'skipped_existing_attachments':skipped_existing,'content_loss':False}
-    return json.dumps({'ok':True,'authority':AUTHORITY,'action':action,'target_id':sid,'result':result,
+    return json.dumps({'ok':True,'authority':authority(),'action':action,'target_id':sid,'result':result,
                        'approved':True,'mutation_calls':1,'fallback_used':False,'tool_search_calls':0,
                        **({'common_work':common} if common is not None else {})},ensure_ascii=False)
 

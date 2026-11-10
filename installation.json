@@ -95,6 +95,16 @@
       "requires": [],
       "mac_only": false,
       "guide": "X 등 필요한 계정을 연결하세요. 자동 DM·게시·감시는 꺼져 있습니다."
+    },
+    "mac-apps": {
+      "requires": [],
+      "mac_only": true,
+      "guide": "연결할 Mac 앱을 고르고 이 Mac의 권한 창에서 허용하세요."
+    },
+    "ego-browser": {
+      "requires": [],
+      "mac_only": true,
+      "guide": "ego lite를 연결하면 로그인된 페이지를 읽습니다. 누르기·입력·보내기는 승인 뒤입니다."
     }
   }
 }

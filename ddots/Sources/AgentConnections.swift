@@ -69,8 +69,34 @@ struct ConnectionAction: Codable, Hashable {
 /// One reply of any `hermes-connections` action command (check, secret, permission, gateway).
 struct AgentActionReply: Codable {
     struct Check: Codable { let state: String, reason: String; let verified_by: String?, checked_at: String?, expires_at: String? }
-    struct Field: Codable { let id: String, label: String, secure: Bool }
-    struct Guide: Codable { let steps: [String]; let link: String? }
+    struct Field: Codable { let id: String, label: String, secure: Bool; var value: String? = nil }
+    struct Guide: Codable {
+        struct Item: Codable, Identifiable {
+            struct Check: Codable { let field: String, pattern: String, message: String }
+            let n: Int, text: String
+            let open_url: String?, copy: String?, image: String?, check: Check?
+            var id: Int { n }
+        }
+        let items: [Item]
+        var steps: [String] { items.map(\.text) }
+        var link: String? { items.compactMap(\.open_url).first }
+        init(from decoder: Decoder) throws {
+            let value = try decoder.singleValueContainer()
+            if let rows = try? value.decode([Item].self) { items = rows; return }
+            struct Legacy: Decodable { let steps: [String]; let link: String? }
+            let old = try value.decode(Legacy.self)
+            items = old.steps.enumerated().map { Item(n: $0.offset + 1, text: $0.element, open_url: $0.offset == 0 ? old.link : nil, copy: nil, image: nil, check: nil) }
+        }
+        func encode(to encoder: Encoder) throws { var value = encoder.singleValueContainer(); try value.encode(items) }
+        func error(_ values: [String: String]) -> String? {
+            for row in items {
+                guard let check = row.check, let value = values[check.field], !value.isEmpty else { continue }
+                guard let range = value.range(of: check.pattern, options: .regularExpression),
+                      range.lowerBound == value.startIndex, range.upperBound == value.endIndex else { return check.message }
+            }
+            return nil
+        }
+    }
     struct Missing: Codable { let profile: String, connection: String }
     let action: String?, profile: String?, connection: String?
     let outcome: String, reason: String
@@ -79,6 +105,7 @@ struct AgentActionReply: Codable {
     let saved_names: [String]?, restart_required: Bool?, undo_until: String?
     let url: String?, instruction: String?
     let fields: [Field]?, guide: Guide?
+    var input_error: String? = nil
     let last_restart_at: Double?, connected: Int?
     let missing: [Missing]?
     static func decode(_ data: Data) throws -> Self {

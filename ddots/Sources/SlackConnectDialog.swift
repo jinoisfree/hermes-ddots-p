@@ -1,33 +1,46 @@
 import AppKit
+import SwiftUI
 
 /// Only the secure field holds a copied credential; neither notices nor traces include its value.
-final class SlackConnectDialog: NSObject {
+final class SlackConnectDialog: NSObject, NSTextFieldDelegate {
     let alert = NSAlert()
     let field = NSSecureTextField(frame: NSRect(x: 0, y: 0, width: 360, height: 24))
     let status = NSTextField(wrappingLabelWithString: "이 창을 열어 둔 채 토큰을 복사해 주세요.")
     private let clipboard: NSPasteboard
     private var lastChange: Int?
+    private let guideInput = SecretInput()
+    private var guide: AgentActionReply.Guide?
 
-    init(connected: Bool, clipboard: NSPasteboard = .general) {
+    init(connected: Bool, clipboard: NSPasteboard = .general, guideReply: AgentActionReply? = nil) {
         self.clipboard = clipboard
         super.init()
         alert.messageText = "슬랙 연결"
         alert.informativeText = "내 이름으로 슬랙 방을 읽고 답글을 답니다. 토큰은 연결 확인 뒤 이 Mac의 키체인에만 저장합니다."
-        let steps = NSTextField(wrappingLabelWithString: "① 슬랙 앱 만들기 → 워크스페이스 고르기 → Create\n② Install to Workspace → 허용\n③ OAuth & Permissions → User OAuth Token 복사\n④ 이 창으로 돌아오면 자동으로 들어가요 → 연결")
-        let make = NSButton(title: "슬랙 앱 만들기", target: self, action: #selector(makeApp))
+        let manifest = Bundle.main.url(forResource: "slack-app-manifest", withExtension: "json").flatMap { try? Data(contentsOf: $0) }
+        let home = HermesLocator.shared.locate() ?? HermesLocator.shared.fallbackHome
+        if let guideReply { guide = guideReply.guide }
+        else if let manifest, let data = try? AgentConnectionCommand.run(executable: home.appendingPathComponent("bin/hermes-connections"),
+            arguments: ["secret", "guide", "--profile", "default", "--connection", "ddots-slack", "--manifest-stdin", "--json"], input: manifest),
+           let reply = try? AgentActionReply.decode(data) { guide = reply.guide }
+        let instructions: NSView
+        if let guide {
+            instructions = NSHostingView(rootView: SlackInputGuide(guide: guide, input: guideInput))
+        } else { instructions = NSTextField(wrappingLabelWithString: "연결 안내를 읽지 못했어요. Hermes 연결을 확인하고 다시 열어 주세요.") }
         let permissions = NSTextField(wrappingLabelWithString: "방·글·파일 읽기와 내 이름으로 쓰기 권한을 요청합니다. 매니페스트에 필요한 권한이 들어 있어요.")
         permissions.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
         permissions.textColor = .secondaryLabelColor
         field.placeholderString = connected ? "연결됨 (바꿀 때만 입력)" : "xoxp-…"
         field.setAccessibilityLabel("슬랙 사용자 토큰")
         status.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
-        let stack = NSStackView(views: [steps, make, permissions, field, status])
+        field.delegate = self
+        let stack = NSStackView(views: [instructions, permissions, field, status])
         stack.orientation = .vertical; stack.alignment = .leading; stack.spacing = 10
         for view in stack.arrangedSubviews { view.widthAnchor.constraint(equalToConstant: 360).isActive = true }
-        stack.frame = NSRect(x: 0, y: 0, width: 360, height: 270)
+        stack.frame = NSRect(x: 0, y: 0, width: 360, height: 430)
         alert.accessoryView = stack
         alert.addButton(withTitle: "연결"); alert.addButton(withTitle: "취소")
         if connected { alert.addButton(withTitle: "연결 끊기") }
+        alert.buttons.first?.isEnabled = false
         alert.window.initialFirstResponder = field
     }
 
@@ -36,20 +49,27 @@ final class SlackConnectDialog: NSObject {
         lastChange = clipboard.changeCount
         if let token = SlackConnect.tokenCandidate(clipboard.string(forType: .string)) {
             field.stringValue = token
-            status.stringValue = "복사한 토큰을 넣었어요. [연결]을 누르세요"
+            guideInput.values = ["token": token]
+            status.stringValue = guide?.error(guideInput.values) ?? "복사한 값을 확인했어요."
+            alert.buttons.first?.isEnabled = guide != nil && guide?.error(guideInput.values) == nil
         }
     }
     func runModal() -> NSApplication.ModalResponse {
         fillCopiedToken()
         let timer = Timer(timeInterval: 0.5, repeats: true) { [weak self] _ in self?.fillCopiedToken() }
         RunLoop.main.add(timer, forMode: .modalPanel)
-        defer { timer.invalidate() }
+        defer { timer.invalidate(); guideInput.clear() }
         return alert.runModal()
     }
-    @objc private func makeApp() {
-        let manifest = Bundle.main.url(forResource: "slack-app-manifest", withExtension: "json").flatMap { try? String(contentsOf: $0, encoding: .utf8) }
-        if let manifest { clipboard.clearContents(); clipboard.setString(manifest, forType: .string) }
-        status.stringValue = "매니페스트를 복사했어요. 필요하면 From a manifest → ⌘V를 누르세요."
-        NSWorkspace.shared.open(SlackConnect.manifestURL(manifest))
+    func controlTextDidChange(_ notification: Notification) {
+        guideInput.values = ["token": field.stringValue]
+        status.stringValue = guide?.error(guideInput.values) ?? ""
+        alert.buttons.first?.isEnabled = SlackConnect.tokenCandidate(field.stringValue) != nil && guide != nil && guide?.error(guideInput.values) == nil
     }
+}
+
+private struct SlackInputGuide: View {
+    let guide: AgentActionReply.Guide
+    @ObservedObject var input: SecretInput
+    var body: some View { ConnectionGuideView(guide: guide, values: input.values).frame(width: 360) }
 }

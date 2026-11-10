@@ -10,6 +10,7 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from datetime import datetime, timezone
 import fcntl
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -261,14 +262,49 @@ def check_photon(root, profile):
             else ('unknown', 'NO_CONNECTION_EVENT', 'gateway_log'))
 
 
-def check_synology(home, settings, opener, clock, record):
+def synology_credential_digest(home, settings):
+    """Compare credential pairs without storing either value or ambiguous joins."""
+    values = [env_value(home, settings.get(key)) if settings.get(key) else '' for key in ('user', 'password')]
+    if not all(values):
+        return None
+    return hashlib.sha256(json.dumps(values, ensure_ascii=True).encode('utf-8')).hexdigest()
+
+
+def synology_cooldown(record, credential_digest, now):
+    # Old failures have no credential identity. Keep their original deadline.
+    return bool(record and record.get('retry_after', 0) > now and
+                (not record.get('credential_digest') or record['credential_digest'] == credential_digest))
+
+
+def synology_error_category(code):
+    # SYNO.API.Auth codes: DSM Login Web API Guide, API Error Codes.
+    if code == 400: return 'CREDENTIALS'
+    if code in (403, 404, 406): return 'TWO_FACTOR'
+    if code in (401, 407): return 'BLOCKED'
+    if code in SYNOLOGY_AUTH_CODES: return 'AUTH_OTHER'
+    return 'CONNECTION'
+
+
+def synology_failure_hint(category):
+    message = {'CREDENTIALS': '아이디나 비밀번호가 맞지 않아요.',
+               'TWO_FACTOR': 'NAS에서 2단계 인증이 필요해요. NAS의 로그인 설정을 확인해 주세요.',
+               'BLOCKED': 'NAS 계정 또는 접속 IP가 차단됐어요. NAS의 차단 상태를 확인해 주세요.',
+               'CONNECTION': 'NAS 주소나 연결 상태를 확인해 주세요.',
+               'AUTH_OTHER': 'NAS 계정의 로그인 조건이나 비밀번호 변경 필요 여부를 확인해 주세요.'
+               }.get(category, '이전 NAS 로그인 확인에 실패했어요.')
+    return message
+
+
+def check_synology(home, settings, opener, clock, record, *, manual=False):
     """Login then logout once. A recorded failure keeps its wait (files.py cooldown rules)."""
     from hermes_packs.files_docs import files
-    names = [settings.get('user'), settings.get('password')]
-    if not all(names) or not all(env_value(home, name) for name in names):
+    credential_digest = synology_credential_digest(home, settings)
+    if credential_digest is None:
         return 'not_connected', 'NO_TOKEN', 'synology_login'
-    if record and record.get('retry_after', 0) > clock():
-        return record['state'], record['reason'], 'synology_login', dict(note='COOLDOWN', retry_after=record['retry_after'])
+    if not manual and synology_cooldown(record, credential_digest, clock()):
+        return record['state'], record['reason'], 'synology_login', dict(note='COOLDOWN', retry_after=record['retry_after'],
+            error_category=record.get('error_category', 'UNKNOWN'),
+            **({'credential_digest': record['credential_digest']} if record.get('credential_digest') else {}))
     import time
     deadline = time.monotonic() + CHECK_SECONDS
     session = {'sid': None, 'cooldown': 0}
@@ -280,10 +316,12 @@ def check_synology(home, settings, opener, clock, record):
     except files._NasError as error:
         if error.code in SYNOLOGY_AUTH_CODES:
             return ('needs_reconnect', 'AUTH_FAILED', 'synology_login',
-                    dict(retry_after=clock() + SYNOLOGY_AUTH_COOLDOWN))
-        return 'unknown', 'CHECK_FAILED', 'synology_login'
+                    dict(retry_after=clock() + SYNOLOGY_AUTH_COOLDOWN, credential_digest=credential_digest,
+                         error_category=synology_error_category(error.code)))
+        return 'unknown', 'CHECK_FAILED', 'synology_login', dict(error_category='CONNECTION', credential_digest=credential_digest)
     except (OSError, ValueError, TypeError, KeyError):
-        return 'unknown', 'NETWORK', 'synology_login', dict(retry_after=clock() + SYNOLOGY_TRANSPORT_COOLDOWN)
+        return 'unknown', 'NETWORK', 'synology_login', dict(retry_after=clock() + SYNOLOGY_TRANSPORT_COOLDOWN,
+            credential_digest=credential_digest, error_category='CONNECTION')
     try:
         files._nas_api(base, {'api': 'SYNO.API.Auth', 'version': 6, 'method': 'logout',
                               'session': 'SynologyDrive', '_sid': session['sid']}, opener, deadline)
@@ -294,7 +332,7 @@ def check_synology(home, settings, opener, clock, record):
 
 # ---- dispatch ----------------------------------------------------------
 
-def run_check(root, context, *, opener, runner, clock, record, permission_judge):
+def run_check(root, context, *, opener, runner, clock, record, permission_judge, manual=False):
     """context: connections.ConnectionContext for one existing, enabled connection."""
     service, home = context.row['service'], context.home
     if service == 'google':
@@ -302,7 +340,7 @@ def run_check(root, context, *, opener, runner, clock, record, permission_judge)
     if service == 'notion':
         return check_notion(home, opener)
     if service == 'synology':
-        return check_synology(home, context.settings.get('files', {}).get('synology', {}), opener, clock, record)
+        return check_synology(home, context.settings.get('files', {}).get('synology', {}), opener, clock, record, manual=manual)
     if service == 'x':
         return check_x(home, opener)
     if service == 'instagram':
@@ -316,7 +354,7 @@ def run_check(root, context, *, opener, runner, clock, record, permission_judge)
     return 'unknown', 'CHECK_FAILED', 'unknown'
 
 
-def check(root, profile, connection, *, opener=None, runner=None, clock=None, permission_judge=None):
+def check(root, profile, connection, *, opener=None, runner=None, clock=None, permission_judge=None, manual=False):
     """One connection. Returns the action envelope (see connections.main)."""
     import subprocess
     import time
@@ -334,11 +372,11 @@ def check(root, profile, connection, *, opener=None, runner=None, clock=None, pe
         if not free:
             return dict(base, outcome='refused', reason='BUSY')
         record = load_checks(root).get(key)
-        if record and clock() - record.get('at', 0) < THROTTLE_SECONDS:
+        if not manual and record and clock() - record.get('at', 0) < THROTTLE_SECONDS:
             return dict(base, outcome='done', reason='RECENTLY_CHECKED', check=public(record))
         answer = run_check(root, context, opener=opener or default_opener(), runner=runner or subprocess.run,
                            clock=clock, record=record,
-                           permission_judge=permission_judge or mac_permission.judge)
+                           permission_judge=permission_judge or mac_permission.judge, manual=manual)
         state, reason, method = answer[:3]
         extra = answer[3] if len(answer) > 3 else {}
         if extra.get('note') == 'COOLDOWN':
@@ -346,6 +384,9 @@ def check(root, profile, connection, *, opener=None, runner=None, clock=None, pe
         fresh = dict(state=state, reason=reason, verified_by=method, checked_at=stamp(clock), at=clock())
         if 'retry_after' in extra:
             fresh['retry_after'] = extra['retry_after']
+        for key in ('credential_digest', 'error_category'):
+            if key in extra:
+                fresh[key] = extra[key]
         if context.row['service'] == 'instagram' and (expires := instagram_expiry(context.home)):
             fresh['expires_at'] = expires
         save_check(root, profile, connection, fresh)

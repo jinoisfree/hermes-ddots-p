@@ -76,7 +76,11 @@ def query(home, args, runner=None):
         finally:
             if os.path.exists(temp):
                 os.unlink(temp)
-    result = run([str(binary), date, 'Asia/Seoul', str(days)], capture_output=True, text=True, timeout=45)
+    from hermes_facility.app_scope import require_selected
+    allowed = require_selected('calendars')
+    command = [str(binary), date, 'Asia/Seoul', str(days)]
+    if allowed is not None: command.append(json.dumps(allowed))
+    result = run(command, capture_output=True, text=True, timeout=45)
     if result.returncode == 77:
         raise ReadError('맥미니 화면의 캘린더 접근 허용이 필요하다.')
     if result.returncode:

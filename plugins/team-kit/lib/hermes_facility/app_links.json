@@ -1,9 +1,0 @@
-{
-  "com.apple.mail": "mail_read",
-  "com.apple.Notes": "notes_read",
-  "com.apple.iCal": "calendar_read",
-  "com.apple.MobileSMS": "photon",
-  "com.synology.CloudStation": "synology",
-  "notion.id": "notion",
-  "com.tinyspeck.slackmacgap": "slack"
-}

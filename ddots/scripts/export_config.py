@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import importlib
 import json
+import logging
 import os
 from pathlib import Path
 import re
@@ -114,27 +115,70 @@ def conversation_contract(raw):
 
 def export(home, team_kit_lib=None):
     home = Path(home)
-    config = yaml_load(home / 'config.yaml')
-    raw = mapping(mapping(config.get('gateway')).get('common_router'))
-    if not raw or not mapping(raw.get('profiles')).get('fallback'):
-        raise ValueError('gateway.common_router.profiles.fallback 설정이 필요합니다.')
     if team_kit_lib:
         sys.path.insert(0, str(Path(team_kit_lib).resolve()))
     try:
-        router = importlib.import_module('hermes_router.common_router')
-        project = importlib.import_module('hermes_router.project_threads')
+        registry = importlib.import_module('hermes_facility.team_registry')
     except ImportError as exc:
         raise RuntimeError('team-kit의 lib 경로를 PYTHONPATH 또는 --team-kit-lib로 지정하세요.') from exc
+    # --home selects the roster even if the importing process has another Hermes home.
+    previous = os.environ.get('HERMES_TEAM_FILE')
+    os.environ['HERMES_TEAM_FILE'] = str(home / 'owner' / 'team.yaml')
+    logger = logging.getLogger('hermes_facility.team_registry')
+    previous_level = logger.level
+    logger.setLevel(logging.ERROR)  # The CLI reports an empty/unreadable roster once, in Korean.
+    try:
+        roster = registry.roster()
+    finally:
+        logger.setLevel(previous_level)
+        if previous is None:
+            os.environ.pop('HERMES_TEAM_FILE', None)
+        else:
+            os.environ['HERMES_TEAM_FILE'] = previous
+    if not roster:
+        raise ValueError('직원 명부를 읽지 못했거나 직원이 없습니다: owner/team.yaml')
+    roots = []
+    for profile in sorted(roster, key=lambda p: (p != 'default', p)):
+        root = registry.home_of(profile, home)
+        if not root.is_dir():
+            print(f'경고: 홈 폴더가 없어 직원을 제외합니다: {profile}', file=sys.stderr)
+            continue
+        roots.append((profile, root))
+    if not roots:
+        raise ValueError('홈 폴더가 있는 직원이 명부에 없습니다.')
+    config = yaml_load(home / 'config.yaml')
+    router_config = mapping(config.get('gateway')).get('common_router')
+    raw = mapping(router_config)
     hub = mapping(raw.get('project_hub'))
-    effective = project.routing_contract(raw, 'slack', str(hub.get('channel_id', '')))
-    base, home_contract = contract(raw), contract(effective)
+    rows = []
+    if router_config is not None:
+        try:
+            router = importlib.import_module('hermes_router.common_router')
+            project = importlib.import_module('hermes_router.project_threads')
+        except ImportError as exc:
+            raise RuntimeError('team-kit의 lib 경로를 PYTHONPATH 또는 --team-kit-lib로 지정하세요.') from exc
+        effective = project.routing_contract(raw, 'slack', str(hub.get('channel_id', '')))
+        base, home_contract = contract(raw), contract(effective)
+        for text in samples_for(raw):
+            # Source contract, not the sanitized export, is the independent oracle.
+            rows.append(dict(text=text, base=router.select_profile(text, raw).profile,
+                             hub=router.select_profile(text, effective).profile))
+    else:
+        responders = sorted(p for p, _ in roots if 'responder' in roster[p]['roles'])
+        fallback = responders[0] if responders else ('default' if any(p == 'default' for p, _ in roots) else roots[0][0])
+        base = contract({'profiles': {'fallback': fallback}})
+        home_contract = contract({'profiles': {'fallback': fallback}})
+    profiles = {p for p, _ in roots}
+    if any(value['profiles'].get('fallback') not in profiles for value in (base, home_contract)):
+        raise ValueError('기본 담당이 홈 폴더가 있는 명부 직원에 없습니다.')
     members = []
     bots = picked(hub.get('staff_user_ids'), mapping(hub.get('staff_user_ids')).keys())
     team, listeners, excluded = set(), set(), set()
-    roots = [('default', home)] + [(p.name, p) for p in sorted((home / 'profiles').glob('*')) if p.is_dir() and not p.name.startswith('.')]
     for profile, root in roots:
         cfg = config if root == home else yaml_load(root / 'config.yaml')
-        meta = yaml_load(root / 'profile.yaml')
+        member = roster[profile]
+        name = member['label'] or member['name']
+        aliases = list(dict.fromkeys(([member['name']] if member['name'] != name else []) + list(member['aliases'])))
         slack = mapping(mapping(cfg.get('platforms')).get('slack'))
         # Config loader merges platform's extra with its direct custom keys.
         extra = {**mapping(slack.get('extra')), **{k: v for k, v in slack.items() if k != 'extra'}}
@@ -143,13 +187,7 @@ def export(home, team_kit_lib=None):
             team.update(strings(solo.get('team_bots'))); listeners.update(strings(solo.get('listener_bots')))
             excluded.update(strings(extra.get('report_channels')))
             if isinstance(extra.get('project_hub_channel_id'), str): excluded.add(extra['project_hub_channel_id'])
-        members.append(dict(profile=profile, displayName=str(meta.get('display_name') or profile),
-                            aliases=strings(mapping(raw.get('aliases')).get(profile)), slackUserID=bots.get(profile, '')))
-    rows=[]
-    for text in samples_for(raw):
-        # Source contract, not the sanitized export, is the independent oracle.
-        rows.append(dict(text=text, base=router.select_profile(text, raw).profile,
-                         hub=router.select_profile(text, effective).profile))
+        members.append(dict(profile=profile, displayName=name, aliases=aliases, slackUserID=bots.get(profile, '')))
     result = dict(schemaVersion=1, members=members, routing={'base':base,'hub':home_contract},
                   routing_samples=rows,
                   rooms=picked(mapping(raw.get('dedicated_channels')).get('slack'), mapping(mapping(raw.get('dedicated_channels')).get('slack')).keys()),
@@ -165,7 +203,7 @@ def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--home', type=Path, default=Path(os.environ.get('HERMES_HOME', '~/.hermes')).expanduser())
     parser.add_argument('--output', type=Path, required=True)
-    parser.add_argument('--team-kit-lib', type=Path, help='hermes_router를 포함한 team-kit/lib 경로')
+    parser.add_argument('--team-kit-lib', type=Path, help='hermes_facility·hermes_router를 포함한 team-kit/lib 경로')
     args=parser.parse_args()
     try:
         value=export(args.home,args.team_kit_lib);atomic_json(args.output,value)

@@ -34,7 +34,11 @@ final class DdotsConfig {
         for (name,isConfig) in [("ddots-config.json",true),("ddots-local.json",false)] {
             let url=root.appendingPathComponent(name)
             if !FileManager.default.fileExists(atPath:url.path) {
-                if isConfig{config=starter()}else{local=[:]};problems[name]=nil;continue
+                if isConfig {
+                    config=[:]
+                    problems[name]="Hermes에서 ddots 설정을 아직 내보내지 않았어요.\n1. 설치 도우미를 --update로 실행하세요.\n2. 그래도 없으면 Hermes 저장소에서 수동 실행하세요: PYTHONPATH=\"$HOME/.hermes/plugin-store/team-kit/lib\" \"$GATEWAY_PYTHON\" ddots/scripts/export_config.py --output \"\(url.path)\" (GATEWAY_PYTHON은 Hermes Python 경로)"
+                } else {local=[:];problems[name]=nil}
+                continue
             }
             do {
                 let raw=try JSONSerialization.jsonObject(with:Data(contentsOf:url))
@@ -57,33 +61,6 @@ final class DdotsConfig {
         if conversationChanged || !beforeConfig.isEqual(to:config) || !beforeLocal.isEqual(to:local) {revision += 1}
     }
     enum ConfigError:Error {case invalid}
-    private func starter()->[String:Any] {
-        let receipts=hermes.appendingPathComponent(".starter/receipts")
-        let files=((try? FileManager.default.contentsOfDirectory(at:receipts,includingPropertiesForKeys:nil)) ?? []).filter{$0.pathExtension=="json"}.sorted{$0.lastPathComponent<$1.lastPathComponent}
-        var members:[[String:Any]]=[]
-        if let latest=files.last,let data=try? Data(contentsOf:latest),let receipt=(try? JSONSerialization.jsonObject(with:data)) as? [String:Any] {
-            let destinations=HermesRouting.dict(receipt["destinations"]),defaultAgent=HermesRouting.str(receipt["default"])
-            for agent in HermesRouting.strings(receipt["agents"]) {
-                let relative=HermesRouting.str(destinations[agent]);guard !relative.isEmpty else{continue}
-                let target=hermes.appendingPathComponent(relative).standardizedFileURL
-                // Malformed/untrusted receipt cannot make this loader read outside its Hermes home.
-                guard target.path==hermes.standardizedFileURL.path || target.path.hasPrefix(hermes.standardizedFileURL.path+"/") else{continue}
-                let profile=agent==defaultAgent ? "default":target.lastPathComponent
-                members.append(["profile":profile,"displayName":displayName(target) ?? agent,"aliases":[]])
-            }
-        }
-        if members.isEmpty {
-            let roots=[hermes]+(((try? FileManager.default.contentsOfDirectory(at:hermes.appendingPathComponent("profiles"),includingPropertiesForKeys:nil)) ?? []).filter{!$0.lastPathComponent.hasPrefix(".")}.sorted{$0.lastPathComponent<$1.lastPathComponent})
-            for path in roots {if let name=displayName(path){members.append(["profile":path==hermes ? "default":path.lastPathComponent,"displayName":name,"aliases":[]])}}
-        }
-        let fallback=members.first(where: { $0["profile"] as? String == "default" })?["profile"] as? String ?? members.first?["profile"] as? String ?? ""
-        let contract:[String:Any]=["profiles":["fallback":fallback]]
-        return ["schemaVersion":1,"members":members,"routing":["base":contract,"hub":contract],"defaults":["recipient":fallback]]
-    }
-    private func displayName(_ home:URL)->String? {
-        guard let text=try? String(contentsOf:home.appendingPathComponent("profile.yaml"),encoding:.utf8),let line=text.components(separatedBy:.newlines).first(where:{$0.hasPrefix("display_name:")}) else{return nil}
-        let name=line.dropFirst("display_name:".count).trimmingCharacters(in:CharacterSet(charactersIn:" \t'\""));return name.isEmpty ? nil:name
-    }
     var members:[[String:Any]] {document["members"] as? [[String:Any]] ?? []}
     var recipient:String {HermesRouting.str(HermesRouting.dict(document["defaults"])["recipient"])}
     var excluded:Set<String> {Set(HermesRouting.strings(appearance["excluded"]))}

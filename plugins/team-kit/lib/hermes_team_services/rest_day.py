@@ -135,8 +135,12 @@ def start(now, usual, **kw):
 
 # ---- fired-twice jobs --------------------------------------------------------------------------
 def _hm(value):
-    hour, minute = str(value).split(":")
-    return int(hour), int(minute)
+    if not isinstance(value, str) or len(value) != 5 or value[2] != ":":
+        raise ValueError(f"invalid owner time policy slot: {value!r}")
+    hour, minute = map(int, value.split(":"))
+    if not 0 <= hour < 24 or not 0 <= minute < 60:
+        raise ValueError(f"invalid owner time policy slot: {value!r}")
+    return hour, minute
 
 
 @contextmanager

@@ -142,7 +142,7 @@ extension AgentConnectionsModel {
             case .failure(let error): self.results[name] = ActionNotice(success: false, text: "하지 못했어요. " + error.localizedDescription)
             case .success(let reply):
                 guard reply.outcome == "done", let fields = reply.fields, !fields.isEmpty else {
-                    self.results[name] = ConnectionSentence.notice(reply, label: item.label); return
+                    self.results[name] = reply.input_error.map { ActionNotice(success: false, text: $0) } ?? ConnectionSentence.notice(reply, label: item.label); return
                 }
                 self.secretEntry = SecretEntry(profile: agent.profile, agent: agent.display_name, connection: item.id,
                                                label: item.label, fields: fields, guide: reply.guide)
@@ -177,7 +177,7 @@ extension AgentConnectionsModel {
                     self.refresh()
                 } else {
                     self.secretEntry?.submitting = false
-                    self.secretEntry?.error = notice.text
+                    self.secretEntry?.error = reply.input_error ?? notice.text
                 }
             }
         }
@@ -196,34 +196,20 @@ struct SecretEntryView: View {
     @ObservedObject var input: SecretInput
     let submit: ([String: String]) -> Void
     let cancel: () -> Void
-    private var complete: Bool { entry.fields.allSatisfy { !(input.values[$0.id] ?? "").isEmpty } }
+    private var complete: Bool { entry.guide?.error(input.values) == nil && entry.fields.allSatisfy { !(input.values[$0.id] ?? "").isEmpty } }
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             Text("\(entry.agent) · \(entry.label) 연결").font(.title3.bold())
-            if let guide = entry.guide {
-                VStack(alignment: .leading, spacing: 6) {
-                    ForEach(Array(guide.steps.enumerated()), id: \.offset) { index, step in
-                        HStack(alignment: .top, spacing: 8) {
-                            Text("\(index + 1)").font(.caption.weight(.bold)).frame(width: 18, height: 18)
-                                .background(Color.secondary.opacity(0.2)).clipShape(Circle())
-                            Text(step).font(.callout).fixedSize(horizontal: false, vertical: true)
-                        }
-                    }
-                    if let text = guide.link, let url = URL(string: text), url.scheme == "https" {
-                        Button("설정 페이지 열기") { NSWorkspace.shared.open(url) }.buttonStyle(.link)
-                    }
-                }
-            }
+            if let guide = entry.guide { ConnectionGuideView(guide: guide, values: input.values) }
             ForEach(entry.fields, id: \.id) { field in
                 VStack(alignment: .leading, spacing: 4) {
                     Text(field.label).font(.caption).foregroundColor(.secondary)
-                    Group {
-                        if field.secure { SecureField("", text: binding(field.id)) } else { TextField("", text: binding(field.id)) }
-                    }.textFieldStyle(.roundedBorder).disabled(entry.submitting).accessibilityLabel(field.label)
+                    ConnectionInputField(label: field.label, secure: field.secure, text: binding(field.id))
+                        .disabled(entry.submitting)
                 }
             }
             Text("입력한 값은 확인을 통과해야 저장해요. 화면과 기록에는 남기지 않아요.").font(.caption).foregroundColor(.secondary)
-            if let error = entry.error {
+            if let error = entry.guide?.error(input.values) ?? entry.error {
                 Label(error, systemImage: "exclamationmark.triangle.fill").font(.callout).foregroundColor(.red)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -233,9 +219,46 @@ struct SecretEntryView: View {
                 Button(entry.submitting ? "확인 중…" : "확인하고 저장") { submit(input.values) }
                     .keyboardShortcut(.defaultAction).disabled(!complete || entry.submitting)
             }
-        }.padding(22).frame(width: 440).onDisappear { input.clear() }
+        }.padding(22).frame(width: 440).background(Color(nsColor: .windowBackgroundColor)).onDisappear { input.clear() }
     }
     private func binding(_ id: String) -> Binding<String> {
         Binding(get: { input.values[id] ?? "" }, set: { input.values[id] = $0 })
+    }
+}
+
+/// Instructions and validation rules come from the facility, never a client service table.
+private typealias GuideCompletionState = SwiftUI.State<Set<Int>>
+
+struct ConnectionGuideView: View {
+    let guide: AgentActionReply.Guide
+    let values: [String: String]
+    @GuideCompletionState private var completed: Set<Int> = []
+    var body: some View {
+        VStack(alignment: .leading, spacing: 9) {
+            ForEach(guide.items) { row in
+                let verified = row.check.map { check in
+                    let value = values[check.field, default: ""]
+                    return !value.isEmpty && guide.error([check.field: value]) == nil
+                } ?? completed.contains(row.n)
+                HStack(alignment: .top, spacing: 8) {
+                    Button {
+                        if completed.contains(row.n) { completed.remove(row.n) } else { completed.insert(row.n) }
+                    } label: { Text(verified ? "✓" : String(row.n)).foregroundColor(.primary).frame(width: 22, height: 22).background(Color.secondary.opacity(0.15)).clipShape(Circle()) }
+                    .buttonStyle(.plain).disabled(row.check != nil).accessibilityLabel("\(row.n)번 단계" + (verified ? ", 완료" : ""))
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(row.text).font(.callout).fixedSize(horizontal: false, vertical: true)
+                        if let image = row.image { Image(systemName: image).font(.title2) }
+                        HStack {
+                            if let raw = row.open_url, let url = URL(string: raw), ["https", "x-apple.systempreferences"].contains(url.scheme ?? ""), url.user == nil {
+                                Button("열기") { NSWorkspace.shared.open(url); completed.insert(row.n) }.buttonStyle(.link)
+                            }
+                            if let copy = row.copy {
+                                Button("복사") { NSPasteboard.general.clearContents(); NSPasteboard.general.setString(copy, forType: .string); completed.insert(row.n) }.buttonStyle(.link)
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 }

@@ -16,6 +16,8 @@ import subprocess
 import sys
 import time
 
+from hermes_facility.app_registry import enabled as app_enabled
+
 # Identical to the existing auth CLI. A source-contract test detects drift.
 CONFIG_PATTERN = r'(        personal_scopes:\n[\s\S]*?          personal:\n[\s\S]*?            connected:) false(?=\n          company:)'
 CONFIG_MARKER = '            connected: true\n          company:'
@@ -124,15 +126,16 @@ def actions_for(row):
             return [action('secret_set', first if state == 'not_connected' else change, True), check]
         return [dict(check, primary=True), action('secret_set', change)]
     elif kind == 'channel':
+        guide = [action('secret_set', '연결 안내')] if row['service'] == 'slack' else []
         # A revoked token is not fixed by a restart; the owner reinstalls the app in Slack.
         if state != 'connected' and not (state == 'needs_reconnect' and reason == 'TOKEN_INVALID'):
-            return [action('gateway_restart', '다시 시작', True), check]
+            return [action('gateway_restart', '다시 시작', True), check, *guide]
     elif kind == 'mac_permission':
         if reason == 'NOT_DETERMINED':
             return [action('permission_request', '권한 요청', True), check]
         if reason == 'PERMISSION_DENIED':
             return [action('open_settings', '시스템 설정', True), check]
-    return [dict(check, primary=True)]
+    return [dict(check, primary=True), *([action('secret_set', '연결 안내')] if row['service']=='slack' else [])]
 
 
 def event_time(stamp):
@@ -203,13 +206,13 @@ def connection_rows(root, profile, home, config, *, accounts, google, events, ch
             rules=['개인·회사 담당 범위를 유지합니다.', '발송·삭제 승인과 배경 쓰기 제한은 그대로입니다.'])
     for key, label in [('mail_read', 'Mail 앱'), ('notes_read', '메모'), ('calendar_read', '캘린더')]:
         if key in kit:
-            enabled = kit[key].get('enabled', True)
+            enabled = app_enabled(kit[key])
             add(key, 'mac', key, label, 'unknown' if enabled else 'off',
                 'MAC_PERMISSION_UNVERIFIED' if enabled else 'DISABLED',
                 rules=['설정 상태만 확인했습니다. Hermes의 macOS 권한은 확인하지 못했습니다.'])
     notion = kit.get('notion')
     if notion is not None:
-        enabled = notion.get('enabled', True)
+        enabled = app_enabled(notion)
         present = notion.get('token') in names
         add('notion', 'account', 'notion', 'Notion',
             ('connected' if present else 'not_connected') if enabled else 'off',
@@ -218,14 +221,14 @@ def connection_rows(root, profile, home, config, *, accounts, google, events, ch
     files = kit.get('files', {})
     storage = files.get('synology')
     if storage is not None:
-        enabled = files.get('enabled', True) and storage.get('enabled', True)
+        enabled = app_enabled(files) and app_enabled(storage)
         present = all(storage.get(key) in names for key in ('user', 'password'))
         add('synology', 'account', 'synology', '시놀로지',
             ('connected' if present else 'not_connected') if enabled else 'off',
             'CONFIG_ONLY' if enabled else 'DISABLED',
             rules=['설정과 환경변수 존재만 확인합니다. 네트워크 연결은 검사하지 않습니다.'])
     if 'x_read' in kit:
-        add('x', 'account', 'x', 'X', 'unknown' if kit['x_read'].get('enabled', True) else 'off', 'CONFIG_ONLY')
+        add('x', 'account', 'x', 'X', 'unknown' if app_enabled(kit['x_read']) else 'off', 'CONFIG_ONLY')
     entries = config.get('plugins', {}).get('entries', {})
     if 'instagram-dm' in entries:
         add('instagram', 'account', 'instagram', 'Instagram',
@@ -292,6 +295,20 @@ def inventory(root, runner=subprocess.run, *, google=None):
                     and (expires := checks.instagram_expiry(home)):
                 row['expires_at'] = expires
             row['actions'] = actions_for(row)
+        from hermes_facility import app_registry
+        if app_registry.explicit(root, profile):
+            from hermes_packs.mac_apps.catalog import load_catalog
+            grants = app_registry.grants(root, profile, config)
+            drift = app_registry.config_drift(root, profile, config)
+            catalog = load_catalog()
+            for bundle in sorted(grants | drift):
+                entry = catalog.get(bundle, {})
+                rows.append(dict(id='app-' + bundle, group='mac', service=entry.get('service') or 'mac_app',
+                    label=bundle, state='unknown' if bundle in grants else 'off',
+                    reason='CONFIG_DRIFT' if bundle in drift else 'APP_CONNECTED',
+                    checked_at=checked, scope=None, account=None, reconnect=None,
+                    connect_kind=None, verified_by='team_registry', actions=[],
+                    capabilities=[entry.get('can_do', '')], rules=entry.get('rules', [])))
         agents.append(dict(profile=profile, display_name=metadata.get('display_name') or profile,
                            connections=rows))
     return dict(schema='hermes-connections/1', checked_at=checked, agents=agents)
@@ -347,6 +364,7 @@ def reconnect(root, action, account, *, runner=subprocess.run, popen=subprocess.
                   check=dict(state=verified[0], reason=verified[1]))
     if running and (url := auth.login_url(state.get('url', ''))):
         result['url'] = url
+        result['next'] = dict(kind='oauth_connect',url=url,resume_key=account)
     return result
 
 
@@ -360,7 +378,18 @@ def build_parser():
     login.add_argument('--account', choices=['company', 'personal'], required=True)
     login.add_argument('--json', action='store_true', required=True)
     apps = sub.add_parser('apps')
+    apps.add_argument('--self', dest='self_id')
     apps.add_argument('--json', action='store_true', required=True)
+    app = sub.add_parser('app')
+    app.add_argument('action', choices=['connect', 'disconnect', 'undo'])
+    app.add_argument('--profile', required=True)
+    app.add_argument('--app', dest='bundle', required=True)
+    app.add_argument('--account', action='append')
+    app.add_argument('--scope', dest='scopes', action='append')
+    app.add_argument('--default')
+    app.add_argument('--values-stdin', action='store_true')
+    app.add_argument('--resume', choices=['gateway_restart', 'permission_request', 'internet_accounts'])
+    app.add_argument('--json', action='store_true', required=True)
     checking = sub.add_parser('check')
     checking.add_argument('--profile', required=True)
     target = checking.add_mutually_exclusive_group(required=True)
@@ -371,6 +400,7 @@ def build_parser():
     secret.add_argument('action', choices=['guide', 'set', 'undo'])
     secret.add_argument('--profile', required=True)
     secret.add_argument('--connection', required=True)
+    secret.add_argument('--manifest-stdin', action='store_true')
     secret.add_argument('--json', action='store_true', required=True)
     permission = sub.add_parser('permission')
     permission.add_argument('action', choices=['request', 'settings'])
@@ -384,17 +414,33 @@ def build_parser():
 
 
 def run_command(root, args):
+    if args.command == 'app':
+        from hermes_facility import app_connect
+        values = None
+        if args.values_stdin:
+            from hermes_facility.connection_secrets import MAX_STDIN_BYTES
+            raw = sys.stdin.read(MAX_STDIN_BYTES + 1)
+            if len(raw) > MAX_STDIN_BYTES: raise ValueError('VALUES_INVALID')
+            values = json.loads(raw)
+            if not isinstance(values, dict) or set(values) - {'api_base', 'link_host', 'user', 'password', 'token', 'vault', 'sync_root'}:
+                raise ValueError('VALUES_INVALID')
+            if any(not isinstance(v, str) or not v or len(v) > 4096 or any(ord(c) < 32 for c in v) for v in values.values()):
+                raise ValueError('VALUES_INVALID')
+        return app_connect.run(root, args.action, args.profile, args.bundle, account=args.account,
+            scopes=args.scopes, default=args.default, values=values, resume=args.resume)
     if args.command == 'status':
         return inventory(root)
     if args.command == 'reconnect':
         return reconnect(root, args.action, args.account)
     if args.command == 'apps':
-        from hermes_facility import connection_apps
-        return connection_apps.installed_apps(root)
+        from hermes_packs.mac_apps import discovery as connection_apps
+        return connection_apps.installed_apps(root, self_id=args.self_id)
     if args.command == 'secret':
         from hermes_facility import connection_secrets as secrets
         if args.action == 'guide':
-            return secrets.guide(root, args.profile, args.connection)
+            manifest = json.loads(sys.stdin.read(100000)) if args.manifest_stdin else None
+            if manifest is not None and not isinstance(manifest, dict): raise ValueError('MANIFEST_INVALID')
+            return secrets.guide(root, args.profile, args.connection, manifest)
         if args.action == 'set':
             return secrets.set_secret(root, args.profile, args.connection)
         return secrets.undo_secret(root, args.profile, args.connection)
@@ -407,8 +453,8 @@ def run_command(root, args):
         return gateway_restart.restart(root)
     from hermes_facility import connection_checks
     if args.all:
-        return connection_checks.check_all(root, args.profile)
-    return connection_checks.check(root, args.profile, args.connection)
+        return connection_checks.check_all(root, args.profile, manual=True)
+    return connection_checks.check(root, args.profile, args.connection, manual=True)
 
 
 def main(root, argv=None):

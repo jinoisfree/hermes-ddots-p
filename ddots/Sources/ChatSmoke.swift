@@ -26,7 +26,7 @@ enum ChatSmokeFixture {
                 } }
                 try! bitmap.representation(using: .png, properties: [:])!.write(to: assets.appendingPathComponent("slack-avatar.png"))
             }
-            try! "display_name: \(names[profile]!)\nui_meta:\n  hermes-bots:\n    color: '\(colors[profile]!)'\n".write(to:root.appendingPathComponent("profile.yaml"),atomically:true,encoding:.utf8)
+            try! "ui_meta:\n  hermes-bots:\n    color: '\(colors[profile]!)'\n".write(to:root.appendingPathComponent(ProfileAvatarCache.metadataFilename),atomically:true,encoding:.utf8)
             var handle: OpaquePointer?
             smokeCheck(sqlite3_open(root.appendingPathComponent("state.db").path,&handle) == SQLITE_OK)
             let db = handle!
@@ -48,6 +48,10 @@ enum ChatSmokeFixture {
             smokeCheck(sqlite3_exec(db,"COMMIT",nil,nil,nil) == SQLITE_OK)
             sqlite3_close(db)
         }
+        let exported: [String: Any] = ["schemaVersion": 1,
+            "members": profiles.map { ["profile": $0, "displayName": names[$0]!, "aliases": []] as [String: Any] },
+            "routing": [:], "defaults": ["recipient": "default"]]
+        try! JSONSerialization.data(withJSONObject: exported).write(to: home.appendingPathComponent("ddots-config.json"))
         return home
     }
 }

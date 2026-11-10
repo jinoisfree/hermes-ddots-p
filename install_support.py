@@ -1,4 +1,4 @@
-"""Korean setup and code updates that only supplement plugin opt-ins in owner config."""
+"""Korean setup, managed-code updates and roster-view registration."""
 from __future__ import annotations
 import argparse
 from copy import deepcopy
@@ -6,6 +6,7 @@ import getpass
 import hashlib
 import json
 import os
+import plistlib
 from pathlib import Path
 import re
 import shutil
@@ -90,6 +91,26 @@ def missing_merge(current, defaults):
         if key not in result: result[key] = deepcopy(value)
         elif isinstance(result[key], dict) and isinstance(value, dict): result[key] = missing_merge(result[key], value)
     return result
+
+
+def compose_employee_config(root, home, path, *, defaults, packs, plugins):
+    """Use the installed facility composer in the managed Python environment."""
+    before = path.read_bytes() if path.exists() else b''
+    try: json.loads(before or b'{}'); python = sys.executable
+    except ValueError: python = str(runtime_python(home))
+    result = subprocess.run([str(python), '-B', '-c',
+        "import json,sys;sys.path.insert(0,sys.argv[1]);"
+        "from hermes_facility.config_assembly import assemble_config;"
+        "v=json.load(sys.stdin);sys.stdout.buffer.write(assemble_config("
+        "bytes.fromhex(v['before']),defaults=v['defaults'],packs=v['packs'],plugins=v['plugins']))",
+        str(Path(root) / 'plugins/team-kit/lib')],
+        input=json.dumps(dict(before=before.hex(),
+                             defaults=defaults, packs=packs, plugins=plugins)),
+        capture_output=True, text=True, timeout=30,
+        env={**os.environ, 'HERMES_HOME': str(home), 'HERMES_DISABLE_LAZY_INSTALLS': '1',
+             'PYTHONDONTWRITEBYTECODE': '1'})
+    if result.returncode: raise SetupError('직원 설정을 조립하지 못했습니다. 기존 설정은 보존했습니다.')
+    return result.stdout.encode('utf-8')
 
 
 def plugin_activation(config):
@@ -309,6 +330,88 @@ def connect_slack(home, receipt, *, call=slack_call, secret=getpass.getpass, pro
     vault_path.write_bytes(encoded(vault))
 
 
+DDOTS_EXPORT_LABEL = 'ai.hermes.ddots-config-export'
+
+
+def ddots_export_paths():
+    user = Path.home()
+    cloud = user / 'Library/Mobile Documents/com~apple~CloudDocs'
+    workspace = cloud if cloud.is_dir() else user / 'Downloads'
+    output = workspace / 'HermesWorkspace/ddots/ddots-config.json'
+    return user / 'Library/LaunchAgents' / (DDOTS_EXPORT_LABEL + '.plist'), output
+
+
+def remove_ddots_export(record):
+    """Remove only this install's registered job and newly created view."""
+    if not record: return 0
+    plist, expected_output = ddots_export_paths()
+    if record.get('plist') != str(plist) or record.get('output') != str(expected_output):
+        raise SetupError('내보내기 설치 기록의 경로가 달라 보존했습니다.')
+    subprocess.run(['launchctl', 'bootout', f'gui/{os.getuid()}', str(plist)],
+                   capture_output=True, timeout=30)
+    plist.unlink(missing_ok=True)
+    if record.get('created_output'):
+        expected_output.unlink(missing_ok=True)
+    return 0
+
+
+def configure_ddots_export(root, home, previous):
+    """The facility exporter owns the view; launchd only watches its inputs."""
+    script = root / 'ddots/scripts/export_config.py'
+    if not script.is_file():
+        print('ddots 소스가 없어 직원 보기 내보내기와 감시 등록을 건너뜁니다.')
+        return 0, previous
+    plist, output = ddots_export_paths()
+    record = {'plist': str(plist), 'output': str(output),
+              'created_output': previous.get('created_output', not output.exists())}
+    problem = None
+    try:
+        python = runtime_python(home)
+    except SetupError as error:
+        python = home / 'hermes-agent/venv/bin/python'
+        problem = str(error)
+    command = [str(python), str(script), '--home', str(home), '--output', str(output),
+               '--team-kit-lib', str(home / 'plugin-store/team-kit/lib')]
+    environment = {**os.environ, 'HERMES_HOME': str(home), 'HERMES_DISABLE_LAZY_INSTALLS': '1',
+                   'PYTHONDONTWRITEBYTECODE': '1'}
+    if not problem:
+        try:
+            exported = subprocess.run(command, capture_output=True, env=environment, timeout=60)
+            if exported.returncode: problem = '직원 명부 내보내기에 실패했습니다.'
+        except (OSError, subprocess.TimeoutExpired):
+            problem = '직원 명부 내보내기를 실행하지 못했습니다.'
+    logs = home / 'logs'
+    logs.mkdir(parents=True, exist_ok=True)
+    payload = {'Label': DDOTS_EXPORT_LABEL, 'ProgramArguments': command, 'RunAtLoad': False,
+               'WatchPaths': [str(home / 'owner/team.yaml'), str(home / 'config.yaml')],
+               'EnvironmentVariables': {'HERMES_HOME': str(home), 'HERMES_DISABLE_LAZY_INSTALLS': '1'},
+               'StandardOutPath': str(logs / 'ddots-config-export.log'),
+               'StandardErrorPath': str(logs / 'ddots-config-export-error.log')}
+    plist.parent.mkdir(parents=True, exist_ok=True)
+    fd, temporary = tempfile.mkstemp(prefix='.ddots-export-', dir=plist.parent)
+    try:
+        with os.fdopen(fd, 'wb') as stream:
+            stream.write(plistlib.dumps(payload, sort_keys=True))
+        os.replace(temporary, plist)
+    finally:
+        if os.path.exists(temporary): os.unlink(temporary)
+    try:
+        subprocess.run(['launchctl', 'bootout', f'gui/{os.getuid()}', str(plist)],
+                       capture_output=True, timeout=30)
+        registered = subprocess.run(['launchctl', 'bootstrap', f'gui/{os.getuid()}', str(plist)],
+                                    capture_output=True, timeout=30)
+        if registered.returncode: raise SetupError('직원 보기 감시 등록에 실패했습니다.')
+    except (OSError, subprocess.TimeoutExpired, SetupError):
+        plist.unlink(missing_ok=True)
+        print('직원 보기 감시 등록 실패. 1. launchctl 사용 권한을 확인하세요. 2. 설치 도우미 --update를 다시 실행하세요.')
+        return 2, record
+    if problem:
+        print(problem + ' 1. owner/team.yaml 명부와 Hermes 실행 환경을 확인하세요. 2. 설치 도우미 --update를 다시 실행하세요. 감시는 등록했습니다.')
+        return 2, record
+    print('직원 명부 → 시설 내보내기 → ddots 보기와 변경 감시를 준비했습니다.')
+    return 0, record
+
+
 def modern_main(root, argv=None):
     root = Path(root)
     parser = argparse.ArgumentParser(description='직원을 고용하고 필요한 도구 팩을 연결합니다. 기존 기억·계정·장부는 보존합니다.')
@@ -316,6 +419,7 @@ def modern_main(root, argv=None):
     parser.add_argument('--packs', default=None);parser.add_argument('--home', type=Path, default=Path(os.environ.get('HERMES_HOME', '~/.hermes')).expanduser())
     parser.add_argument('--label-prefix', default='com.example.hermes');parser.add_argument('--dry-run', action='store_true')
     parser.add_argument('--check', action='store_true');parser.add_argument('--update', action='store_true');parser.add_argument('--connect-slack', action='store_true')
+    parser.add_argument('--remove-ddots-export', action='store_true', help='이 설치가 만든 ddots 감시와 보기만 제거합니다.')
     parser.add_argument('--check-runtime', action='store_true', help='본체·Python·CLI를 설치 없이 점검합니다.')
     args = parser.parse_args(argv)
     if args.home.is_symlink(): raise SetupError('설치 홈 자체의 링크는 사용할 수 없습니다.')
@@ -331,6 +435,9 @@ def modern_main(root, argv=None):
     previous = json.loads(records[-1].read_text()) if records else {'agents': [], 'default': None, 'destinations': {}, 'managed': {}}
     if records and previous.get('version') != 2:
         raise SetupError('이전 구조의 설치 기록입니다. 기존 플러그인과 설정을 보존하는 전환 점검이 먼저 필요합니다. 파일은 변경하지 않았습니다.')
+    if args.remove_ddots_export:
+        if args.dry_run: return 0
+        return remove_ddots_export(previous.get('ddots_export', {}))
     plugins = ('quiet-logs', 'team-kit', 'team-delegation')
     if args.check:
         if not previous['agents']: raise SetupError('설치 기록이 없습니다.')
@@ -406,15 +513,10 @@ def modern_main(root, argv=None):
                     'common_router_plugin': {'mode': 'live', 'contract': router}}},
                 'team-delegation': {'enabled': True, 'settings': {'packs': {'enabled': packs}}}})
             config_path = destination / 'config.yaml'
-            merged = missing_merge(mapping(config_path, home), config)
-            enable_managed_plugins(merged, plugins, slug)
-            # These lists describe the explicit installation choice, not private account data.
-            for plugin in ('team-kit', 'team-delegation'):
-                chosen = merged['plugins']['entries'][plugin]['settings']['packs']
-                chosen['enabled'] = list(dict.fromkeys(chosen.get('enabled', []) + packs))
-            routes = merged['platforms']['slack']['common_router_thread_routes']
-            routes['profiles'] = list(dict.fromkeys(routes.get('profiles', []) + list(profiles.values())))
-            files[str(relative / 'config.yaml')] = encoded(merged)
+            # The facility owns pack attachment and round-trip serialization.
+            # Route defaults are merged as before without rewriting channel choices.
+            files[str(relative / 'config.yaml')] = compose_employee_config(
+                root, home, config_path, defaults=config, packs=packs, plugins=plugins)
             for name in ('profile.yaml', 'SOUL.md', 'slack-manifest.json', 'README.md'):
                 if not (destination / name).exists(): files[str(relative / name)] = (root / 'agents' / slug / name).read_bytes()
             for plugin in plugins:
@@ -446,10 +548,14 @@ def modern_main(root, argv=None):
     files['.starter/receipts/' + sequence + '.json'] = encoded(receipt)
     apply_files(home, files, links, managed=managed, previous=previous.get('managed', {}), update=args.update, dry_run=args.dry_run)
     if args.dry_run: return 0
+    export_status, export_record = configure_ddots_export(root, home, previous.get('ddots_export', {}))
+    if export_record:
+        receipt['ddots_export'] = export_record
+        (home / '.starter/receipts' / (sequence + '.json')).write_bytes(encoded(receipt))
     print('코드 업데이트 완료. 금고·기억·학습·예약·운영 장부는 보존했습니다.' if args.update else '직원과 도구 팩을 설치했습니다. 자동 발송·감시는 켜지 않았습니다.')
     for name in packs: print(name + ': ' + settings['packs'][name]['guide'])
     if args.connect_slack: connect_slack(home, receipt)
     else: print('다음: --connect-slack으로 Slack 앱을 연결하세요. 각 직원의 slack-manifest.json에 필요한 권한이 있습니다.')
     print('모델 연결: hermes setup. 시작: HERMES_DISABLE_LAZY_INSTALLS=1 hermes gateway start')
     print('Slack 기본 채널에서 첫 질문과 승인·거절·의견·확인 버튼을 시험하세요. 실제 발송은 이 설치기가 하지 않습니다.')
-    return 0
+    return export_status

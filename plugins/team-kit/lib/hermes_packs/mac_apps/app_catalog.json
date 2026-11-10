@@ -1,0 +1,314 @@
+{
+  "com.apple.mail": {
+    "route": "tool",
+    "service": "apple_mail",
+    "tools": [
+      "gmail_direct"
+    ],
+    "permission": "apple_events",
+    "can_do": "Mail 앱의 메일을 읽고 정리하고 승인 뒤 보낼 수 있어요.",
+    "rules": [],
+    "reason": null,
+    "packs": [
+      "mail"
+    ],
+    "scope": "mail_accounts",
+    "permission_label": "Mail"
+  },
+  "com.apple.Notes": {
+    "route": "tool",
+    "service": "notes_read",
+    "tools": [
+      "notes_read",
+      "apple_notes_direct_lookup",
+      "apple_notes_direct_mutation"
+    ],
+    "permission": "apple_events",
+    "can_do": "메모를 읽고 만들고 고칠 수 있어요.",
+    "rules": [],
+    "reason": null,
+    "packs": [
+      "notes",
+      "native-tools"
+    ],
+    "scope": "note_folders",
+    "permission_label": "메모"
+  },
+  "com.apple.iCal": {
+    "route": "tool",
+    "service": "calendar_read",
+    "tools": [
+      "calendar_read",
+      "calendar_direct_lookup",
+      "calendar_direct_mutation"
+    ],
+    "permission": "calendar",
+    "can_do": "일정을 읽고 만들고 고칠 수 있어요.",
+    "rules": [],
+    "reason": null,
+    "packs": [
+      "calendar"
+    ],
+    "scope": "calendars",
+    "permission_label": "캘린더"
+  },
+  "com.apple.MobileSMS": {
+    "route": "tool",
+    "service": "messages",
+    "tools": [
+      "messages_direct_lookup"
+    ],
+    "permission": "full_disk_access",
+    "can_do": "메시지를 읽을 수 있어요.",
+    "rules": [],
+    "reason": null,
+    "packs": [
+      "native-tools"
+    ]
+  },
+  "com.synology.CloudStation": {
+    "route": "tool",
+    "service": "synology",
+    "permission": "secret",
+    "can_do": "연결한 시놀로지 파일을 읽고 다룰 수 있어요.",
+    "rules": [],
+    "reason": null,
+    "packs": [
+      "files-docs"
+    ],
+    "scope": "folders"
+  },
+  "notion.id": {
+    "route": "tool",
+    "service": "notion",
+    "tools": [
+      "notion"
+    ],
+    "permission": "secret",
+    "can_do": "공유한 노션을 읽고 만들고 고칠 수 있어요.",
+    "rules": [],
+    "reason": null,
+    "packs": [
+      "notion"
+    ],
+    "scope": "notion_pages"
+  },
+  "com.tinyspeck.slackmacgap": {
+    "route": "tool",
+    "service": "slack_read",
+    "tools": [
+      "slack_history"
+    ],
+    "permission": "channel",
+    "can_do": "슬랙의 대화와 채널을 읽을 수 있어요.",
+    "rules": [],
+    "reason": null,
+    "packs": []
+  },
+  "com.citrolabs.ego.lite": {
+    "route": "cli",
+    "service": "ego_browser",
+    "tools": [
+      "ego_browser"
+    ],
+    "permission": "none",
+    "can_do": "로그인된 사이트를 읽고 승인 뒤 조작할 수 있어요.",
+    "rules": [
+      "로그인된 사이트를 읽을 수 있어요. 누르기·입력·보내기는 내가 승인할 때만 해요."
+    ],
+    "reason": null,
+    "packs": [
+      "ego-browser"
+    ]
+  },
+  "com.apple.shortcuts": {
+    "route": "sdef",
+    "service": null,
+    "tools": [
+      "mac_app"
+    ],
+    "permission": "apple_events",
+    "can_do": "단축어를 확인하고 승인 뒤 실행할 수 있어요.",
+    "rules": [],
+    "reason": null
+  },
+  "org.libreoffice.script": {
+    "route": "none",
+    "service": null,
+    "tools": [],
+    "permission": "none",
+    "can_do": "",
+    "rules": [],
+    "reason": "이 앱은 이번 연결에서 다른 프로그램이 쓸 수 있는 방법을 제공하지 않아요."
+  },
+  "com.microsoft.rdc.macos": {
+    "route": "none",
+    "service": null,
+    "tools": [],
+    "permission": "none",
+    "can_do": "",
+    "rules": [],
+    "reason": "이 앱은 이번 연결에서 다른 프로그램이 쓸 수 있는 방법을 제공하지 않아요."
+  },
+  "com.anthropic.claudefordesktop": {
+    "route": "none",
+    "service": null,
+    "tools": [],
+    "permission": "none",
+    "can_do": "",
+    "rules": [],
+    "reason": "이 앱은 이번 연결에서 다른 프로그램이 쓸 수 있는 방법을 제공하지 않아요."
+  },
+  "sh.paseo.desktop": {
+    "route": "none",
+    "service": null,
+    "tools": [],
+    "permission": "none",
+    "can_do": "",
+    "rules": [],
+    "reason": "이 앱은 이번 연결에서 다른 프로그램이 쓸 수 있는 방법을 제공하지 않아요."
+  },
+  "com.dynamicmacnotch.app": {
+    "route": "none",
+    "service": null,
+    "tools": [],
+    "permission": "none",
+    "can_do": "",
+    "rules": [],
+    "reason": "이 앱은 이번 연결에서 다른 프로그램이 쓸 수 있는 방법을 제공하지 않아요."
+  },
+  "com.apple.Terminal": {
+    "route": "excluded",
+    "service": null,
+    "tools": [],
+    "permission": "none",
+    "can_do": "",
+    "rules": [],
+    "reason": "시스템을 제어하는 앱은 연결 대상에서 제외했어요."
+  },
+  "com.apple.systempreferences": {
+    "route": "excluded",
+    "service": null,
+    "tools": [],
+    "permission": "none",
+    "can_do": "",
+    "rules": [],
+    "reason": "시스템을 제어하는 앱은 연결 대상에서 제외했어요."
+  },
+  "com.apple.Console": {
+    "route": "excluded",
+    "service": null,
+    "tools": [],
+    "permission": "none",
+    "can_do": "",
+    "rules": [],
+    "reason": "시스템을 제어하는 앱은 연결 대상에서 제외했어요."
+  },
+  "com.apple.ScreenSharing": {
+    "route": "excluded",
+    "service": null,
+    "tools": [],
+    "permission": "none",
+    "can_do": "",
+    "rules": [],
+    "reason": "시스템을 제어하는 앱은 연결 대상에서 제외했어요."
+  },
+  "com.apple.SystemProfiler": {
+    "route": "excluded",
+    "service": null,
+    "tools": [],
+    "permission": "none",
+    "can_do": "",
+    "rules": [],
+    "reason": "시스템을 제어하는 앱은 연결 대상에서 제외했어요."
+  },
+  "com.apple.ScriptEditor2": {
+    "route": "excluded",
+    "service": null,
+    "tools": [],
+    "permission": "none",
+    "can_do": "",
+    "rules": [],
+    "reason": "시스템을 제어하는 앱은 연결 대상에서 제외했어요."
+  },
+  "com.apple.keychainaccess": {
+    "route": "excluded",
+    "service": null,
+    "tools": [],
+    "permission": "none",
+    "can_do": "",
+    "rules": [],
+    "reason": "시스템을 제어하는 앱은 연결 대상에서 제외했어요."
+  },
+  "com.apple.ActivityMonitor": {
+    "route": "excluded",
+    "service": null,
+    "tools": [],
+    "permission": "none",
+    "can_do": "",
+    "rules": [],
+    "reason": "시스템을 제어하는 앱은 연결 대상에서 제외했어요."
+  },
+  "com.apple.reminders": {
+    "route": "excluded",
+    "service": null,
+    "tools": [],
+    "permission": "none",
+    "can_do": "",
+    "rules": [],
+    "reason": "사용자 결정으로 미리알림 기능을 제거했어요."
+  },
+  "com.pickle.client": {
+    "route": "none",
+    "service": null,
+    "tools": [],
+    "permission": "none",
+    "can_do": "",
+    "rules": [],
+    "reason": "이 앱은 이번 연결에서 다른 프로그램이 쓸 수 있는 방법을 제공하지 않아요."
+  },
+  "com.apple.AddressBook": {
+    "route": "tool",
+    "service": "contacts",
+    "tools": [
+      "contacts_direct_lookup",
+      "contacts_direct_mutation"
+    ],
+    "permission": "contacts",
+    "packs": [
+      "native-tools"
+    ],
+    "can_do": "연락처를 읽고 만들고 고칠 수 있어요.",
+    "rules": [],
+    "reason": null
+  },
+  "com.apple.finder": {
+    "route": "tool",
+    "service": "local_files",
+    "permission": "none",
+    "can_do": "고른 폴더의 파일을 읽고 다룰 수 있어요.",
+    "rules": [],
+    "reason": null,
+    "packs": [
+      "files-docs"
+    ],
+    "scope": "folders"
+  },
+  "service:obsidian-notes": {
+    "route": "tool",
+    "service": "obsidian_notes",
+    "tools": [
+      "notes_read",
+      "apple_notes_direct_lookup",
+      "apple_notes_direct_mutation"
+    ],
+    "permission": "none",
+    "can_do": "고른 보관함의 메모를 읽고 만들고 고칠 수 있어요.",
+    "rules": [],
+    "reason": null,
+    "packs": [
+      "notes"
+    ],
+    "scope": "obsidian_folders"
+  }
+}

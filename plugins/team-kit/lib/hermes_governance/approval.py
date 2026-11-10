@@ -223,7 +223,12 @@ def _tool_execution_guard(services, tool_name: str, args: dict[str, Any], next_c
         call_args = dict(call_args)
         permitted = services.request_approvals.allowed(services.host, tool_name, call_args, context)
         if permitted and services.request_approvals.consume(services.host, tool_name, call_args, context):
-            call_args['approved'] = True
+            # Contacts has no public approved parameter. The dispatcher and
+            # consumed request plan already authorize this exact native call.
+            if tool_name=='calendar_direct_mutation':context['_calendar_plan_approved']=True
+            if tool_name=='personal_work_bundle':context['_bundle_plan_approved']=True
+            if tool_name != 'contacts_direct_mutation':
+                call_args['approved'] = True
         call_args.pop('request_plan', None)
         args = call_args
     note_gate = services._notes_button_action(tool_name, call_args)
@@ -286,6 +291,9 @@ def _tool_execution_guard(services, tool_name: str, args: dict[str, Any], next_c
             allowed_tools.discard('messages_direct_lookup')
         if services.team.has_role(profile, 'personal'):
             allowed_tools |= services.LEAD_CHAT_TOOLS
+        from hermes_facility.app_registry import offered
+        from hermes_constants import get_hermes_home
+        allowed_tools |= offered(get_hermes_home())
         if tool_name not in allowed_tools:
             return services._error(
                 f"{services.PERSONAL_PROFILE} routed personal work permits only Calendar, "
@@ -316,6 +324,39 @@ def _tool_execution_guard(services, tool_name: str, args: dict[str, Any], next_c
         return result
     if (services.team.has_role(profile, 'personal') or (services.team.has_role(profile, 'work') and services.personal_scopes.config(services.host) is not None)) and browse_context in {"chat", "kanban"} and tool_name in services.LEAD_BROWSE_TOOLS | {"browser_navigate", "browser_snapshot"}:
         next_call = services._browsing(next_call, tool_name, context)
+    if tool_name=='personal_work_bundle':
+        from hermes_governance import bundle_undo
+        dispatched_bundle=next_call
+        def bundle_call(payload):
+            with bundle_undo.execution(payload,context):return dispatched_bundle(payload)
+        next_call=bundle_call
+    if tool_name=='calendar_direct_mutation':
+        from hermes_constants import get_hermes_home
+        from hermes_governance import calendar_undo,app_tools
+        dispatched=next_call
+        def calendar_call(payload):
+            with app_tools.native(tool_name,payload):
+                return calendar_undo.execute(get_hermes_home(),services.host,payload,dispatched,context)
+        next_call=calendar_call
+    if tool_name in ('apple_notes_direct_mutation','contacts_direct_mutation'):
+        from hermes_constants import get_hermes_home
+        from hermes_governance import memo_undo,contacts_undo
+        native_call=next_call
+        if tool_name=='contacts_direct_mutation':
+            from hermes_governance import app_tools
+            dispatched=native_call
+            def native_call(payload):
+                canonical,error=services._contacts_arguments(payload,mutation=True)
+                if error:return services._error(error,mutation_calls=0)
+                with app_tools.native(tool_name,canonical):return dispatched(payload)
+        journal=memo_undo if tool_name=='apple_notes_direct_mutation' else contacts_undo
+        def note_or_contact_call(payload):
+            from hermes_governance import app_tools
+            if tool_name=='apple_notes_direct_mutation':
+                with app_tools.native(tool_name,payload):
+                    return journal.execute(get_hermes_home(),services.host,payload,native_call,context)
+            return journal.execute(get_hermes_home(),services.host,payload,native_call,context)
+        next_call=note_or_contact_call
     task_id = services._governed_task_id(context)
     contract = services._active_contract(task_id, context.get("board"))
     decision = services.enforcement_decision(contract, services._settings())
@@ -398,31 +439,23 @@ def _gmail_mutation_plan(services, args: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 def _notes_button_action(services, tool_name: str, args: dict[str, Any]) -> str | None:
-    """Shared gate/execution classification; internal choice and recovery actions are excluded."""
-    actions = {
-        "apple_notes_direct_mutation": {"create", "update", "move", "delete"},
-    }
-    action = str(args.get("action") or "").strip().lower()
-    if action not in actions.get(tool_name, set()):
-        return None
-    if services._personal_role_problem(tool_name, args):
-        return "block"
-    profile = services.personal_roles.profile(services.host)
-    if not services._is_executor(profile) and not (services.team.has_role(profile, 'personal')
-            and services.personal_scopes.config(services.host) is not None):
-        return None
-    if (services.personal_scopes.background(services.host)
-            or services.get_session_env("HERMES_SESSION_PLATFORM", "").strip().lower() not in {"slack", "photon"}
-            or not services.get_session_env("HERMES_SESSION_CHAT_ID", "")
-            or not services.get_session_env("HERMES_SESSION_USER_ID", "")):
-        return "block"
-    return None if services._owner_chat_no_approval(tool_name, action, args) else "approve"
+    if tool_name != 'apple_notes_direct_mutation': return None
+    from hermes_governance import write_policy, app_tools
+    from hermes_constants import get_hermes_home
+    if services._personal_role_problem(tool_name,args): return 'block'
+    from hermes_governance import memo_undo
+    with memo_undo.binding(get_hermes_home(),args.get('source')):
+        backend='obsidian' if services.host.obsidian_notes.selected(services.host) else 'apple_notes'
+        decision=write_policy.gate(tool_name,args,owner=write_policy.owner_chat(get_hermes_home(),app_tools.env),
+                                   unattended=write_policy.background(app_tools.env),state={'source':backend})
+    return decision['action'] if decision else None
+
 
 def _one_button_plan(services, tool_name: str, action: str, args: dict[str, Any]) -> str:
     """The readable plan shown above a single 승인·거절 button for a personal write."""
     if tool_name == "apple_notes_direct_mutation":
         titles = {"create": "만들기", "update": "수정", "move": "이동", "delete": "삭제"}
-        lines = ["승인하면 아래 메모 변경을 실행합니다.", f"동작: {titles[action]}",
+        lines = ["승인하면 아래 메모 변경을 실행합니다.", f"동작: {titles.get(action, action)}",
                  f"폴더: {args.get('folder') or '기존 폴더 유지'}",
                  f"제목: {args.get('title') or '기존 제목 유지'}",
                  f"메모 ID: …{str(args.get('note_id') or '')[-24:]}"]
@@ -448,8 +481,6 @@ def _one_button_plan(services, tool_name: str, action: str, args: dict[str, Any]
         backup = '\n삭제 전 백업을 저장하며 백업 실패 시 삭제하지 않습니다.' if action in {'delete', 'group_delete'} else ''
         return (f"승인하면 {titles[action]}를 실행합니다.\n대상: {args.get('expected_name') or args.get('group_id') or ''} "
                 f"({args.get('contact_id') or args.get('group_id') or ''}){backup}\n변경: " + json.dumps(changes, ensure_ascii=False, sort_keys=True))
-    if tool_name == "gmail_direct" and action in services.GMAIL_LABEL_FILTER_WRITES:
-        return services._gmail_mutation_plan(args)
     if tool_name == "gmail_direct":
         lines = ["승인하면 메일을 보냅니다.", f"받는 사람: {args.get('to') or ''}"]
         if str(args.get("cc") or "").strip():
@@ -549,13 +580,16 @@ def _personal_mutation_approval_single(services,
         payload, error = services._contacts_arguments(args, mutation=True)
         if error:
             return {'action': 'block', 'message': error}
-        if payload['action'] in {'create', 'import_vcf', 'group_create', 'group_add'}:
-            return None
-        digest = hashlib.sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True).encode()).hexdigest()[:16]
-        return {'action': 'approve', 'message': services._one_button_plan(tool_name, payload['action'], payload),
-                'rule_key': f'contacts-mutation:{digest}:{tool_call_id or turn_id or digest}'}
-    if not services._is_executor(profile) and not (services.team.has_role(profile, 'personal')
-            and services.personal_scopes.config(services.host) is not None):
+        from hermes_governance import write_policy,app_tools
+        from hermes_constants import get_hermes_home
+        decision=write_policy.gate(tool_name,payload,owner=write_policy.owner_chat(get_hermes_home(),app_tools.env),
+                                   unattended=write_policy.background(app_tools.env))
+        if decision and decision['action']=='approve':decision['message']=services._one_button_plan(tool_name,payload['action'],payload)
+        return decision
+    from hermes_facility.app_registry import tool_granted
+    from hermes_constants import get_hermes_home
+    if (tool_granted(get_hermes_home(),tool_name) is not True and not services._is_executor(profile)
+            and not (services.team.has_role(profile,'personal') and services.personal_scopes.config(services.host) is not None)):
         return None
     if tool_name == "personal_work_bundle":
         if 'capture' in args or 'scope_change' in args:
@@ -567,91 +601,24 @@ def _personal_mutation_approval_single(services,
         approved_args = services._normalize_personal_bundle_args(args)
         if services._bundle_completes(approved_args):
             return None  # finishes the Common ID like common_work_complete, which needs no approval
-        operations, existing_sources, validation_error = services._validate_bundle(approved_args)
-        if validation_error:
-            return {
-                "action": "block",
-                "message": f"승인 요청 전 개인업무 묶음 검증에 실패했습니다: {validation_error}",
-            }
-        if not services._bundle_requires_approval(operations, existing_sources):
-            return None
-        canonical = json.dumps(
-            approved_args, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
-        )
-        digest = hashlib.sha256(canonical.encode()).hexdigest()[:16]
-        message_id = services.get_session_env("HERMES_SESSION_MESSAGE_ID", "").strip()
-        thread_id = services.get_session_env("HERMES_SESSION_THREAD_ID", "").strip()
-        scope = message_id or str(turn_id or thread_id or tool_call_id or digest)
-        # The user already saw this exact bundle at the gate and has now answered 승인 in the thread:
-        # that is the approval, not a reason to ask again.
-        if services._approved_after_the_gate(digest, session_id=str(session_id or "")):
-            return None
-        services._note_gate_shown(digest)
-        now = time.monotonic()
-        with services._PERSONAL_BUNDLE_APPROVAL_LOCK:
-            expired = [
-                key for key, created_at in services._PERSONAL_BUNDLE_APPROVAL_SCOPES.items()
-                if now - created_at > 3600
-            ]
-            for key in expired:
-                services._PERSONAL_BUNDLE_APPROVAL_SCOPES.pop(key, None)
-            if scope in services._PERSONAL_BUNDLE_APPROVAL_SCOPES and not _.get('request_plan_scope'):
-                return {
-                    "action": "block",
-                    "message": (
-                        "이 요청의 개인업무 승인은 이미 한 번 요청됐습니다. "
-                        "재승인을 요청하지 말고 기존 실행 결과나 실패 원인을 보고하세요."
-                    ),
-                }
-            services._PERSONAL_BUNDLE_APPROVAL_SCOPES[scope] = now
-        delete_only = bool(operations) and all(
-            operation["action"] == "delete" for operation in operations
-        )
-        services._remember_pending_personal_owner("personal_work_bundle", approved_args)
-        if not any(operation["action"] == "delete" for operation in operations):
-            # Only reachable for a bundle that changes an existing item after reading text messages,
-            # the web or a file: show a readable plan.
-            origin = ("문자에서 뽑은" if services._messages_lookup_in_request()
-                      else "웹에서 읽은 내용으로 만든" if services._web_read_in_request()
-                      else "파일에서 읽은 내용으로 만든")
-            return {
-                "action": "approve",
-                # "승인하면" is the wording the ddots chat puts its 승인·거절 buttons under.
-                "message": f"{origin} 항목입니다. 승인하면 전체를 한 번에 실행합니다:\n"
-                + services._bundle_plan_lines(operations),
-                "rule_key": f"personal-bundle:{scope}:{digest}",
-            }
-        return {
-            "action": "approve",
-            # Readable targets, and the wording the ddots chat puts its buttons under.
-            "message": ("승인하면 삭제합니다:\n" if delete_only else "삭제가 들어 있습니다. 승인하면 전체를 한 번에 실행합니다:\n")
-            + services._bundle_plan_lines(operations),
-            "rule_key": f"personal-bundle:{scope}:{digest}",
-        }
-    if tool_name == "gmail_direct" and str(args.get("action") or "").strip().lower() in services.GMAIL_LABEL_FILTER_WRITES:
-        if problem := services.personal_scopes.role_problem(services.host, "gmail_direct", args):
-            return {"action": "block", "message": problem}
-        if services.personal_scopes.background(services.host):
-            return {"action": "block", "message": "PERSONAL_SCOPE_BACKGROUND_REFUSED: 예약·배경에서 라벨·필터 호출은 허용되지 않는다."}
-        if (services.get_session_env("HERMES_SESSION_PLATFORM", "") not in {"slack", "photon"}
-                or not services.get_session_env("HERMES_SESSION_CHAT_ID", "") or not services.get_session_env("HERMES_SESSION_USER_ID", "")):
-            return {"action": "block", "message": "PERSONAL_SCOPE_OWNER_CHAT_REQUIRED: 라벨·필터는 인증된 소유자 대화에서만 가능하다."}
-        try:
-            services.gmail_rules.validate_operation(str(args["action"]).strip().lower(), args)
-        except services.gmail_rules.RuleError as exc:
-            return {"action": "block", "message": str(exc)}
-        if failure := services._gmail_scope_preflight(args):
-            return {"action": "block", "message": json.dumps(failure, ensure_ascii=False)}
+        from hermes_governance import bundle_undo
+        try:return bundle_undo.gate(get_hermes_home(),services.host,args,dict(_,tool_call_id=tool_call_id,turn_id=turn_id,session_id=session_id))
+        except (ValueError,OSError) as error:return {'action':'block','message':str(error)}
     action = str(args.get("action") or "").strip().lower()
-    # 2026-10-21 사용자 결정: 메일·일정 쓰기는 미리보기·글 승인 없이 버튼 승인 한 번으로 끝낸다.
-    # 소유자가 대화에서 시킨 일정 만들기·고치기와 색 지정은 승인 없이 실행한다.
+    # Calendar classification and dynamic recurrence checks share write_policy.
     if tool_name in {"calendar_direct_mutation", "google_calendar_color_set"} or (
-            tool_name == "gmail_direct" and action in {"send", *services.GMAIL_LABEL_FILTER_WRITES}):
+            tool_name == "gmail_direct" and action in {"send"}):
         if services.personal_scopes.background(services.host) or not chat:
             return {"action": "block", "message": (
                 "PERSONAL_SCOPE_OWNER_CHAT_REQUIRED: 메일·일정 쓰기는 인증된 소유자 대화에서만 가능하다.")}
-        if tool_name == "google_calendar_color_set" or (tool_name == "calendar_direct_mutation" and action != "delete"):
-            return None
+        if tool_name=='calendar_direct_mutation':
+            from hermes_governance import calendar_undo
+            try:return calendar_undo.gate(get_hermes_home(),services.host,args,dict(_,tool_call_id=tool_call_id,turn_id=turn_id,session_id=session_id))
+            except Exception as error:return {'action':'block','message':str(error) if isinstance(error,ValueError) else 'APP_CALENDAR_PREFLIGHT_FAILED'}
+        if tool_name == 'google_calendar_color_set':
+            from hermes_governance import write_policy,app_tools
+            return write_policy.gate(tool_name,args,owner=write_policy.owner_chat(get_hermes_home(),app_tools.env),
+                unattended=write_policy.background(app_tools.env))
         exact_payload = {key: value for key, value in args.items() if key != "approved"}
         digest = hashlib.sha256(json.dumps(
             exact_payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
@@ -674,33 +641,10 @@ def _personal_mutation_approval_single(services,
         ).encode()).hexdigest()[:16]
         return {"action": "approve", "message": services._one_button_plan(tool_name, action, args),
                 "rule_key": f"personal-mutation:{tool_name}:{digest}:{tool_call_id or turn_id or digest}"}
-    # Keep create exemptions and internal choice/recovery approval behavior unchanged.
-    if (tool_name == "apple_notes_direct_mutation"
-            and services._owner_chat_no_approval(tool_name, action, args)):
-        return None
-    if args.get("approved") is not True:
-        return None
-    mutation = tool_name == "apple_notes_direct_mutation"
-    if not mutation:
-        return None
-
-    exact_payload = {key: value for key, value in args.items() if key != "approved"}
-    canonical = json.dumps(
-        exact_payload,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    )
-    digest = hashlib.sha256(canonical.encode()).hexdigest()[:16]
-    call_scope = str(tool_call_id or turn_id or digest)
-    message = f"정확한 외부 변경을 승인해야 합니다: {tool_name} {canonical}"
-    return {
-        "action": "approve",
-        "message": message,
-        "rule_key": f"personal-mutation:{tool_name}:{digest}:{call_scope}",
-    }
+    return None
 
 def _personal_mutation_approval(services, tool_name, args, tool_call_id='', turn_id='', session_id='', **context):
+    from hermes_constants import get_hermes_home
     context.update(tool_call_id=tool_call_id, turn_id=turn_id, session_id=session_id)
     if not isinstance(args, dict):
         return services._personal_mutation_approval_single(tool_name, args, **context)
@@ -708,10 +652,16 @@ def _personal_mutation_approval(services, tool_name, args, tool_call_id='', turn
         if args.get('action') in services.full_mail_tools.MAIL_READS:
             problem = services.full_mail_tools.problem(services.host, args)
             return {'action': 'block', 'message': problem} if problem else None
-        if services.request_approvals.allowed(services.host, tool_name, args, context):
-            return None
         decision = services.full_mail_tools.approval(services.host, args, context)
+        if services.request_approvals.allowed(services.host, tool_name, args, context) and (decision is None or decision.get('action')=='approve'):
+            return None
         return services.request_approvals.gate(services.host, tool_name, args, decision, context)
+    if tool_name=='personal_work_bundle' and not any(k in args for k in ('capture','scope_change')) and not services._bundle_completes(services._normalize_personal_bundle_args(args)):
+        from hermes_governance import bundle_undo
+        try:decision=bundle_undo.gate(get_hermes_home(),services.host,args,context)
+        except (ValueError,OSError) as error:return {'action':'block','message':str(error)}
+        if services.request_approvals.allowed(services.host,tool_name,args,context):return None
+        return services.request_approvals.gate(services.host,tool_name,args,decision,context)
     if services.request_approvals.allowed(services.host, tool_name, args, context):
         return None
     clean = {k: v for k, v in args.items() if k != 'request_plan'}
@@ -727,6 +677,10 @@ def _personal_owner_error(services, tool_name: str) -> str | None:
     ).strip()
     if problem := services._personal_role_problem(tool_name, {} if tool_name != 'gmail_direct' else {'action': 'read'}):
         return services._error(problem, **fields)
+    from hermes_facility.app_registry import tool_granted
+    from hermes_constants import get_hermes_home
+    if tool_granted(get_hermes_home(), tool_name) is True:
+        return None  # role_problem already proved owner authority; per-call containers remain guarded.
     if services.team.has_role(profile, 'work') and tool_name == 'messages_direct_lookup':
         return services._error('Messages lookup remains with the read-only oversight profile.')
     if (services.team.has_role(profile, 'personal') and services.personal_scopes.config(services.host) is not None

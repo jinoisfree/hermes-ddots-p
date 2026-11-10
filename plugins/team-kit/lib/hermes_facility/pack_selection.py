@@ -21,7 +21,15 @@ def selected(requested, platform=None):
             enabled.update(available[name].get('requires', {}).get('packs', []))
         if enabled - available.keys(): raise ValueError('missing required pack')
         changed = enabled != before
-    return enabled
+    platform = sys.platform if platform is None else platform
+    unavailable = {name for name in enabled if available[name].get('platforms', {}).get('only')
+                   and platform not in available[name]['platforms']['only']}
+    while True:
+        extra = {name for name in enabled - unavailable
+                 if set(available[name].get('requires', {}).get('packs', [])) & unavailable}
+        if not extra: break
+        unavailable |= extra
+    return enabled - unavailable
 
 
 class PackContext:
@@ -38,13 +46,15 @@ class PackContext:
         if self._unavailable: return None
         name = kwargs.get('name') or (args[0] if args else None)
         owners = {key for key, pack in self._packs.items() if name in pack['tools']}
-        if owners and not owners.intersection(self._enabled): return None
+        if owners and not owners.intersection(self._enabled) and name != 'mac_app': return None
         if sys.platform != 'darwin' and (str(name).startswith(('apple_notes_', 'contacts_direct_', 'messages_direct_')) or name == 'file_trash'):
             return None
         return self._context.register_tool(*args, **kwargs)
 
 
 def scoped_context(context):
+    from hermes_facility.app_registry import runtime_context
+    context = runtime_context(context)
     try:
         config = context.get_config('packs', None)
     except Exception:

@@ -27,6 +27,12 @@ import SQLite3
         return nil
     }
     static func main() throws {
+        let configRoot = FileManager.default.temporaryDirectory.appendingPathComponent("ddots-relay-view-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: configRoot, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: configRoot) }
+        setenv("DDOTS_CONFIG_ROOT", configRoot.path, 1)
+        let view: [String: Any] = ["schemaVersion": 1, "members": [["profile": "default", "displayName": "Root From Roster"], ["profile": "archive-helper", "displayName": "Roster Knight"]], "routing": [:]]
+        try JSONSerialization.data(withJSONObject: view).write(to: configRoot.appendingPathComponent("ddots-config.json"))
         // Wire format and settings
         var buffer = Data("{\"op\":\"hello\",\"token\":\"t\"}\n{\"op\":\"wat".utf8)
         var frames = RelayFrame.take(from: &buffer)
@@ -88,6 +94,11 @@ import SQLite3
         let knight = home.appendingPathComponent("profiles/archive-helper")
         execute(knight.appendingPathComponent("state.db"), schema + ["INSERT INTO messages VALUES (1, 's1', 'assistant', '정상.', NULL, \(now - 500))"])
         try "display_name: 보관담당\n".write(to: knight.appendingPathComponent("profile.yaml"), atomically: true, encoding: .utf8)
+
+        let absentView = DdotsConfig(root: home.appendingPathComponent("absent-view"), hermes: home, home: home)
+        let unlistedStores = HermesBridge(home: home, makesImages: false, config: absentView).stores()
+        check(unlistedStores.first { $0.profile == "default" }?.name == "Hermes"
+              && unlistedStores.first { $0.profile == "archive-helper" }?.name == "archive-helper", "without an exported member, default uses Hermes and others use their ID")
 
         let portraitFile = home.appendingPathComponent("kept/portraits.json")
         let portraits = RelayPortraits(url: portraitFile)
@@ -271,8 +282,8 @@ import SQLite3
         check(first.status == .connected(stores: 2), "status names both records")
         check(client.lastReceivedAt != nil, "received state carries a time for offline presentation")
         check(first.messages.map(\.body) == ["합성 질문", "합성 답변", "정상."] && !first.messages.contains { $0.body == "SLACK ONLY" }, "only the iMessage thread is relayed, in time order")
-        check(first.messages[1].speaker == "위키담당" && first.messages[2].speaker == "보관담당" && first.messages[2].profile == "archive-helper", "speaker names and profiles are kept")
-        check(first.characters.map(\.name) == ["위키담당", "보관담당"], "characters are relayed in order")
+        check(first.messages[1].speaker == "Root From Roster" && first.messages[2].speaker == "Roster Knight" && first.messages[2].profile == "archive-helper", "speaker names and profiles are kept")
+        check(first.characters.map(\.name) == ["Root From Roster", "Roster Knight"], "characters are relayed in order")
         check(first.avatars["default"]?.hasProfileColor == true && first.avatars["archive-helper"]?.hasProfileColor == false, "profile colors are relayed")
         check(first.avatars["default"]?.image != nil && first.avatars["archive-helper"]?.image == nil, "profile photo is relayed as a thumbnail")
         check(first.typing.isEmpty && first.receipts.isEmpty, "old thread shows no typing and no unread mark was asked for")
@@ -301,7 +312,7 @@ import SQLite3
             "UPDATE sessions SET chat_id='C1', thread_id='100.1' WHERE id='s2'",
             "CREATE TABLE session_turn_leases (conversation_id TEXT, holder TEXT, acquired_at REAL, expires_at REAL)",
             "INSERT INTO session_turn_leases VALUES ('s2', 'w', \(leaseAt), \(leaseAt + 600))"])
-        let slackDelay = wait(3) { client.slackActivity.writers == [SlackActivity.Writer(profile: "default", name: "위키담당", room: "C1", thread: "100.1", since: leaseAt)] }
+        let slackDelay = wait(3) { client.slackActivity.writers == [SlackActivity.Writer(profile: "default", name: "Root From Roster", room: "C1", thread: "100.1", since: leaseAt)] }
         check(slackDelay != nil, "sharing Mac's Slack writer arrives: \(client.slackActivity)")
         check(client.slackActivity.recent.first.map { $0.room + ":" + $0.thread } == "C1:100.1", "recent Slack threads arrive too")
         execute(home.appendingPathComponent("state.db"), ["DELETE FROM session_turn_leases"])

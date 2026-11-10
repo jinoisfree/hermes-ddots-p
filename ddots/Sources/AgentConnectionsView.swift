@@ -15,6 +15,13 @@ final class AgentConnectionsModel: ObservableObject {
     @Published var results: [String: ActionNotice] = [:]
     @Published var undoable: [String: Date] = [:]
     @Published var secretEntry: SecretEntry?
+    var appSettingsReturn: (EmployeeApp, String)?
+    var appSecretActive = false
+    @Published var appDetail: EmployeeApp?
+    @Published var appReply: AppConnectionReply?
+    @Published var appWorking = false
+    @Published var appFailure: String?
+    @Published var appVerb = "connect"
     @Published var apps: InstalledAppDocument?
     @Published var appsError: String?
     @Published var appsLoading = false
@@ -37,6 +44,8 @@ final class AgentConnectionsModel: ObservableObject {
     var starts: [String: Date] = [:]
     var opened: Set<String> = []
     private var refreshAgain = false
+    private var appsRefreshAgain = false
+    var appRevision = 0
     init(remote: RemoteHermes?, readOnly: Bool, fixture: AgentConnectionDocument? = nil,
          runCommand: Runner? = nil, openLogin: @escaping (URL) -> Bool = { NSWorkspace.shared.open($0) },
          openSettings: @escaping (URL) -> Bool = { NSWorkspace.shared.open($0) },
@@ -86,18 +95,35 @@ final class AgentConnectionsModel: ObservableObject {
     /// The installed-app list belongs to the Mac that runs Hermes; another Mac does not show or read it.
     var showsInstalledApps: Bool { !readOnly }
     func loadApps() {
-        guard showsInstalledApps, !appsLoading else { return }
+        guard showsInstalledApps else { return }
+        guard !appsLoading else { appsRefreshAgain = true; return }
         appsLoading = true
+        let revision = appRevision
         let run = runCommand
         DispatchQueue.global(qos: .utility).async { [weak self] in
-            let result = Result { try InstalledAppDocument.decode(run(ConnectionCommands.apps, nil, 30)) }
+            let result = Result { try InstalledAppDocument.decode(run(AppConnectionCommands.apps(selfID: Bundle.main.bundleIdentifier ?? AppIdentity.bundleID), nil, 30)) }
             DispatchQueue.main.async {
                 guard let self else { return }
                 self.appsLoading = false
                 switch result {
-                case .success(let value): self.apps = value; self.appsError = nil
+                case .success(let value):
+                    if revision == self.appRevision && !self.appWorking {
+                        self.apps = value; self.appsError = nil
+                        if let profile = self.selection, let key = self.appDetail?.key,
+                           let progress = value.agents?.first(where: { $0.profile == profile })?.all.first(where: { $0.key == key })?.progress {
+                            // Keep the command's fresh choices/error instructions while the
+                            // facility reports the same completed steps. A changed step or a
+                            // reopened detail takes the newly read progress.
+                            let current = self.appReply
+                            if current == nil || current?.acceptsProgress(progress) == true {
+                                self.appReply = progress
+                                self.appVerb = progress.next.action ?? "connect"
+                            }
+                        }
+                    }
                 case .failure(let error): self.appsError = InstalledAppsText.unreadable + error.localizedDescription
                 }
+                if self.appsRefreshAgain { self.appsRefreshAgain = false; self.loadApps() }
             }
         }
     }
@@ -172,7 +198,7 @@ final class AgentConnectionsModel: ObservableObject {
         timers.removeValue(forKey: account)?.invalidate(); reconnecting.remove(account)
         notices[account] = text; refresh()
     }
-    func close() { timers.values.forEach { $0.invalidate() }; timers = [:]; reconnecting = []; if secretEntry != nil { cancelSecret() } }
+    func close() { updateAppSecretScope(false); appDetail = nil; appReply = nil; timers.values.forEach { $0.invalidate() }; timers = [:]; reconnecting = []; if secretEntry != nil { cancelSecret() } }
 }
 
 struct AgentConnectionsView: View {
@@ -191,7 +217,7 @@ struct AgentConnectionsView: View {
             VStack(alignment: .leading, spacing: 8) {
                 Text("에이전트").font(.caption).foregroundColor(.secondary).padding(.horizontal, 8).padding(.bottom, 4)
                 ForEach(model.document?.agents ?? []) { agent in
-                    Button { model.selection = agent.profile; model.detail = nil } label: {
+                    Button { model.selection = agent.profile; model.detail = nil; model.appDetail = nil; model.appReply = nil } label: {
                         HStack(spacing: 10) {
                             avatar(agent, size: 28)
                             Text(agent.display_name).font(.system(size: 12, weight: .medium)).lineLimit(1)
@@ -232,7 +258,9 @@ struct AgentConnectionsView: View {
                         }
                         if let error = model.error { Text(error).foregroundColor(.red).textSelection(.enabled) }
                         if let agent = selected {
-                            if let item = agent.connections.first(where: { $0.id == model.detail }) {
+                            if let app = model.appDetail, !model.readOnly {
+                                EmployeeAppDetail(model: model, app: app, agent: agent)
+                            } else if let item = agent.connections.first(where: { $0.id == model.detail }) {
                                 detail(item, agent: agent)
                             } else {
                                 header(agent)
@@ -241,8 +269,10 @@ struct AgentConnectionsView: View {
                                     summary(agent, states: [.needsReconnect, .notConnected], title: "다시 연결 필요", color: .yellow)
                                     summary(agent, states: [.unknown], title: "확인 안 됨", color: .gray)
                                 }
+                                if !model.readOnly { EmployeeAppsSection(model: model, profile: agent.profile) }
                                 ForEach(groups, id: \.0.rawValue) { group, title in
-                                    let items = agent.connections.filter { $0.group == group }
+                                    let appServices = Set(model.apps?.agents?.first(where: { $0.profile == agent.profile })?.all.compactMap(\.service) ?? [])
+                                    let items = agent.connections.filter { $0.group == group && (model.readOnly || group == .channel || !appServices.contains($0.service)) }
                                     if !items.isEmpty {
                                         VStack(alignment: .leading, spacing: 6) {
                                             Text(title).font(.caption.weight(.semibold)).foregroundColor(.secondary)
@@ -262,7 +292,10 @@ struct AgentConnectionsView: View {
             }
         }.frame(minWidth: 760, minHeight: 500)
             .background(dark ? Color(white: 0.118) : Color(nsColor: .underPageBackgroundColor))
-            .onAppear { model.refresh() }
+            .onAppear { model.refresh(); model.loadApps() }
+            .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+                model.refresh(); model.loadApps(); model.resumeAppSettings()
+            }
             .sheet(item: $model.secretEntry) { entry in
                 SecretEntryView(entry: entry, input: entry.input, submit: { model.submitSecret($0) }, cancel: { model.cancelSecret() })
             }
@@ -278,9 +311,9 @@ struct AgentConnectionsView: View {
             avatar(agent, size: 44)
             VStack(alignment: .leading, spacing: 3) {
                 Text(agent.display_name).font(.system(size: 18, weight: .bold))
-                let scopes = Set(agent.connections.compactMap { $0.scope?.rawValue })
-                if scopes == ["personal"] { Text("개인비서 · 개인 범위").font(.caption).foregroundColor(.secondary) }
-                else if scopes == ["company"] { Text("업무비서 · 회사 범위").font(.caption).foregroundColor(.secondary) }
+                if let hint = model.apps?.agents?.first(where: { $0.profile == agent.profile })?.role_hint {
+                    Text(hint).font(.caption).foregroundColor(.secondary)
+                }
             }
             Spacer(minLength: 8)
             Text(ConnectionTime.label(model.document?.checked_at)).font(.caption).foregroundColor(.secondary)
@@ -299,7 +332,7 @@ struct AgentConnectionsView: View {
             .font(.caption).foregroundColor(notice.success ? .green : .red).fixedSize(horizontal: false, vertical: true)
     }
     private var refreshButton: some View {
-        Button(model.loading ? "확인 중…" : model.readOnly ? "새로 받기" : "새로 확인") { model.refresh() }.disabled(model.loading)
+        Button(model.loading ? "확인 중…" : model.readOnly ? "새로 받기" : "새로 확인") { model.refresh(); model.loadApps() }.disabled(model.loading)
     }
     private func summary(_ agent: AgentConnectionProfile, states: [AgentConnectionItem.State], title: String, color: Color) -> some View {
         let count = agent.connections.filter { states.contains($0.state) }.count

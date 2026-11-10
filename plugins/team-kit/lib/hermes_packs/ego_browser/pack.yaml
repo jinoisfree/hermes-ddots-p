@@ -1,0 +1,34 @@
+{
+  "schema_version": 1,
+  "id": "ego-browser",
+  "entrypoint": "hermes_packs.ego_browser",
+  "requires": {
+    "packs": [],
+    "services": [
+      "role_roster",
+      "owner_vault",
+      "account_scope",
+      "tool_approval"
+    ],
+    "optional_accounts": []
+  },
+  "safety": {
+    "read": "immediate",
+    "reversible_write": "journal_then_report",
+    "delete": "approval",
+    "external_action": "approval",
+    "background_write": "deny"
+  },
+  "platforms": {
+    "only": [
+      "darwin"
+    ]
+  },
+  "settings": {},
+  "compatibility": {
+    "hosts": [
+      "team-kit"
+    ],
+    "registration": "host"
+  }
+}

@@ -40,6 +40,12 @@ def required_folders():
 
 
 def settings():
+    from hermes_facility import app_scope, app_registry
+    home = app_scope.bound_home()
+    if home is not None and app_registry.explicit(app_registry.root_of(home), app_registry.profile_of(home)):
+        selected = app_scope.require_selected('obsidian_folders')
+        data = app_registry.values(app_registry.root_of(home), app_registry.profile_of(home)).get('service:obsidian-notes', {})
+        return {'enabled': app_scope.note_source() == 'obsidian', 'vault': data.get('vault'), 'folders': selected}
     import hermes_yaml
     try:
         value = hermes_yaml.safe_load(CONFIG.read_text())['plugins']['entries']['team-delegation']['settings'].get('obsidian_notes', {})
@@ -120,11 +126,19 @@ class Store:
         raw=Path(root or cfg.get('vault','')).expanduser()
         if root is None and (not cfg.get('enabled') or not cfg.get('vault')): raise ValueError('OBSIDIAN_NOT_ENABLED')
         if not raw.is_absolute() or not raw.is_dir(): raise ValueError('OBSIDIAN_VAULT_UNAVAILABLE')
-        self.root=raw.resolve();self.state=Path(state or STATE)
+        from hermes_facility.app_scope import bound_home
+        home = bound_home() if root is None else None
+        self.root=raw.resolve();self.state=Path(state or (home/'state/obsidian-notes' if home is not None else STATE))
+        self.allowed = cfg.get('folders')
+
+    def allowed_path(self, relative):
+        p = Path(relative)
+        return self.allowed is None or any(p == Path(f) or Path(f) in p.parents for f in self.allowed)
 
     def path(self, relative, *, system=False):
         p=Path(relative)
         if p.is_absolute() or '..' in p.parts or not p.parts: raise ValueError('OBSIDIAN_PATH_REFUSED')
+        if not system and not self.allowed_path(p): raise ValueError('APP_OUT_OF_SCOPE')
         if not system and any(x.startswith('.') or x in EXCLUDED for x in p.parts): raise ValueError('OBSIDIAN_PATH_REFUSED')
         target=self.root/p
         if not target.resolve().is_relative_to(self.root) or any((self.root/Path(*p.parts[:i])).is_symlink() for i in range(1,len(p.parts)+1)):
@@ -174,7 +188,9 @@ class Store:
             dirs[:]=[n for n in dirs if not n.startswith('.') and n not in EXCLUDED and not (Path(base)/n).is_symlink()]
             for name in names:
                 if name.endswith('.md') and not name.endswith('.excalidraw.md') and not name.startswith('.'):
-                    p=Path(base)/name;self.path(p.relative_to(self.root));found.append(p)
+                    p=Path(base)/name
+                    if not self.allowed_path(p.relative_to(self.root)): continue
+                    self.path(p.relative_to(self.root));found.append(p)
         return sorted(found)
 
     def scan(self, index):
@@ -224,14 +240,16 @@ class Store:
     def url(self,path):return 'obsidian://open?vault='+quote(self.root.name,safe='')+'&file='+quote(str(path),safe='')
 
     def folder(self,value):
-        if value=='.':return '.'
-        required_folders()
+        if value=='.':
+            if not self.allowed_path('.'): raise ValueError('APP_OUT_OF_SCOPE')
+            return '.'
+        if self.allowed is None: required_folders()
         value={INBOX_LABEL:INBOX_FOLDER,'complete':COMPLETE_FOLDER,'Complete':COMPLETE_FOLDER}.get(value,value)
         p=self.path(value);return str(p.relative_to(self.root))
 
     def metadata(self,sid=None):
-        required_folders()
-        folders={INBOX_FOLDER,TASKS_FOLDER,COMPLETE_FOLDER}
+        if self.allowed is None: required_folders()
+        folders={INBOX_FOLDER,TASKS_FOLDER,COMPLETE_FOLDER} if self.allowed is None else set(self.allowed)
         with materialize():
             for f in self.files():folders.add(str(f.parent.relative_to(self.root)))
         def row(folder):return {'id':'obsidian-folder:'+folder,'name':folder,'account':'obsidian:'+self.root.name}
@@ -304,16 +322,33 @@ class Store:
 
     def restore(self,sid,snapshot):
         data=json.loads(snapshot)
-        if data.get('id')!=sid:raise ValueError('OBSIDIAN_ROLLBACK_ID_MISMATCH')
-        current=self.read(sid)
+        if data.get('id')!=sid or data.get('backend')!='obsidian':raise ValueError('OBSIDIAN_ROLLBACK_ID_MISMATCH')
+        text=data['text'];matches=MARK.findall(text)
+        if matches and matches!=[sid]:raise ValueError('OBSIDIAN_ROLLBACK_ID_MISMATCH')
+        target=self.path(data['path'])
         with self.locked() as index:
+            found=self.scan(index);current=found.get(sid)
+            if current is None:raise ValueError('OBSIDIAN_ROLLBACK_CONCURRENT_CHANGE')
+            previous,observed=current
+            if previous==target and observed==text:return self.snapshot(sid,target,text)
             last=next((x for x in reversed(index['history']) if x['id']==sid and x.get('status')=='done'),None)
-            if not last or last.get('after_hash')!=current['revision']:raise ValueError('OBSIDIAN_ROLLBACK_CONCURRENT_CHANGE')
-        oldmeta,oldbody=split(data['text'])
-        path=Path(data['path'])
-        # Restore links to their original target folder without rebasing them twice.
-        if path.parent!=Path(current['path']).parent:
-            current_body=current['markdown']
-            moved=self.write(sid,current_body,before=current,title=path.stem,folder=str(path.parent))
-            current=moved
-        return self.write(sid,MARK.sub('',oldbody),before=current,title=path.stem,folder=str(path.parent),properties=oldmeta)
+            if (not last or last.get('after_hash')!=digest(observed) or
+                    any(r['id']==sid and r.get('status')=='pending' for r in index['history'])):
+                raise ValueError('OBSIDIAN_ROLLBACK_CONCURRENT_CHANGE')
+            if target!=previous and target.exists():raise ValueError('OBSIDIAN_DESTINATION_EXISTS')
+            target.parent.mkdir(parents=True,exist_ok=True)
+            # Restore the exact snapshot. A normal write would rewrite modified time
+            # and rebase attachment links that already refer to the original folder.
+            record={'id':sid,'before_path':str(previous.relative_to(self.root)),
+                    'before':observed,'after_path':data['path'],'after_hash':digest(text),'at':stamp(),'status':'pending'}
+            if previous.read_text()!=observed:raise ValueError('OBSIDIAN_CONCURRENT_CHANGE')
+            index['history'].append(record);self.trim(index)
+            self.atomic(self.state/'index.json',json.dumps(index,ensure_ascii=False,indent=2)+'\n')
+            if target==previous:self.atomic(target,text)
+            else:
+                with target.open('x') as stream:stream.write(text);stream.flush();os.fsync(stream.fileno())
+                if previous.read_text()!=observed:raise ValueError('OBSIDIAN_MOVE_SOURCE_CHANGED')
+                previous.unlink()
+            if target.read_text()!=text:raise ValueError('OBSIDIAN_WRITE_UNVERIFIED')
+            index['notes'][sid]={'path':data['path'],'deleted':False};record['status']='done'
+            return self.snapshot(sid,target,text)

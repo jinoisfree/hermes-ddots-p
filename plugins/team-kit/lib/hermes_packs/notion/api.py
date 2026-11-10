@@ -173,6 +173,15 @@ def _http_open(call, timeout):
 
 
 def request(home: Path, method: str, path: str, body: Any = None, *, opener: Any = None, timeout: int = 20, content_type: str | None = None, version: str | None = None) -> dict:
+    from hermes_facility.app_scope import notion_request
+    try:
+        return notion_request(method, path, body, lambda verb, route, payload: _request(
+            home, verb, route, payload, opener=opener, timeout=timeout, content_type=content_type, version=version))
+    except ValueError as exc:
+        raise NotionError(str(exc)) from None
+
+
+def _request(home: Path, method: str, path: str, body: Any = None, *, opener: Any = None, timeout: int = 20, content_type: str | None = None, version: str | None = None) -> dict:
     work_scope_guard({'path':path,'body':body if not isinstance(body,bytes) else None})
     secret = token(home)
     if not secret:
@@ -633,18 +642,10 @@ def _shown(given: Any) -> str:
     return "\n".join(parts[:15]) + (f"\n… 외 {len(parts) - 15}개" if len(parts) > 15 else "")
 
 
-def _no_approval(config):
-    value = config.get('no_approval', []) if isinstance(config, dict) else []
-    if not isinstance(value, list) or any(not isinstance(name, str) or name not in {'create', 'update', 'append', 'edit'} for name in value):
-        return set(), 'notion.no_approval 설정 오류: create·update·append·edit 목록만 허용하므로 승인을 유지한다.'
-    return set(value), ''
-
-
 def approval_required(config, args):
-    allowed, _ = _no_approval(config)
-    ops = args['operations'] if args['action'] == 'batch' else [args]
-    return not (all(op['action'] in allowed for op in ops)
-                and config.get('rollback_enabled', True) is not False and conversation() is not None)
+    from hermes_governance import write_policy
+    return not (write_policy.classify('notion',args)==write_policy.REVERSIBLE
+                and config.get('rollback_enabled',True) is not False and conversation() is not None)
 
 
 def guard(config: Any, home: Path, *, tool_name: str, args: Any, chat: bool, opener: Any = None, files_config=None, call_id="") -> dict[str, str] | None:
@@ -688,8 +689,6 @@ def guard(config: Any, home: Path, *, tool_name: str, args: Any, chat: bool, ope
             digest = hashlib.sha256(json.dumps(call, ensure_ascii=False, sort_keys=True).encode()).hexdigest()[:12]
             remember_snapshot(home, call, plans, call_id)
             if not approval_required(config, call): return None
-            _, error = _no_approval(config)
-            if error: message = error + '\n' + message
             return {'action': 'approve', 'message': message, 'rule_key': f"team-kit-notion:{call['action']}:{digest}"}
         except (NotionError, OSError, ValueError, TypeError) as exc:
             return {'action': 'block', 'message': str(exc)}
@@ -787,13 +786,7 @@ def note(config: Any) -> str:
                 'Notion 자체의 연결 공유·권한·요금제 제한은 API 오류를 근거로 알린다. <<work_skill_prefix>>-notion 스킬을 참고한다.'))
     limited = ("" if writable(config) is None else
                " 만들거나 고칠 수 있는 곳은 설정에 지정된 표와 그 하위 항목뿐이고, 나머지는 보기만 한다. 범위 밖 변경은 도구가 거부하니 시도하지 말고 사용자에게 알린다.")
-    allowed, config_error = _no_approval(config)
-    approval_note = ('·'.join(name for name in ('create', 'update', 'append', 'edit') if name in allowed) +
-                     '는 소유자가 시킨 대화에서 승인 없이 바로 실행하고 결과의 report와 되돌리기 가능 여부를 답변에 적는다. '
-                     '대화 식별·되돌리기 기록이 불가능하면 승인을 유지한다. trash와 그 밖의 변경은 호출마다 승인을 묻는다. ')
-    if not allowed:
-        approval_note = '변경: create(새 행·새 하위 페이지), update(행 속성), append(본문 덧붙이기), edit(본문 글·체크·색), trash(휴지통)는 호출마다 사용자 승인을 묻는다. '
-    approval_note += config_error
+    approval_note = '변경 결과의 report·verification·되돌리기 가능 여부를 답변에 적는다. '
     return limited.strip() + (' ' if limited else '') + (
         '[Notion] 읽기: databases, schema(열·선택지), query(filter·sorts), page(속성·본문 id·서식·children), search, users. '
         '쓰기 전 schema와 page를 읽는다. create(새 항목), update(속성), append(본문 추가), edit(기존 글·체크·색), trash(휴지통). '
@@ -812,7 +805,7 @@ def note(config: Any) -> str:
 SCHEMA = {
     "name": "notion",
     "description": (
-        "Read/write Notion. batch(title, operations): multiple changes, one tool approval; no separate prose approval. rollback(key?) restores this conversation's latest change: immediate within 30 minutes, confirmed key within 24 hours. Preserve text and attachments, including original text below the last line with 5+ ━. replace_all=true requires an explicit full rewrite request. Pass page.last_edited as seen_last_edited for plaintext edits of nonempty text. update text accepts {append: text} or {replace: {find: text, with: text}}. Check verification and content_loss. Read reachable pages/databases; writes require user approval. Reads: databases, search(query), schema(database_id), query(database_id, filter?, sorts?, page_size<=50, cursor?), page(page_id), users. Writes: create(database_id+properties or parent_page_id+title; paragraphs?), update(page_id+properties), append(page_id+paragraphs, after? top-level block id), edit(page_id+blocks, max20 text/checked/color changes), trash(page_id). IDs accept Notion links. paragraphs documents rich text, images/files(max10), nesting and spans. Use heading_2/heading_3 for text size. Properties: text, number, option name(s), YYYY-MM-DD or {start,end}, boolean, people names."),
+        "Read/write Notion. batch(title, operations): multiple changes in one call; rollback(key?) restores this conversation's latest change: immediate within 30 minutes, confirmed key within 24 hours. Preserve text and attachments, including original text below the last line with 5+ ━. replace_all=true requires an explicit full rewrite request. Pass page.last_edited as seen_last_edited for plaintext edits of nonempty text. update text accepts {append: text} or {replace: {find: text, with: text}}. Check report, verification and content_loss. Read reachable pages/databases; Writes follow shared app policy; prepare undo first. Reads: databases, search(query), schema(database_id), query(database_id, filter?, sorts?, page_size<=50, cursor?), page(page_id), users. Writes: create(database_id+properties or parent_page_id+title; paragraphs?), update(page_id+properties), append(page_id+paragraphs, after? top-level block id), edit(page_id+blocks, max20 text/checked/color changes), trash(page_id). IDs accept Notion links. paragraphs documents rich text, images/files(max10), nesting and spans. Use heading_2/heading_3 for text size. Properties: text, number, option name(s), YYYY-MM-DD or {start,end}, boolean, people names."),
     "parameters": {"type": "object", "properties": {
         "action": {"type": "string", "enum": sorted(READ | WRITE)},
         "database_id": {"type": "string"}, "page_id": {"type": "string"}, "parent_page_id": {"type": "string"},
@@ -834,14 +827,8 @@ SCHEMA = {
 
 def schema(config: Any) -> dict:
     if writable(config) != set():
-        allowed, _ = _no_approval(config)
-        if not allowed and not (isinstance(config, dict) and config.get('full_api') is True): return SCHEMA
+        if not (isinstance(config,dict) and config.get('full_api') is True):return SCHEMA
         result = copy.deepcopy(SCHEMA)
-        result['description'] = result['description'].replace('and one tool approval', 'in one call').replace(
-            'Read and, after the user approves, change', 'Read and change')
-        result['description'] = ('·'.join(name for name in ('create', 'update', 'append', 'edit') if name in allowed) +
-            '는 소유자가 시킨 대화에서 승인 없이 바로 실행하고 결과의 report와 되돌리기 가능 여부를 답변에 적는다. '
-            '대화 식별·되돌리기 기록이 불가능하면 승인을 유지한다. trash는 호출마다 승인을 묻는다. ' + result['description'])
         result['parameters']['properties']['paragraphs']['description'] = result['parameters']['properties']['paragraphs']['description'].replace(', user approval', '')
         if isinstance(config, dict) and config.get('full_api') is True:
             result = api_module().extend_schema(result)
@@ -1357,42 +1344,12 @@ def journal(home):
 
 @contextmanager
 def _journal_locked(home):
-    """Hold a cross-process lock through a change; publish snapshots with atomic 0600 writes."""
-    home_fd = os.open(home, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    from hermes_governance import app_undo
     try:
-        try: os.mkdir('state', 0o700, dir_fd=home_fd)
-        except FileExistsError: pass
-        directory = os.open('state', os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=home_fd)
-    finally: os.close(home_fd)
-    lock = None
-    try:
-        lock = os.open('notion-rollback.lock', os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600, dir_fd=directory)
-        fcntl.flock(lock, fcntl.LOCK_EX)
-        try:
-            source = os.open('notion-rollback.json', os.O_RDONLY | os.O_NOFOLLOW, dir_fd=directory)
-        except FileNotFoundError: data = {'version': 1, 'entries': []}
-        else:
-            with os.fdopen(source, 'r') as stream: data = json.load(stream)
-        if not isinstance(data, dict) or data.get('version') != 1 or not isinstance(data.get('entries'), list):
-            raise NotionError('되돌리기 기록 형식 오류: 변경하지 않습니다.')
-        data['entries'] = [e for e in data['entries'] if 0 <= time.time() - e['created_at'] < 86400][-100:]
-
-        def save():
-            data['entries'] = data['entries'][-100:]
-            temp = 'notion-rollback.tmp-' + uuid.uuid4().hex
-            try:
-                fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=directory)
-                with os.fdopen(fd, 'w') as stream:
-                    json.dump(data, stream, ensure_ascii=False); stream.flush(); os.fsync(stream.fileno())
-                os.replace(temp, 'notion-rollback.json', src_dir_fd=directory, dst_dir_fd=directory)
-                os.fsync(directory)
-            finally:
-                try: os.unlink(temp, dir_fd=directory)
-                except FileNotFoundError: pass
-        yield data, save
-    finally:
-        if lock is not None: os.close(lock)
-        os.close(directory)
+        with app_undo.partition(app_undo.path_for(home), 'notion', legacy=app_undo.legacy_paths(home)) as state:
+            yield state
+    except (app_undo.LedgerError, ValueError) as exc:
+        raise NotionError('되돌리기 기록 형식 오류: 변경하지 않습니다.') from exc
 
 
 def verification(home, page_id, expected, block_ids, opener, *, new_page=False, block_count=0, images=0):
@@ -1424,14 +1381,14 @@ def verification(home, page_id, expected, block_ids, opener, *, new_page=False, 
     return result
 
 
-def append_children_snapshot(home, page_id, opener):
+def append_children_snapshot(home, page_id, opener, *, version=None):
     """A complete, bounded DIRECT-child list, or None. Never retries a read or a write."""
     children = []; ids = set(); cursors = set(); cursor = None
     try:
         for _ in range(APPEND_CHILDREN_PAGES):
             path = f'blocks/{page_id}/children?page_size=100'
             if cursor: path += '&start_cursor=' + urllib.parse.quote(cursor, safe='')
-            response = request(home, 'GET', path, opener=opener)
+            response = request(home, 'GET', path, opener=opener,version=version)
             rows = response.get('results')
             if not isinstance(rows, list) or len(children) + len(rows) > APPEND_CHILDREN_LIMIT:
                 return None
@@ -1679,8 +1636,8 @@ def change(config, home, args, files_config, opener):
     who = conversation() if config.get('rollback_enabled', True) is not False else None
     with journal(home) as (data, save):
         entry = {'conversation': who, 'created_at': time.time(), 'title': args.get('title') or ops[0]['action'],
-                 'key': hashlib.sha256((json.dumps(args, sort_keys=True) + uuid.uuid4().hex).encode()).hexdigest(),
-                 'consumed': False, 'operations': []}
+                 'key': uuid.uuid4().hex, 'app_result': True, 'app_ready': False,
+                 'consumed': False, 'operations': [], 'request': {k:copy.deepcopy(v) for k,v in args.items() if not k.startswith('_')}}
         results = []; halted = False
         for index, op in enumerate(ops, 1):
             if halted:
@@ -1701,7 +1658,8 @@ def change(config, home, args, files_config, opener):
                     key = 'block:' + edit['id']
                     if edit['snapshot'] != owned_blocks.get(key, initial.get(key)):
                         raise NotionError('승인 뒤 본문 블록이 바뀌었다. 다시 읽고 합친다.')
-                pending = {'action': 'unknown', 'page_id': plan['page_id'], 'original_action': op['action'], 'index': index}
+                pending = {'action': 'unknown', 'page_id': plan['page_id'], 'original_action': op['action'], 'index': index,
+                    'prepared':copy.deepcopy(plan),'inverse_template':{'create':'archive_created_id','append':'delete_created_block_ids','update':'restore_properties','edit':'restore_block_fields','trash':'untrash_page'}[op['action']]}
                 if who:
                     if entry not in data['entries']: data['entries'].append(entry)
                     entry['operations'].append(pending); save()
@@ -1710,6 +1668,7 @@ def change(config, home, args, files_config, opener):
                         entry['operations'][-1] = {**copy.deepcopy(inverse), 'index': index}; save()
                 result, inverse, page_id, ids = execute_change(config, home, op, plan, files_config, opener, persist)
                 inverse['index'] = index
+                inverse['prepared']=pending['prepared']
                 if who:
                     entry['operations'][-1] = inverse
                     if inverse['action'] == 'edit' and not inverse['blocks']: entry['operations'].pop()
@@ -1746,6 +1705,10 @@ def change(config, home, args, files_config, opener):
                         if missing:
                             losses[name] = {'missing_lines': len(missing), 'preview': [line[:160] for line in missing[:5]], 'verified': True}
                     result['content_loss'] = losses
+                from hermes_governance import notion_undo
+                if who:
+                    notion_undo.capture(api_context(),home,inverse,opener)
+                    save()
                 result['report'] = report(op, plan, result)
                 results.append({'index': index, 'status': 'done', **result})
                 halted = result.get('ok') is not True
@@ -1762,8 +1725,11 @@ def change(config, home, args, files_config, opener):
             save()
         available = bool(who and any(o['action'] != 'unknown' and (o['action'] != 'edit' or any(b['status'] == 'done' for b in o['blocks'])) for o in entry['operations']))
         meta = {'approval_required': required, 'rollback_available': available, 'rollback_key': entry['key'] if available else None}
-        if args['action'] != 'batch': return {**results[0], **meta}
-        return {'ok': not halted, 'title': args['title'], 'operations': results, **meta}
+        from hermes_governance import notion_undo
+        entry['app_ready']=bool(available and not halted and all(notion_undo.complete(r) for r in results))
+        if who:save()
+        result={**results[0],**meta} if args['action']!='batch' else {'ok':not halted,'title':args['title'],'operations':results,**meta}
+        return notion_undo.result(entry,result)
 
 
 def rollback(config, home, args, opener, *, chat=None, require_snapshot=False):
@@ -1771,13 +1737,15 @@ def rollback(config, home, args, opener, *, chat=None, require_snapshot=False):
     if chat is False or who is None:
         raise NotionError('되돌리기는 식별 가능한 같은 Slack 대화·스레드에서만 실행합니다.')
     if config.get('rollback_enabled', True) is False: raise NotionError('Notion rollback is disabled.')
+    from hermes_governance import notion_undo
+    chosen=notion_undo.selected()
     legacy_receipt = None
     if config.get('full_api') is True:
         if api_module().is_api_rollback(api_context(), home):
             return api_module().rollback(api_context(), config, home, args, opener, require_snapshot)
-        legacy_receipt = api_module().consume(api_context(), home, args, require_snapshot)
+        if not chosen:legacy_receipt = api_module().consume(api_context(), home, args, require_snapshot)
     with journal(home) as (data, save):
-        candidates = [e for e in data['entries'] if e['conversation'] == who and not e['consumed']]
+        candidates = [e for e in data['entries'] if e['conversation'] == who and not e['consumed'] and (not chosen or e['key']==chosen)]
         if not candidates:
             save(); return {'ok': False, 'error': 'NO_RECENT_NOTION_ROLLBACK', 'mutation_calls': 0}
         entry = candidates[-1]
@@ -1863,6 +1831,9 @@ def rollback(config, home, args, opener, *, chat=None, require_snapshot=False):
                             if block.get('archived') or block.get('in_trash'):
                                 details.append({'block_id': ident, 'status': 'skipped', 'reason': '이미 없는 블록입니다.'})
                             else:
+                                if entry.get('app_result'):
+                                    if ident not in op.get('app_after',{}) or notion_undo.tree(api_context(),home,ident,opener)!=op['app_after'][ident]:
+                                        raise NotionError('그 사이 추가 본문이 바뀌어 삭제하지 않습니다.')
                                 mutation_calls += 1
                                 removed = request(home, 'DELETE', 'blocks/' + ident, opener=opener)
                                 if not (removed.get('archived') or removed.get('in_trash')):
@@ -1878,6 +1849,9 @@ def rollback(config, home, args, opener, *, chat=None, require_snapshot=False):
                     if bool(current.get('archived') or current.get('in_trash')) == desired:
                         details.append({'status': 'skipped', 'reason': '이미 복원 상태입니다.'})
                     else:
+                        if action=='create' and entry.get('app_result'):
+                            if 'app_after' not in op or notion_undo.page(api_context(),home,page_id,opener)!=op['app_after']:
+                                raise NotionError('그 사이 새 페이지가 바뀌어 삭제하지 않습니다.')
                         mutation_calls += 1
                         response = request(home, 'PATCH', 'pages/' + page_id, {'archived': desired}, opener=opener)
                         if bool(response.get('archived') or response.get('in_trash')) != desired:

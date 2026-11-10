@@ -90,7 +90,11 @@ def problem(td, name, args):
     # Contacts are never part of shared secretary reads, personal bundles or rollback.
     # Keep this boundary even when the optional personal_roles setting is disabled.
     if name in CONTACTS_TOOLS:
-        if not team.has_role(profile(td), 'work'):
+        from hermes_facility.app_registry import tool_granted
+        from hermes_constants import get_hermes_home
+        grant = tool_granted(get_hermes_home(), name)
+        if grant is False: return 'APP_NOT_CONNECTED'
+        if grant is not True and not team.has_role(profile(td), 'work'):
             return _owner_text('CONTACTS_PROFILE_REFUSED: 연락처는 <<work_name>> 전용 도구다.')
         background = any(td.get_session_env(flag, '') or os.environ.get(flag) for flag in
                          ('HERMES_CRON_SESSION', 'HERMES_SINGLE_QUERY_SESSION', 'HERMES_KANBAN_TASK'))
@@ -101,6 +105,19 @@ def problem(td, name, args):
         return None
     if name in td.selected_skills.offered(td):
         return td.selected_skills.problem(td, name, args)
+    from hermes_facility.app_registry import tool_granted
+    from hermes_constants import get_hermes_home
+    grant = tool_granted(get_hermes_home(), name)
+    if grant is False: return 'APP_NOT_CONNECTED'
+    if grant is True:
+        from hermes_governance.write_policy import classify, READ, owner_chat
+        env = lambda key, default='': td.get_session_env(key, default) or os.environ.get(key, default)
+        if classify(name, args) != READ and not owner_chat(get_hermes_home(), env):
+            return 'APP_OWNER_CHAT_REQUIRED'
+        scopes = getattr(td, 'personal_scopes', None)
+        if scopes and scopes.config(td) is not None and profile(td) in scopes.OWNERS:
+            return scopes.role_problem(td, name, args)
+        return None
     if not enabled(td):
         return None
     current = profile(td)
@@ -145,11 +162,14 @@ def readonly_request(td, request):
         scopes = getattr(td, 'personal_scopes', None)
         scoped = scopes is not None and scopes.config(td) is not None
         allowed = (READS | scopes.SCOPED_TOOLS | SECRETARY_FILES | SECRETARY_BROWSER) - {'notion'} if scoped else READS
-        allowed |= td.selected_skills.offered(td) | td.media_save.offered(td)
+        from hermes_facility.app_registry import offered
+        from hermes_constants import get_hermes_home
+        app_tools = offered(get_hermes_home())
+        allowed |= td.selected_skills.offered(td) | td.media_save.offered(td) | app_tools
         result['tools'] = [t for t in result['tools'] if td._tool_schema_name(t) in allowed]
         for tool in result['tools']:
             fn = tool.get('function', tool)
-            if fn.get('name') == 'gmail_direct' and not scoped:
+            if fn.get('name') == 'gmail_direct' and not scoped and 'gmail_direct' not in app_tools:
                 fn['description'] = 'Read mail and attachments; acknowledge existing scheduled notifications. No sending.'
                 action = fn.get('parameters', {}).get('properties', {}).get('action', {})
                 action['enum'] = sorted(MAIL_READ_ACTIONS)

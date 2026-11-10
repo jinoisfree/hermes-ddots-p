@@ -19,9 +19,8 @@ def read(path):
         return json.loads(text)
     except ValueError:
         from ruamel.yaml import YAML
-        parser = YAML(typ='safe')
-        parser.version = (1, 1)
-        return parser.load(text)
+        # Same YAML 1.2 rules as the writer (config_assembly.yaml_bytes): unquoted 18:00 stays a string.
+        return YAML(typ='safe').load(text)
 
 
 def definition(job):

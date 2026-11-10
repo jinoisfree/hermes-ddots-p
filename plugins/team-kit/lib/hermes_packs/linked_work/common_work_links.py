@@ -830,6 +830,19 @@ class CommonWorkStore:
             )
         return self.get(common_id)
 
+    @staticmethod
+    def _bundle_receipt(row,payload_digest):
+        if row is None:return None
+        if row['payload_digest']!=payload_digest:raise CommonWorkError('bundle payload digest mismatch')
+        if row['status']=='executing':raise CommonWorkError('bundle execution is already in progress')
+        receipt=json.loads(row['receipt_json'] or '{}');receipt['replayed']=True
+        return receipt
+
+    def bundle_receipt(self,*,bundle_key,payload_digest):
+        with self._connect() as conn:
+            row=conn.execute('SELECT payload_digest,status,receipt_json FROM personal_bundle_executions WHERE bundle_key=?',(bundle_key,)).fetchone()
+        return self._bundle_receipt(row,payload_digest)
+
     def begin_bundle_execution(
         self, *, bundle_key: str, payload_digest: str
     ) -> dict[str, Any] | None:
@@ -853,13 +866,7 @@ class CommonWorkStore:
                     (normalized_key, normalized_digest, now, now),
                 )
                 return None
-            if row["payload_digest"] != normalized_digest:
-                raise CommonWorkError("bundle payload digest mismatch")
-            if row["status"] == "executing":
-                raise CommonWorkError("bundle execution is already in progress")
-            receipt = json.loads(row["receipt_json"] or "{}")
-            receipt["replayed"] = True
-            return receipt
+            return self._bundle_receipt(row,normalized_digest)
 
     def finish_bundle_execution(
         self,

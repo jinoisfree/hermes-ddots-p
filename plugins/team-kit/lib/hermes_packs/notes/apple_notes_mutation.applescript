@@ -3,7 +3,7 @@ on findFolder(folderName)
     tell application "Notes"
         repeat with accountItem in accounts
             repeat with folderItem in folders of accountItem
-                if (name of folderItem as text) is folderName then set end of matchingFolders to contents of folderItem
+                if ((name of folderItem as text) is folderName) or (("id:" & (id of folderItem as text)) is folderName) then set end of matchingFolders to contents of folderItem
             end repeat
         end repeat
     end tell
@@ -37,6 +37,17 @@ on run argv
             on error
                 error "APPLE_NOTES_NOTE_NOT_FOUND"
             end try
+            if (actionName is "delete" or actionName is "move") and (count of argv) is 8 then
+                set guardTitle to name of selectedNote as text
+                set guardBody to body of selectedNote as text
+                set guardFolder to get container of selectedNote
+                set guardFolderID to id of guardFolder as text
+                considering case
+                    if guardTitle is not (item 6 of argv) then error "APPLE_NOTES_CONCURRENT_NAME"
+                    if guardBody is not (item 7 of argv) then error "APPLE_NOTES_CONCURRENT_BODY"
+                    if guardFolderID is not (item 8 of argv) then error "APPLE_NOTES_CONCURRENT_FOLDER"
+                end considering
+            end if
             if actionName is "replace_body_cas" then
                 -- 진행도 text edit for notes with tables/photos: compare-and-set the whole body.
                 -- Bodies with inline photos exceed argv limits, so items 5 and 6 are UTF-8 file paths.
@@ -97,6 +108,7 @@ on run argv
             end if
             if actionName is "restore" then
                 set body of selectedNote to bodyHTML
+                if titleValue is not "" then set name of selectedNote to titleValue
                 return (id of selectedNote) & tab & (name of selectedNote)
             end if
             if actionName is "created" then

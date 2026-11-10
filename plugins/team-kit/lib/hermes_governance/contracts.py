@@ -298,6 +298,7 @@ def build_APPLE_NOTES_DIRECT_LOOKUP_SCHEMA():
             "parameters": {
                 "type": "object",
                 "properties": {
+                    "source": {"type":"string", "enum":["apple_notes","obsidian"], "description":"Choose a connected memo source; omitted uses the first connection in the roster."},
                     "query": {"type": "string", "description": "Case-insensitive title filter; with search_body=true also searches note text."},
                     "search_body": {"type": "boolean", "default": False,
                                     "description": "Also match query in note bodies, e.g. a place mentioned only in an event memo. Read failures are reported, not treated as no match."},
@@ -325,6 +326,7 @@ def build_APPLE_NOTES_DIRECT_MUTATION_SCHEMA():
             "parameters": {
                 "type": "object",
                 "properties": {
+                    "source": {"type":"string", "enum":["apple_notes","obsidian"], "description":"Choose a connected memo source; omitted uses the first connection in the roster."},
                     "action": {"type": "string", "enum": ["create", "update", "move", "delete", "pending_choices", "apply_choice"]},
                     "choice_id": {
                         "type": "string",
@@ -711,10 +713,11 @@ def build_CONTACTS_DIRECT_LOOKUP_SCHEMA():
 
 
 def build_CONTACTS_DIRECT_MUTATION_SCHEMA(_CONTACTS_EMAIL, _CONTACTS_PHONE):
+    from hermes_governance.write_policy import rule_note
     return (
         {
             "name": "contacts_direct_mutation",
-            "description": (_owner_text("<<work_name>> 전용 macOS 연락처·그룹 관리(명함 포함). 생성 전 contacts_direct_lookup search로 중복 확인. 휴대폰 없는 명함은 직장 번호만 쓴다. create/import_vcf/group_create/group_add는 소유자 대화에서 선 작성 후 보고한다. update/delete/group_rename/group_delete/group_remove는 실행 전 승인 버튼 한 번, 배경은 거부한다. delete는 contact_id+expected_name, group_rename은 group_id+expected_name+name, group_delete는 group_id+expected_name, group_create는 name, group_add/remove는 group_id+contact_ids(최대200)가 필수다. 삭제는 연락처/백업에 vcf·메모 또는 그룹 구성 JSON 백업 후 실행하며 그룹 삭제는 멤버를 지우지 않는다. import_vcf는 허용 폴더의 실제 .vcf(file_path, 5MiB 이하)를 중복 건너뛰고 한 번에 저장한다. group_id는 선택이다. vCard NOTE는 가져오지 않으며 notes_included=false로 보고한다. create에는 family_name/given_name 중 하나가 필요하다. 이메일·휴대폰 중복은 CONTACTS_DUPLICATE로 거부하며 소유자가 중복 등록을 명시한 경우에만 allow_duplicate=true를 쓴다. update: get으로 확인한 contact_id+expected_name 필수, 준 필드만 변경. 전화·이메일은 add_*(기존 유지) 또는 replace_*(전체 교체)만 쓴다. image_path는 <<work_name>> cache/images의 실제 파일(5MB 이하)만 된다. 메모 칸은 연락처 앱 자동화로 따로 쓰며 note_applied로 결과를 확인한다. 메모만 실패하면 본체는 저장된 상태다. 재생성하지 말고 note_error를 보고한다. note_uncertain=true이면 메모를 다시 읽어 확인한다.")),
+            "description": (_owner_text("macOS 연락처·그룹 관리(명함 포함). 생성 전 contacts_direct_lookup search로 중복 확인. 휴대폰 없는 명함은 직장 번호만 쓴다. delete는 contact_id+expected_name, group_rename은 group_id+expected_name+name, group_delete는 group_id+expected_name, group_create는 name, group_add/remove는 group_id+contact_ids(최대200)가 필수다. 삭제는 연락처/백업에 vcf·메모 또는 그룹 구성 JSON 백업 후 실행하며 그룹 삭제는 멤버를 지우지 않는다. import_vcf는 허용 폴더의 실제 .vcf(file_path, 5MiB 이하)를 중복 건너뛰고 한 번에 저장한다. group_id는 선택이다. vCard NOTE는 가져오지 않으며 notes_included=false로 보고한다. create에는 family_name/given_name 중 하나가 필요하다. 이메일·휴대폰 중복은 CONTACTS_DUPLICATE로 거부하며 소유자가 중복 등록을 명시한 경우에만 allow_duplicate=true를 쓴다. update: get으로 확인한 contact_id+expected_name 필수, 준 필드만 변경. 전화·이메일은 add_*(기존 유지) 또는 replace_*(전체 교체)만 쓴다. image_path는 현재 직원의 cache/images의 실제 파일(5MB 이하)만 된다. 수정은 Contacts.app에서 준 필드만 쓰며, 되돌릴 때도 그 필드만 복원한다. 사진 변경은 원본 바이트를 정확히 복원할 수 없어 먼저 승인받는다. 지원하지 않는 주소 항목은 거부한다. 실패 후 재생성·자동 재시도하지 않는다. note_applied가 참일 때만 메모가 저장됐다. ") + rule_note()),
             "parameters": {"type": "object", "properties": {
                 "action": {"type": "string", "enum": ["create", "update", "delete", "group_create", "group_rename", "group_delete", "group_add", "group_remove", "import_vcf"]},
                 **{key: {"type": "string"} for key in ('contact_id', 'expected_name', 'family_name', 'given_name',
@@ -1062,3 +1065,30 @@ def build_WIKI_DIRECT_SCHEMA():
             },
         }
     )
+
+
+def build_APP_OPERATIONS():
+    """Public app action contracts; role/account/folder authority is checked separately."""
+    return {
+        'notes_read': {'read': ['*']}, 'calendar_read': {'read': ['*']},
+        'apple_notes_direct_lookup': {'read': ['*']}, 'calendar_direct_lookup': {'read': ['*']},
+        'messages_direct_lookup': {'read': ['*']}, 'slack_history': {'read': ['*']},
+        'contacts_direct_lookup': {'read': ['access', 'search', 'get', 'list', 'groups', 'group_members', 'containers', 'export_vcf']},
+        'apple_notes_direct_mutation': {'read':['pending_choices'], 'reversible_write': ['create', 'update', 'move'], 'delete': ['delete']},
+        'calendar_direct_mutation': {'reversible_write': ['create', 'update'], 'delete': ['delete']},
+        'contacts_direct_mutation': {'reversible_write': ['create', 'update', 'group_create', 'group_rename', 'group_add', 'group_remove', 'import_vcf'], 'delete': ['delete', 'group_delete']},
+        'google_calendar_color_get': {'read': ['*']}, 'google_calendar_color_set': {'reversible_write': ['*']},
+        'gmail_direct': {
+            'read': ['lookup', 'read', 'thread', 'accounts', 'ack', 'download', 'labels', 'filter_list', 'mailboxes', 'rules_list'],
+            'reversible_write': ['label_create', 'label_rename', 'label_apply', 'inbox_restore', 'filter_create', 'mail_organize', 'modify', 'mailbox_create', 'mail_move', 'mail_mark', 'rule_create', 'mail_app_organize', 'untrash', 'draft_create'],
+            'delete': ['trash', 'label_delete', 'filter_delete', 'rule_delete', 'mail_trash']},
+        'notion': {'read': ['search', 'databases', 'schema', 'query', 'page', 'users', 'api_help'],
+                   'reversible_write': ['create', 'update', 'append', 'edit', 'batch'], 'delete': ['trash']},
+        'file_list': {'read': ['*']}, 'doc_read': {'read': ['*']}, 'pdf_render': {'read': ['*']},
+        'folder_scan': {'read': ['*']}, 'file_location': {'read': ['*']},
+        **{tool: {'reversible_write': ['*']} for tool in ('file_move', 'folder_create', 'file_copy', 'doc_edit', 'pdf_pages', 'doc_convert', 'doc_fill')},
+        'file_trash': {'delete': ['*']}, 'file_link': {},
+        'mac_app': {'read': ['apps', 'describe', 'read'], 'reversible_write': ['create', 'update'], 'delete': ['delete']},
+        'ego_browser': {'read': ['tabs', 'open', 'read', 'screenshot', 'find', 'finish']},
+        'personal_work_bundle': {},
+    }

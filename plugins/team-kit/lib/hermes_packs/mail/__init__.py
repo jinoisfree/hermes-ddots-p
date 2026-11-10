@@ -67,10 +67,12 @@ class Services:
 
 def _gmail_success_receipt(services, operation: str, entry: dict[str, Any], gmail_error: str = "") -> str:
     mutation = operation == "send" or operation in services.GMAIL_LABEL_FILTER_WRITES
-    if mutation:
+    payload=entry.get('response',entry.get('data'))
+    success=not isinstance(payload,dict) or payload.get('ok') is not False
+    if mutation and success:
         services._clear_pending_personal_owner()
     return json.dumps({
-        "ok": True,
+        "ok": success,
         "work_type": "gmail_" + operation,
         "action": operation,
         "owner_profile": services._personal_actor(),
@@ -224,7 +226,7 @@ def _gmail_outage_test(services) -> bool:
         return False
     return 0 < until - time.time() <= 3600
 
-def _gmail_extra(services, request: dict[str, Any], runner: Any = None) -> tuple[Any, str]:
+def _gmail_extra(services, request: dict[str, Any], runner: Any = None, *, on_progress=None) -> tuple[Any, str]:
     """(answer, "") from gmail_extra.py, or (None, error code)."""
     if services._gmail_outage_test():
         return None, "GMAIL_NOT_CONNECTED"
@@ -236,24 +238,41 @@ def _gmail_extra(services, request: dict[str, Any], runner: Any = None) -> tuple
         python_path = services._gmail_python(root)
     except (OSError, ValueError, RuntimeError):
         return None, "GMAIL_LOCAL_API_UNAVAILABLE"
+    def frames(output):
+        if isinstance(output,bytes):output=output.decode('utf-8',errors='replace')
+        result=None;malformed=False
+        for line in str(output or '').splitlines():
+            try:row=json.loads(line)
+            except ValueError:
+                malformed=True;continue  # A truncated line cannot attest a new ID.
+            if isinstance(row,dict) and row.get('_event')=='gmail_effect':
+                if on_progress is not None:on_progress(row)
+            else:
+                if result is not None:malformed=True
+                result=row
+        return None if malformed else result
     execute = runner or subprocess.run
     try:
         proc = execute([str(python_path), str(Path(__file__).with_name("gmail_extra.py"))],
                        input=json.dumps({**request, "root": str(root), "token_home": str(token_home)}), capture_output=True, text=True,
                        timeout=120, check=False, env={**os.environ, "HERMES_HOME": str(root)})
     except (OSError, subprocess.TimeoutExpired) as exc:
+        if isinstance(exc,subprocess.TimeoutExpired):frames(exc.stdout)
         return None, f"GMAIL_LOCAL_API_UNAVAILABLE:{type(exc).__name__}"
     if proc.returncode != 0:
+        frames(getattr(proc,'stdout',''))
         code = str(proc.stderr or "").strip().rpartition("GMAIL_EXTRA_FAILED:")[2].split()[0:1]
         code = code[0] if code else "unknown"
         if code in {"RefreshError", "DefaultCredentialsError", "FileNotFoundError"}:
             return None, "GMAIL_NOT_CONNECTED"
-        if request.get("op") in services.GMAIL_LABEL_FILTER_ACTIONS | {"organize", "full_preview", "full_write"} and re.fullmatch(r"(?:GMAIL|MAIL)_[A-Z_]+(?::gmail\.[a-z.]+)?", code):
+        if request.get("op") in services.GMAIL_LABEL_FILTER_ACTIONS | {"organize", "full_preview", "full_write", "full_restore"} and re.fullmatch(r"(?:GMAIL|MAIL)_[A-Z_]+(?::gmail\.[a-z.]+)?", code):
             return None, code
         # HttpError: Gmail answered and refused, so nothing was sent. Anything else may have gone out.
         return None, ("GMAIL_LOCAL_API_FAILED:" if code == "HttpError" else "GMAIL_RESULT_UNKNOWN:") + code[:60]
     try:
-        return json.loads(str(proc.stdout or "").strip()), ""
+        result=frames(proc.stdout)
+        if result is None:raise ValueError('invalid response')
+        return result, ""
     except ValueError:
         return None, "GMAIL_LOCAL_API_INVALID_RESPONSE"
 
@@ -492,6 +511,18 @@ def _gmail_direct(services, args: dict[str, Any], runner: Any = None, mail_runne
         return services._error(problem)
     if error := services._personal_owner_error("gmail_direct"):
         return error
+    from hermes_constants import get_hermes_home
+    from hermes_facility import app_scope, app_registry
+    home = get_hermes_home()
+    if app_registry.explicit(app_registry.root_of(home), app_registry.profile_of(home)):
+        chosen = str(args.get('account') or '').casefold()
+        saved = app_registry.values(app_registry.root_of(home), app_registry.profile_of(home))
+        mail_entries = [v for b, v in saved.items() if app_registry.load_catalog().get(b, {}).get('service') == 'apple_mail']
+        known_mail = {str(a).casefold() for v in mail_entries for a in v.get('scope', [])}
+        mail_action = args.get('action') in services.full_mail_tools.MAIL_READS | services.full_mail_tools.MAIL_WRITES
+        if mail_action or chosen in known_mail:
+            if not services.full_mail_tools.app_grant(services.host): return services._error('APP_NOT_CONNECTED')
+            if app_scope.mail_allowed(home, args) is not True: return services._error('APP_ACCOUNT_OUT_OF_SCOPE')
     if services.full_mail_tools.handles(services.host, args):
         return services.full_mail_tools.run(services.host, args, runner, mail_runner)
     action = str(args.get("action") or "").strip().lower()
@@ -515,7 +546,7 @@ def _gmail_direct(services, args: dict[str, Any], runner: Any = None, mail_runne
             except services.mail_app.MailAppError as exc:
                 return services._error(str(exc))
         return services._mail_account_read(args, account, mail_runner)
-    if action in services.GMAIL_LABEL_FILTER_ACTIONS:
+    if action in services.GMAIL_LABEL_FILTER_ACTIONS - services.full_mail_tools.BASIC:
         # Enforce this even when personal_scopes is not configured; never use Mail app fallback.
         if services.personal_scopes.background(services.host):
             return services._error("PERSONAL_SCOPE_BACKGROUND_REFUSED: 예약·배경에서 라벨·필터 호출은 허용되지 않는다.", mutation_calls=0)
@@ -523,40 +554,10 @@ def _gmail_direct(services, args: dict[str, Any], runner: Any = None, mail_runne
                 or not services.get_session_env("HERMES_SESSION_CHAT_ID", "")
                 or not services.get_session_env("HERMES_SESSION_USER_ID", "")):
             return services._error("PERSONAL_SCOPE_OWNER_CHAT_REQUIRED: 라벨·필터는 인증된 소유자 대화에서만 가능하다.", mutation_calls=0)
-        fields = services.GMAIL_WRITE_FIELDS.get(action, ())
-        if action in {"filter_create", "mail_organize", "inbox_restore"} and set(args) - {"action", "account", "approved", *fields}:
-            return services._error("GMAIL_FILTER_ACTION_REFUSED", mutation_calls=0)
-        try:
-            services.gmail_rules.validate_operation(action, args)
-        except services.gmail_rules.RuleError as exc:
-            return services._error(str(exc), mutation_calls=0,
-                          **({"failed_rule": exc.rule_index} if exc.rule_index is not None else {}))
-        if failure := services._gmail_scope_preflight(args, runner):
-            return json.dumps(failure, ensure_ascii=False)
-        request = {key: args[key] for key in fields if key in args}
-        response, error = services._gmail_extra({"op": "organize" if action == "mail_organize" else action, **request}, runner)
-        if error:
-            if error.startswith('GMAIL_SCOPE_MISSING:'):
-                home = services.personal_scopes.token_home(services.host, services._gmail_root())
-                return json.dumps(services.gmail_extra.scope_failure({'token_home': str(home)}, error), ensure_ascii=False)
-            return services._error(error)
-        if not isinstance(response, dict):
-            return services._error("GMAIL_LOCAL_API_INVALID_RESPONSE")
-        if response.get('ok') is False and response.get('mutation_calls') == 0:
-            return json.dumps(response, ensure_ascii=False)
-        if action == "mail_organize":
-            if (response.get("status") not in {"completed", "failed", "partial"}
-                    or not isinstance(response.get("results"), list)
-                    or type(response.get("mutation_calls")) is not int or response["mutation_calls"] < 0):
-                return services._error("GMAIL_LOCAL_API_INVALID_RESPONSE")
-            receipt = json.loads(services._gmail_success_receipt(action, {"response": response}))
-            receipt.update(ok=response.get("ok") is True, status=response["status"],
-                           mutation_calls=response["mutation_calls"])
-            if response.get("error"):
-                receipt.update(owner_action=response.get("owner_action"), error=response["error"], failed_rule=response.get("failed_rule"), failed_stage=response.get("failed_stage"),
-                               failed_filter_id=response.get("failed_filter_id"), failed_restore=response.get("failed_restore"))
-            return json.dumps(receipt, ensure_ascii=False)
-        return services._gmail_success_receipt(action, {"response": response})
+        response,error=services._gmail_extra({'op':action},runner)
+        if error:return services._error(error)
+        if not isinstance(response,dict):return services._error('GMAIL_LOCAL_API_INVALID_RESPONSE')
+        return services._gmail_success_receipt(action,{'response':response})
     send_files: list[Path] = []
     if action == "send":
         send_files, problem = services._mail_send_files(args.get("attachments"))

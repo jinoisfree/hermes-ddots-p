@@ -4,9 +4,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 import json
-import os
 import re
-import tempfile
 from hermes_facility import team_registry as team
 from hermes_facility import owner_vault as vault
 
@@ -121,6 +119,8 @@ def preflight(td,args,context):
             raise ValueError('GOOGLE_EVENT_ORIGINAL_CHANGED')
         if before.get('recurringEventId') or before.get('recurrence'):
             raise ValueError('GOOGLE_CALENDAR_RECURRING_WRITE_DEFERRED')
+    from hermes_governance.google_calendar_undo import verify
+    verify(cid,before)
     checked=dict(args,calendar_id=cid,account=account)
     return api,cid,before,checked
 
@@ -158,6 +158,9 @@ def mutation(td,args,context):
         request=api.events().delete(calendarId=cid,eventId=eid,sendUpdates='none')
         if not before.get('etag'):raise ValueError('GOOGLE_EVENT_ETAG_REQUIRED')
         request.headers['If-Match']=before['etag'];context['_api_write_attempted']=True;request.execute();after=None
+    if after is not None:
+        from hermes_governance.google_calendar_undo import capture
+        capture(after)  # authoritative new ID is persisted before optional receipt work
     payload={'calendarItemIdentifier':'google:'+(after or before)['id'],
         'before':event_row(before,cid) if before else None,'after':event_row(after,cid) if after else None}
     proc=SimpleNamespace(returncode=0,stdout=json.dumps(payload),stderr='')
@@ -175,31 +178,15 @@ def mutation(td,args,context):
 
 def color(td,args,context,*,write):
     if write and (problem:=td.personal_scopes.role_problem(td,'google_calendar_color_set',args)):raise ValueError(problem)
+    if write:
+        from hermes_constants import get_hermes_home
+        from . import color_write
+        return color_write.perform(get_hermes_home(),td,args,context,account_api=True)
     api,account,primary=service(td,args,write=write,factory=context.get('google_service_factory'))
     cid=calendar_id(args,account)
     if args.get('target','event')=='calendar':
         before={k:primary.get(k) for k in ['colorId','backgroundColor','foregroundColor']}
-        if not write:return json.dumps({'ok':True,'account':account,'calendar_id':cid,'colors':before,'mutation_calls':0})
-        cfg,scope,_,home=selection(td,args,write=True)
-        expected='#FFD60A' if scope=='personal' else '#007AFF'
-        # Persist the original color before any patch, preserving it across repeated calls.
-        folder=home/'state';folder.mkdir(exist_ok=True)
-        path=folder/'google-calendar-original-colors.json'
-        original=json.loads(path.read_text()) if path.exists() else {}
-        if cid not in original:
-            original[cid]={'at':datetime.now(KST).isoformat(),**before}
-            fd,temp=tempfile.mkstemp(dir=folder,prefix='.calendar-colors-')
-            try:
-                with os.fdopen(fd,'w') as stream:json.dump(original,stream);stream.flush();os.fsync(stream.fileno())
-                os.replace(temp,path)
-            finally:
-                if os.path.exists(temp):os.unlink(temp)
-        context['_api_write_attempted']=True
-        api.calendarList().patch(calendarId=cid,colorRgbFormat=True,
-            body={'backgroundColor':expected,'foregroundColor':'#000000'}).execute()
-        after=api.calendarList().get(calendarId=cid).execute()
-        if after.get('backgroundColor','').casefold()!=expected.casefold():raise ValueError('GOOGLE_CALENDAR_COLOR_VERIFY_FAILED')
-        return json.dumps({'ok':True,'account':account,'before':before,'after':{k:after.get(k) for k in before},'mutation_calls':1})
+        return json.dumps({'ok':True,'account':account,'calendar_id':cid,'colors':before,'mutation_calls':0})
     eid=str(args.get('event_id') or '')
     if eid.startswith('google:'):eid=eid[7:]
     elif args.get('eventkit_id'):
@@ -208,10 +195,4 @@ def color(td,args,context,*,write):
     else:raise ValueError('GOOGLE_EVENT_ID_REQUIRED')
     before=api.events().get(calendarId=cid,eventId=eid).execute()
     old=before.get('colorId','')
-    if not write:return json.dumps({'ok':True,'account':account,'event_id':'google:'+eid,'color_id':old,'mutation_calls':0})
-    if not re.fullmatch(r'(?:[1-9]|1[01])',str(args.get('color_id') or '')):raise ValueError('GOOGLE_COLOR_ID_INVALID')
-    request=api.events().patch(calendarId=cid,eventId=eid,body={'colorId':str(args['color_id'])},sendUpdates='none')
-    if not before.get('etag'):raise ValueError('GOOGLE_EVENT_ETAG_REQUIRED')
-    request.headers['If-Match']=before['etag'];context['_api_write_attempted']=True;after=request.execute()
-    if after.get('colorId')!=str(args['color_id']):raise ValueError('GOOGLE_EVENT_COLOR_VERIFY_FAILED')
-    return json.dumps({'ok':True,'account':account,'event_id':'google:'+eid,'before':old,'color_id':after['colorId'],'mutation_calls':1})
+    return json.dumps({'ok':True,'account':account,'event_id':'google:'+eid,'color_id':old,'mutation_calls':0})

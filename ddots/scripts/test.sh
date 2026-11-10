@@ -21,10 +21,7 @@ python3 "$ROOT/Tests/prepare_config.py" "$DDOTS_CONFIG_ROOT"
 xcrun swiftc -swift-version 5 "$ROOT/Sources/AppIdentity.swift" "$ROOT/Sources/SettingsSync.swift" "$ROOT/Sources/FileDropHistory.swift" "$ROOT/Tests/FileDropHistoryTests.swift" -o "$ROOT/.build/FileDropHistoryTests"
 xcrun swiftc -swift-version 5 "$ROOT/Sources/AppIdentity.swift" "$ROOT/Sources/SettingsSync.swift" "$ROOT/Sources/FileDropHistory.swift" "$ROOT/Sources/FileDropSettings.swift" "$ROOT/Tests/FileDropRolesTests.swift" -o "$ROOT/.build/FileDropRolesTests"
 "$ROOT/.build/FileDropRolesTests"
-# AC-55(3): the drop code holds no fixed agent ID, neither the private ones nor the public build's replacements.
-if grep -nE 'work-assistant|personal-secretary|system-doctor|sns-manager|archive-helper|work-assistant|personal-secretary|system-doctor' "$ROOT"/Sources/FileDrop*.swift; then
-    echo "끌어놓기 코드에 고정 프로필 ID가 있어요. 담당은 조직 역할에서 런타임에 정해야 해요." >&2; exit 1
-fi
+# 직원 id 경계는 아래 unittest의 test_airport_boundaries.py에서 Sources 전체를 검사한다.
 "$ROOT/.build/FileDropHistoryTests"
 xcrun swiftc -swift-version 5 "$ROOT/Sources/OptionsLayout.swift" "$ROOT/Tests/OptionsLayoutTests.swift" -o "$ROOT/.build/OptionsLayoutTests"
 "$ROOT/.build/OptionsLayoutTests"

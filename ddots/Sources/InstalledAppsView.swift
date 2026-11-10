@@ -14,7 +14,7 @@ struct InstalledAppsPage: View {
                     .background(Color(white: 0.9)).clipShape(Circle())
                 VStack(alignment: .leading, spacing: 3) {
                     Text("설치된 앱").font(.title2.bold())
-                    Text("맥미니에 설치된 앱과 이어진 Hermes 연결").font(.caption).foregroundColor(.secondary)
+                    Text("Hermes가 설치된 이 Mac의 앱").font(.caption).foregroundColor(.secondary)
                 }
                 Spacer(minLength: 8)
                 Button(model.appsLoading ? "읽는 중…" : "새로 읽기") { model.loadApps() }.disabled(model.appsLoading)
@@ -36,7 +36,7 @@ struct InstalledAppsPage: View {
                         }.foregroundColor(.secondary)
                     }.buttonStyle(.plain).accessibilityLabel("그 밖의 앱 \(document.others.count)개, " + (model.otherAppsOpen ? "펼침" : "접힘"))
                     if model.otherAppsOpen {
-                        Text(InstalledAppsText.noDirectFeature).font(.caption).foregroundColor(.secondary)
+                        Text("연결할 수 없는 이유를 앱마다 보여 드려요.").font(.caption).foregroundColor(.secondary)
                         VStack(spacing: 0) {
                             ForEach(document.others) { app in
                                 otherRow(app)
@@ -60,13 +60,25 @@ struct InstalledAppsPage: View {
 
     private func connectableRow(_ app: InstalledApp) -> some View {
         HStack(spacing: 10) {
-            Button { if let link = app.primaryLink { model.openApp(link) } } label: {
-                HStack(spacing: 10) {
-                    AppIcon(bundleID: app.bundle_id, size: 30)
-                    Text(AppIcon.displayName(bundleID: app.bundle_id) ?? app.name).font(.system(size: 12, weight: .semibold))
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                }
-            }.buttonStyle(.plain).accessibilityLabel(app.name + ", 연결 보기")
+            AppIcon(bundleID: app.bundle_id, size: 30)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(app.name).font(.system(size: 12, weight: .semibold))
+                if let capability = app.can_do { Text(capability).font(.caption).foregroundColor(.secondary).lineLimit(2) }
+            }.frame(maxWidth: .infinity, alignment: .leading)
+            if let agents = model.apps?.agents {
+                Menu("직원 고르기") {
+                    ForEach(agents) { group in
+                        if let item = group.all.first(where: { $0.bundle_id == app.bundle_id }) {
+                            Button(agentName(group.profile)) {
+                                model.selection = group.profile; model.detail = nil
+                                model.appDetail = item; model.appReply = nil; model.appFailure = nil
+                            }
+                        }
+                    }
+                }.disabled(model.appWorking)
+            } else if let link = app.primaryLink {
+                Button("연결 보기") { model.openApp(link) }
+            }
             VStack(alignment: .trailing, spacing: 4) {
                 ForEach(app.links, id: \.self) { link in
                     Button { model.openApp(link) } label: { pill(link) }.buttonStyle(.plain)
@@ -79,7 +91,10 @@ struct InstalledAppsPage: View {
     private func otherRow(_ app: InstalledApp) -> some View {
         HStack(spacing: 10) {
             AppIcon(bundleID: app.bundle_id, size: 24)
-            Text(AppIcon.displayName(bundleID: app.bundle_id) ?? app.name).font(.system(size: 12))
+            VStack(alignment: .leading, spacing: 3) {
+                Text(app.name).font(.system(size: 12))
+                Text(app.reason ?? InstalledAppsText.noDirectFeature).font(.caption).foregroundColor(.secondary)
+            }
             Spacer()
             ForEach(app.infoTags, id: \.self) { tag in
                 Text(tag).font(.system(size: 10)).foregroundColor(.secondary).padding(.horizontal, 7).padding(.vertical, 2)
