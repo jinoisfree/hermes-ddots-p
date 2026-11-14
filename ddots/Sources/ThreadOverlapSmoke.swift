@@ -8,6 +8,32 @@ extension AppDelegate {
         var report = "", failures: [String] = []
         let records = destination.appendingPathComponent("diagnostics")
         ThreadLayoutRecorder.folder = records
+        report += "SlackModel.reducesMotion=\(SlackModel.reducesMotion), OS=\(NSWorkspace.shared.accessibilityDisplayShouldReduceMotion), reduce-motion argument=\(CommandLine.arguments.contains("--ui-smoke-reduce-motion"))\n"
+        guard !SlackModel.reducesMotion else {
+            try? report.write(to: destination.appendingPathComponent("thread-overlap.txt"), atomically: true, encoding: .utf8)
+            smokeFailed("AC4-01 requires SlackModel.reducesMotion == false; animation reproduction was not run")
+        }
+        if CommandLine.arguments.contains("--ui-smoke-overlap-shrink") {
+            failures += await overlapShrink(report: &report)
+            try? report.write(to: destination.appendingPathComponent("thread-overlap.txt"), atomically: true, encoding: .utf8)
+            if !failures.isEmpty { smokeFailed(failures.joined(separator: "\n")) }
+            return
+        }
+        if CommandLine.arguments.contains("--ui-smoke-overlap-throttle-only") {
+            failures += await overlapThrottle(destination: destination, report: &report)
+            try? report.write(to: destination.appendingPathComponent("thread-overlap.txt"), atomically: true, encoding: .utf8)
+            if !failures.isEmpty { smokeFailed(failures.joined(separator: "\n")) }
+            return
+        }
+        report += "== large list to small list (AC5-01)\n"
+        failures += await overlapShrink(report: &report)
+        report += "== animated live list changes (AC4-01)\n"
+        failures += await overlapAnimated(report: &report)
+        if CommandLine.arguments.contains("--ui-smoke-overlap-animation-only") {
+            try? report.write(to: destination.appendingPathComponent("thread-overlap.txt"), atomically: true, encoding: .utf8)
+            if !failures.isEmpty { smokeFailed(failures.joined(separator: "\n")) }
+            return
+        }
         let quick = CommandLine.arguments.contains("--ui-smoke-overlap-quick")
         for dark in [false, true] {
             for width in quick ? [CGFloat(300)] : [300, 360, 520] {
@@ -25,6 +51,8 @@ extension AppDelegate {
         if !automatic.isEmpty { failures.append("The layout watch wrote \(automatic.count) record(s) in a correct list: \(automatic)") }
         report += "== layout records\n"
         failures += await overlapRecords(destination: destination, report: &report)
+        report += "== throttled layout notification (AC4-04)\n"
+        failures += await overlapThrottle(destination: destination, report: &report)
         try? report.write(to: destination.appendingPathComponent("thread-overlap.txt"), atomically: true, encoding: .utf8)
         if !failures.isEmpty {
             FileHandle.standardError.write(Data(("OVERLAP FAIL:\n" + failures.joined(separator: "\n") + "\n").utf8))
@@ -416,6 +444,184 @@ extension AppDelegate {
         }
         report += "changes steps that were still unsettled 40ms after the action: \(pending.count)\n" + pending.prefix(20).joined(separator: "\n") + "\n"
         return failures
+    }
+
+    private func overlapLargeThreads(room: String) -> [SlackThread] {
+        var threads = (0..<70).map { index -> SlackThread in
+            let at = 1_800_010_000.0 + Double(index)
+            let post = ChatMessage(id: "overlap-motion-\(index)", fromUser: false, speaker: "합성 직원",
+                body: "합성 행 \(index)\n" + String(repeating: "줄바꿈이 있는 합성 본문입니다. ", count: 12), date: Date(timeIntervalSince1970: at))
+            return SlackThread(id: post.id, room: room, ts: String(Int(at)), root: post, replies: [], replyCount: 0, loaded: true, latest: at, latestFromUser: false)
+        }
+        var large = overlapLoaded(overlapThreads(room: room)[0])
+        large.root.body += "\n" + (0..<100).map { "합성 큰 스레드 상세 \($0)" }.joined(separator: "\n")
+        threads += [large] + Array(overlapThreads(room: room).dropFirst())
+        return threads
+    }
+
+    /// Exercise the actual SwiftUI -> NSViewRepresentable bridge with motion enabled. The large card is near the
+    /// bottom of a long list, so table recycling, height changes and window fitting can interrupt the same animation.
+    @MainActor private func overlapAnimated(report: inout String) async -> [String] {
+        func wait(_ ms: UInt64) async { try? await Task.sleep(nanoseconds: ms * 1_000_000) }
+        let model = slack.model
+        guard let room = model.postRoom else { return ["animated: no synthetic room"] }
+        var failures: [String] = []
+        func scroll(_ fraction: CGFloat) {
+            guard let scroll = model.scrollView, let doc = scroll.documentView else { return }
+            model.userScrolls += 1
+            model.scrollInputAt = ProcessInfo.processInfo.systemUptime
+            scroll.contentView.scroll(to: NSPoint(x: 0, y: max(0, doc.bounds.height - scroll.contentView.bounds.height) * fraction))
+            scroll.reflectScrolledClipView(scroll.contentView)
+        }
+        for round in 0..<12 {
+            let fresh = overlapLargeThreads(room: room), big = fresh[70]
+            model.typing = [:]; model.bells = [:]; model.notices = []
+            model.open = []; model.picked = nil; model.replyTo = nil; model.newPost = true
+            model.threads = fresh
+            // The long post must actually be expanded; a folded 100-line body is only its short preview.
+            for id in [big.root.id, fresh[69].root.id] where !chat.expandedReplies.contains(id) { chat.toggleReply(id) }
+            resizeChat(to: CGSize(width: (round % 2 == 0 ? 340 : 520) + slackStrip, height: 560))
+            await wait(900)
+            scroll([0, 0.5, 1][round % 3]); await wait(300)
+            model.pick(big, foldable: true)
+            SlackModel.animated {
+                model.bells = [big.id: true]
+                model.notices = [SlackNoticeItem(id: "synthetic-motion", title: "합성 질문", color: "#FFCC00", threads: [big.id])]
+            }
+            await wait(40)
+            // A reply changes another row while the picked card's expansion is still moving.
+            model.threads[69].root.body += "\n" + String(repeating: "합성 새 답글 높이 변화\n", count: 45)
+            await wait(40)
+            resizeChat(to: CGSize(width: (round % 2 == 0 ? 520 : 340) + slackStrip, height: 420))
+            await wait(40)
+            model.threads[70] = overlapAnswered(big)
+            await wait(40)
+            SlackModel.animated { model.notices = []; model.bells = [:] }
+            scroll(round % 2 == 0 ? 1 : 0.9)
+            await wait(40)
+            model.threads[69].root.body = fresh[69].root.body
+            await wait(700)
+            guard let coordinator = model.nativeGeometry as? NativeThreadList.Coordinator else {
+                failures.append("animated round \(round): no native list"); continue
+            }
+            let outcome = ThreadLayoutAudit.inspect(coordinator, full: false, forceLayout: false)
+            let state = coordinator.diagnostics
+            let bigHeight = state.heights[big.id] ?? 0
+            report += "animated round \(round): bigHeight=\(bigHeight) shown=\(outcome.shownRowViews)/\(outcome.rowCount) ready=\(state.ready) updating=\(state.updating) queued=\(state.queued) clip=\(coordinator.scroll.contentView.bounds)\n"
+            if bigHeight < 2000 { failures.append("animated round \(round): large thread only \(bigHeight)pt") }
+            for row in outcome.rows where row["hasRowView"] as? Bool == true {
+                report += "animated round \(round) row \(row["index"] ?? "?"): rect=\(row["rect"] ?? "?") rowView=\(row["rowView"] ?? "?")\n"
+            }
+            for violation in outcome.violations {
+                let line = "animated round \(round): \(violation.code) row \(violation.row): \(violation.detail)"
+                report += line + "\n"; failures.append(line)
+            }
+        }
+        return failures
+    }
+
+    /// AC5-01: only a large-to-small list transition in the actual chat window; no earlier overlap scenarios.
+    @MainActor private func overlapShrink(report: inout String) async -> [String] {
+        func wait(_ ms: UInt64) async { try? await Task.sleep(nanoseconds: ms * 1_000_000) }
+        let model = slack.model
+        guard let room = model.postRoom else { return ["shrink: no synthetic room"] }
+        var failures: [String] = []
+        for (shared, fraction, label) in [(true, CGFloat(1), "shared-bottom"), (true, 0.5, "shared-middle"),
+                                           (false, 1, "disjoint-bottom"), (false, 0.5, "disjoint-middle"), (true, 0, "shared-top")] {
+            let large = overlapLargeThreads(room: room), big = large[70]
+            model.typing = [:]; model.bells = [:]; model.notices = []; model.draft = ""
+            model.open = []; model.picked = nil; model.replyTo = nil; model.newPost = true
+            model.threads = large
+            for id in [big.root.id, large[69].root.id] where !chat.expandedReplies.contains(id) { chat.toggleReply(id) }
+            resizeChat(to: CGSize(width: 360 + slackStrip, height: 420))
+            await wait(900)
+            model.pick(big, foldable: true)
+            await wait(900)
+            guard let coordinator = model.nativeGeometry as? NativeThreadList.Coordinator else { failures.append("\(label): no native list"); continue }
+            model.userScrolls += 1; model.scrollInputAt = ProcessInfo.processInfo.systemUptime
+            let range = max(0, coordinator.table.bounds.height - coordinator.scroll.contentView.bounds.height)
+            coordinator.scroll.contentView.scroll(to: NSPoint(x: 0, y: range * fraction))
+            coordinator.scroll.reflectScrolledClipView(coordinator.scroll.contentView)
+            await wait(300)
+            let before = ThreadLayoutAudit.inspect(coordinator, full: false, forceLayout: false)
+            let height = coordinator.diagnostics.heights[big.id] ?? 0
+            report += "\(label) before: automaticHeights=\(coordinator.table.usesAutomaticRowHeights), rowSizeStyle=\(coordinator.table.rowSizeStyle.rawValue), current=\(model.nativeGeometry === coordinator), rows=\(before.rowCount), bigHeight=\(height), clip=\(coordinator.scroll.contentView.bounds), table=\(coordinator.table.frame), tableBounds=\(coordinator.table.bounds), violations=\(before.violations.map(\.code))\n"
+            if before.rowCount < 150 || height < 2000 { failures.append("\(label): large-list precondition not met") }
+            var small = overlapThreads(room: room)
+            if !shared {
+                for index in small.indices {
+                    small[index].id = "shrink-new-" + small[index].id
+                    small[index].root.id = small[index].id
+                    for reply in small[index].replies.indices { small[index].replies[reply].id = "shrink-new-" + small[index].replies[reply].id }
+                }
+            }
+            model.threads = small
+            resizeChat(to: CGSize(width: 440 + slackStrip, height: 560))
+            await wait(900)
+            let after = ThreadLayoutAudit.inspect(coordinator, full: false, forceLayout: false)
+            report += "\(label) after: automaticHeights=\(coordinator.table.usesAutomaticRowHeights), rowSizeStyle=\(coordinator.table.rowSizeStyle.rawValue), current=\(model.nativeGeometry === coordinator), rows=\(after.rowCount), shown=\(after.shownRowViews), clip=\(coordinator.scroll.contentView.bounds), table=\(coordinator.table.frame), tableBounds=\(coordinator.table.bounds), violations=\(after.violations.map(\.code))\n"
+            for row in after.rows where row["hasRowView"] as? Bool == true {
+                report += "\(label) row \(row["index"] ?? "?"): rect=\(row["rect"] ?? "?") rowView=\(row["rowView"] ?? "?")\n"
+            }
+            for violation in after.violations {
+                let line = "\(label): \(violation.code) row \(violation.row): \(violation.detail)"
+                report += line + "\n"; failures.append(line)
+            }
+        }
+        return failures
+    }
+
+    /// AC4-04: one clean look, then one throttled notification of a 25pt displacement, then no more layout callbacks.
+    @MainActor private func overlapThrottle(destination: URL, report: inout String) async -> [String] {
+        func wait(_ ms: UInt64) async { try? await Task.sleep(nanoseconds: ms * 1_000_000) }
+        let isolated = SlackModel()
+        let coordinator = NativeThreadList.Coordinator(model: isolated)
+        let window = NSWindow(contentRect: NSRect(x: 120, y: 120, width: 400, height: 480), styleMask: [.titled], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        let watch = ThreadLayoutWatch()
+        let folder = ThreadLayoutRecorder.folder
+        let forced = ThreadLayoutDiagnosticsPolicy.forced
+        ThreadLayoutRecorder.folder = destination.appendingPathComponent("diagnostics-throttle")
+        ThreadLayoutDiagnosticsPolicy.forced = true
+        defer {
+            watch.stop(); coordinator.disconnect(); window.close()
+            ThreadLayoutRecorder.folder = folder; ThreadLayoutDiagnosticsPolicy.forced = forced
+        }
+        window.contentView = coordinator.makeScroll(); window.makeKeyAndOrderFront(nil)
+        coordinator.update(rows: (0..<8).map { index in
+            NativeThreadRow(id: "throttle-\(index)", fixedHeight: 120, content: { AnyView(Text("합성 행 \(index)")) })
+        }, stamp: isolated.entryViewportStamp)
+        await wait(900)
+        // The tested watch receives exactly the two calls below. No later Coordinator callback supplies another look.
+        coordinator.table.afterLayout = nil
+        coordinator.table.beforeDraw = nil
+        let before = ThreadLayoutAudit.inspect(coordinator, full: false, forceLayout: false)
+        guard before.violations.isEmpty else { return ["throttle: initial list has violations"] }
+        let looks = ThreadLayoutWatch.looks
+        watch.layoutFinished(coordinator)
+        report += "throttle 1: clean violations=\(before.violations.count), looks=\(ThreadLayoutWatch.looks - looks)\n"
+        await wait(100)
+        guard let rowView = coordinator.table.rowView(atRow: 1, makeIfNecessary: false) else { return ["throttle: no live row to displace"] }
+        rowView.setFrameOrigin(NSPoint(x: rowView.frame.minX, y: rowView.frame.minY + 25))
+        let mutated = ThreadLayoutAudit.inspect(coordinator, full: false, forceLayout: false)
+        watch.layoutFinished(coordinator)
+        if !["rowview-position", "rowviews-overlap"].allSatisfy({ code in mutated.violations.contains { $0.code == code } }) {
+            return ["throttle: the 25pt displacement did not create the required violations"]
+        }
+        report += "throttle 2-3: offset=\(rowView.frame.minY - coordinator.table.rect(ofRow: 1).minY), violations=\(mutated.violations.map(\.code)), looks=\(ThreadLayoutWatch.looks - looks)\n"
+        await wait(600)
+        let idle = ThreadLayoutAudit.inspect(coordinator, full: false, forceLayout: false)
+        report += "throttle 4: offset after 600ms=\(rowView.frame.minY - coordinator.table.rect(ofRow: 1).minY), violations=\(idle.violations.map(\.code))\n"
+        await wait(2300)
+        let records = ((try? FileManager.default.contentsOfDirectory(atPath: ThreadLayoutRecorder.folder.path)) ?? []).filter { $0.hasSuffix("-auto.json") }
+        report += "throttle 5: looks=\(ThreadLayoutWatch.looks - looks), automatic records=\(records.count), offset=\(rowView.frame.minY - coordinator.table.rect(ofRow: 1).minY)\n"
+        guard records.count == 1 else { return ["throttle: expected one automatic record after a throttled notification, got \(records.count)"] }
+        let url = ThreadLayoutRecorder.folder.appendingPathComponent(records[0])
+        guard let data = try? Data(contentsOf: url), let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+              let confirmed = object["confirmedKeys"] as? [String], confirmed.contains("rowview-position@throttle-1") else {
+            return ["throttle: the automatic record did not confirm the displaced row"]
+        }
+        return []
     }
 
     private func overlapThreadsMoved(_ threads: [SlackThread], from: Int, to: Int) -> [SlackThread] {

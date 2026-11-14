@@ -8,6 +8,7 @@ _owner_library = str((_OwnerPath(__file__).resolve().parent / '..').resolve())
 if _owner_library not in _owner_sys.path:
     _owner_sys.path.insert(0, _owner_library)
 from hermes_facility.owner_text import render as _owner_text
+from hermes_schedule.policy import clock
 
 
 import argparse
@@ -109,6 +110,36 @@ def slack(home, method, body):
     if not data.get("ok"):
         raise RuntimeError(f"Slack refused {method}: {data.get('error', 'unknown_error')}")
     return data
+
+
+def upload_image(home, channel, thread_ts, path, title):
+    """Attach one image file to a thread through Slack's external upload flow."""
+    token = learning.env(home, "SLACK_BOT_TOKEN")
+    if not token:
+        raise ValueError("SLACK_BOT_TOKEN is missing.")
+    data = Path(path).read_bytes()
+
+    def call(method, body):
+        request = urllib.request.Request(
+            "https://slack.com/api/" + method, data=urllib.parse.urlencode(body).encode("utf-8"),
+            headers={"Authorization": "Bearer " + token})
+        with urllib.request.urlopen(request, timeout=20) as response:
+            reply = json.load(response)
+        if not reply.get("ok"):
+            raise RuntimeError(f"Slack refused {method}: {reply.get('error', 'unknown_error')}")
+        return reply
+
+    ticket = call("files.getUploadURLExternal", {"filename": Path(path).name, "length": len(data)})
+    target = urllib.parse.urlsplit(ticket["upload_url"])
+    if target.scheme != "https" or target.hostname != "files.slack.com":
+        raise ValueError("unexpected Slack upload URL")
+    with urllib.request.urlopen(urllib.request.Request(
+            ticket["upload_url"], data=data, headers={"Content-Type": "application/octet-stream"}), timeout=60) as sent:
+        if sent.status != 200:
+            raise ValueError("Slack upload failed")
+    call("files.completeUploadExternal", {
+        "files": json.dumps([{"id": ticket["file_id"], "title": title}]),
+        "channel_id": channel, "thread_ts": thread_ts})
 
 
 def update_message(home, channel, ts, text):
@@ -535,7 +566,7 @@ def daily(home, now=None, *, dry_run=False, day=None):
         for text in texts:
             print(text)
         return 0
-    if (now.hour, now.minute) < _rest_day().start(now, (8, 30)):
+    if (now.hour, now.minute) < _rest_day().start(now, clock('quiet_until', (8, 30))):
         return 0
     with learning.locked(path(home)):
         if learning.extension("learning_skills").enabled(home):

@@ -1,5 +1,28 @@
 import Foundation
 
+/// Only protocol words/field names survive; Slack may echo a submitted value in metadata.
+final class SlackWriteDiagnostics {
+    private let lock = NSLock()
+    private var lines: [String] = []
+    static func metadata(_ text: String) -> String {
+        let allowed: Set<String> = ["ERROR", "WARN", "error", "warning", "missing", "required", "field", "invalid", "arguments", "value", "must", "be", "a", "an", "string", "array", "object", "integer", "not", "provided", "expected", "channel_id", "channel", "thread_ts", "files", "file", "text", "initial_comment", "length", "filename", "json", "pointer"]
+        let pattern = try! NSRegularExpression(pattern: #"[^\s\[\]:,]+"#)
+        let value = NSMutableString(string: String(text.prefix(500)))
+        for match in pattern.matches(in: value as String, range: NSRange(location: 0, length: value.length)).reversed() {
+            if !allowed.contains(value.substring(with: match.range)) { value.replaceCharacters(in: match.range, with: "…") }
+        }
+        return value as String
+    }
+    func record(_ method: String, code: String, messages: [String] = []) {
+        guard method.hasPrefix("files.") || method == "chat.postMessage" else { return }
+        let safeCode = code.range(of: #"^[a-z_]{1,80}$"#, options: .regularExpression) != nil ? code : "api_error"
+        lock.lock(); defer { lock.unlock() }
+        lines.append("write method=\(method) error=\(safeCode) response_metadata.messages=\(messages.prefix(5).map(Self.metadata).joined(separator: " | "))")
+        lines = Array(lines.suffix(20))
+    }
+    var text: String { lock.lock(); defer { lock.unlock() }; return lines.joined(separator: "\n") + (lines.isEmpty ? "" : "\n") }
+}
+
 /// Slack Web API calls made with the user's own token, so replies appear under the user's name.
 struct SlackAPI {
     enum Failure: Error, Equatable { case network(String), api(String), rateLimited(Double) }
@@ -8,6 +31,7 @@ struct SlackAPI {
     typealias Raw = (_ url: URL, _ body: Data?) -> Result<Data, Failure>
     let transport: Transport
     let raw: Raw
+    let writeDiagnostics = SlackWriteDiagnostics()
     init(transport: @escaping Transport, raw: @escaping Raw = { _, _ in .failure(.network("파일을 주고받을 수 없어요.")) }) {
         self.transport = transport; self.raw = raw
     }
@@ -15,11 +39,14 @@ struct SlackAPI {
 
     func call(_ method: String, _ parameters: [String: String] = [:]) -> Result<[String: Any], Failure> {
         switch transport(method, parameters) {
-        case .failure(let failure): return .failure(failure)
+        case .failure(let failure):
+            writeDiagnostics.record(method, code: "transport_failed")
+            return .failure(failure)
         case .success(let data):
             guard let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { return .failure(.network("응답을 읽지 못했어요.")) }
             if json["ok"] as? Bool == true { return .success(json) }
             let code = json["error"] as? String ?? "unknown_error"
+            writeDiagnostics.record(method, code: code, messages: (json["response_metadata"] as? [String: Any])?["messages"] as? [String] ?? [])
             if code == "ratelimited" { return .failure(.rateLimited(30)) }
             return .failure(.api(code == "missing_scope" ? "missing_scope:" + (json["needed"] as? String ?? "") : code))
         }
@@ -478,7 +505,7 @@ final class SlackBridge {
 
     /// Called on the Slack queue. Only stamps, flags and fixed state names leave it.
     func diagnostics(room: String) -> String {
-        let lastAttempt = lastWrite.map { "read sync last: method=\($0.method) result=\($0.result) at=\($0.at.timeIntervalSince1970)\n" } ?? ""
+        let lastAttempt = api.writeDiagnostics.text + (lastWrite.map { "read sync last: method=\($0.method) result=\($0.result) at=\($0.at.timeIntervalSince1970)\n" } ?? "")
         if retention.cacheExcluded.contains(room) { return "room contents not kept\n" + lastAttempt }
         let threads = state.threads(room: room, characters: characters)
         let roots = Set((state.history[room] ?? []).filter(\.isRoot).map(\.ts))

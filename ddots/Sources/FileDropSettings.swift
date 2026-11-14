@@ -21,6 +21,15 @@ final class FileDropSettings: ObservableObject {
     static let enabledKey = "fileDropEnabled", rolesKey = "fileDropAgentRoles"
     @Published private(set) var enabled: Bool
     @Published var comparisons: [FileDropHistory.Comparison] = []
+    // Display/draft state only. A settings appearance always reloads the mini's policy.
+    @Published var engine: FileDropEnginePolicy?
+    @Published var model = ""
+    @Published var effort = ""
+    @Published var engineBusy = false
+    @Published var engineMessage = ""
+    var loadEngine: (() async throws -> FileDropEnginePolicy)?
+    var saveEngine: ((String, String?) async throws -> FileDropEnginePolicy)?
+    var efforts: [String?] { engine?.choices?.first { $0.model == model }?.efforts ?? [nil] }
     /// The organization's roles per profile as last heard from the relay context. They decide who can take a drop,
     /// so the first card after a restart already knows them.
     private(set) var roles: [String: [String]] = [:]
@@ -40,6 +49,37 @@ final class FileDropSettings: ObservableObject {
         if let data = try? JSONEncoder().encode(kept) { defaults?.set(data, forKey: Self.rolesKey) }
     }
     func setEnabled(_ value: Bool) { enabled = value; defaults?.set(value, forKey: Self.enabledKey); onEnabled?(value) }
+    func refreshEngine() {
+        engine = nil; engineMessage = "현재값을 확인하는 중이에요"
+        Task { @MainActor in
+            engineBusy = true
+            defer { engineBusy = false }
+            do { apply(try await loadEngine?()) }
+            catch { engineMessage = "맥미니를 업데이트해야 고를 수 있어요" }
+        }
+    }
+    func save() {
+        guard efforts.contains(where: { ($0 ?? "") == effort }), !model.isEmpty else { return }
+        let selectedModel = model, selectedEffort = effort.isEmpty ? nil : effort
+        Task { @MainActor in
+            engineBusy = true
+            defer { engineBusy = false }
+            do { apply(try await saveEngine?(selectedModel, selectedEffort)); engineMessage = "저장했어요" }
+            catch {
+                do {
+                    apply(try await loadEngine?())
+                    engineMessage = "저장 결과를 확인해 주세요 · 현재값을 다시 읽었어요"
+                } catch {
+                    apply(nil)
+                    engineMessage = "저장 결과를 확인하지 못했어요 · 다시 연결해 주세요"
+                }
+            }
+        }
+    }
+    private func apply(_ value: FileDropEnginePolicy?) {
+        engine = value; model = value?.model ?? ""; effort = value?.effort ?? ""
+        engineMessage = value == nil ? "맥미니를 업데이트해야 고를 수 있어요" : ""
+    }
 }
 
 struct FileDropSettingsView: View {
@@ -49,6 +89,23 @@ struct FileDropSettingsView: View {
             Toggle("파일·글 끌어놓기 제안", isOn: Binding(get: { settings.enabled }, set: settings.setEnabled))
             Text("Claude는 공유 Mac에서 파일 내용을 읽고 제안해요. 맥미니에 연결되지 않거나 늦으면 기본 제안을 보여줘요.")
                 .font(.system(size: 11)).foregroundStyle(.secondary)
+            if let engine = settings.engine, let choices = engine.choices {
+                Text(engine.title).font(.headline)
+                Picker("제안 모델", selection: $settings.model) {
+                    ForEach(choices, id: \.model) { choice in Text(choice.model.capitalized).tag(choice.model) }
+                }.disabled(settings.engineBusy).onChange(of: settings.model) { _ in
+                    if !settings.efforts.contains(where: { ($0 ?? "") == settings.effort }) { settings.effort = "" }
+                }
+                Picker("추론", selection: $settings.effort) {
+                    ForEach(settings.efforts.map { $0 ?? "" }, id: \.self) { effort in Text(effort.isEmpty ? "기본" : effort).tag(effort) }
+                }.disabled(settings.engineBusy)
+                HStack {
+                    Button("저장", action: settings.save).disabled(settings.engineBusy)
+                    Button("기본으로") { settings.model = "sonnet"; settings.effort = ""; settings.save() }.disabled(settings.engineBusy)
+                    Text("모든 Mac에 함께 적용돼요").font(.system(size: 11)).foregroundStyle(.secondary)
+                }
+            }
+            if !settings.engineMessage.isEmpty { Text(settings.engineMessage).font(.system(size: 11)).foregroundStyle(.secondary) }
             Divider()
             HStack { Text("제안 비교").font(.headline); Spacer(); Text("Claude").frame(width: 72) }
             stat("카드 표시", \.cards); stat("첫 번째 선택", \.first); stat("두·세 번째 선택", \.other)
@@ -62,7 +119,7 @@ struct FileDropSettingsView: View {
             Button("습관 지우기…") { settings.onClear?() }
             Text("기능을 끄면 접힌 펫에 놓은 것을 기존 클립보드 보관함으로 받아요.").font(.system(size: 11)).foregroundStyle(.secondary)
             Spacer(minLength: 0)
-        }.font(.system(size: 13)).padding(18).frame(width: 460, alignment: .leading)
+        }.font(.system(size: 13)).padding(18).frame(width: 460, alignment: .leading).onAppear { settings.refreshEngine() }
     }
     func stat(_ title: String, _ key: KeyPath<FileDropHistory.Comparison, Int>) -> some View {
         HStack {

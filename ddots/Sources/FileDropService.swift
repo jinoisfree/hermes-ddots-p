@@ -1,7 +1,41 @@
 import Foundation
 import Darwin
 
-enum FileDropServiceError: Error { case unavailable, sensitive, notConnected }
+enum FileDropServiceError: Error {
+    case unavailable, sensitive, notConnected, timeout, legacyContextTimeout, engineChanged
+    case connection(String)
+}
+
+enum FileDropTiming {
+    // Compatibility budget when an older server supplies no engine metadata.
+    static let legacySeconds: TimeInterval = 15
+    static let contextSeconds: TimeInterval = 5
+    static let engineWriteSeconds: TimeInterval = 10
+    static func engineLimit(_ data: Data) -> TimeInterval {
+        let request = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+        return request?["mode"] as? String == "write" ? engineWriteSeconds : contextSeconds
+    }
+    static let processGrace: TimeInterval = 2
+    // Wire bound, not the selected model's budget. Reject/clamp untrusted deadlines.
+    static let maximumSeconds: TimeInterval = 120
+    static func remaining(_ data: Data) -> TimeInterval {
+        let request = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+        if request?["mode"] as? String == "context" { return contextSeconds }
+        let remaining = (request?["deadline"] as? Double).map { $0 - Date().timeIntervalSince1970 } ?? legacySeconds
+        return remaining.isFinite ? min(maximumSeconds, max(0, remaining)) : 0
+    }
+}
+
+struct FileDropEnginePolicy: Codable, Equatable {
+    struct Choice: Codable, Equatable { var model: String; var efforts: [String?] }
+    var model: String
+    var effort: String?
+    var seconds: Double
+    var revision: String
+    var choices: [Choice]?
+    var title: String { model.capitalized + " · " + (effort ?? "기본 추론") }
+    var efforts: [String?] { choices?.first { $0.model == model }?.efforts ?? [nil] }
+}
 
 /// The process boundary accepts/returns JSON only; diagnostics never contain input or stderr.
 enum FileDropRunner {
@@ -9,23 +43,33 @@ enum FileDropRunner {
     static func available(_ home: URL) -> Bool {
         [script(home), home.appendingPathComponent("bin/hermes-run"), home.appendingPathComponent("hermes-agent/venv/bin/python"), FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".local/bin/claude")].allSatisfy { FileManager.default.fileExists(atPath: $0.path) }
     }
-    static func run(_ data: Data, home: URL) throws -> Data {
-        guard data.count <= 64 * 1024, FileManager.default.fileExists(atPath: script(home).path) else { throw CocoaError(.featureUnsupported) }
+    static func engineScript(_ home: URL) -> URL { script(home).deletingLastPathComponent().appendingPathComponent("file_drop_engine.py") }
+    static func engineAvailable(_ home: URL) -> Bool { available(home) && FileManager.default.fileExists(atPath: engineScript(home).path) }
+    static func run(_ data: Data, home: URL, engine: Bool = false) throws -> Data {
+        let script = engine ? engineScript(home) : script(home)
+        guard data.count <= 64 * 1024, FileManager.default.fileExists(atPath: script.path) else { throw CocoaError(.featureUnsupported) }
         let process = Process(), input = Pipe(), output = Pipe()
         process.executableURL = home.appendingPathComponent("hermes-agent/venv/bin/python")
-        process.arguments = [home.appendingPathComponent("bin/hermes-run").path, script(home).path, "--home", home.path]
+        process.arguments = [home.appendingPathComponent("bin/hermes-run").path, script.path, "--home", home.path]
         var environment = ProcessInfo.processInfo.environment
         environment["HERMES_HOME"] = home.path; environment["HERMES_DISABLE_LAZY_INSTALLS"] = "1"
         process.environment = environment; process.currentDirectoryURL = FileManager.default.temporaryDirectory
         process.standardInput = input; process.standardOutput = output; process.standardError = FileHandle.nullDevice
         try process.run()
-        let cutoff = DispatchWorkItem { if process.isRunning { process.terminate() } }
-        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 17, execute: cutoff)
+        let limit = engine ? FileDropTiming.engineLimit(data) : FileDropTiming.remaining(data)
+        let context = ((try? JSONSerialization.jsonObject(with: data)) as? [String: Any])?["mode"] as? String == "context"
+        let cutoff = DispatchWorkItem { if process.isRunning { kill(process.processIdentifier, SIGKILL) } }
+        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + limit + (context || engine ? 0 : FileDropTiming.processGrace), execute: cutoff)
         defer { cutoff.cancel() }
         // Write and drain concurrently so neither a large stdin nor stdout can deadlock a pipe.
         DispatchQueue.global(qos: .utility).async { try? input.fileHandleForWriting.write(contentsOf: data + Data([10])); try? input.fileHandleForWriting.close() }
         let result = output.fileHandleForReading.readDataToEndOfFile(); process.waitUntilExit()
-        if let error = (try? JSONSerialization.jsonObject(with: result)) as? [String: String], error["error"] == "sensitive_input" { throw FileDropServiceError.sensitive }
+        if let error = ((try? JSONSerialization.jsonObject(with: result)) as? [String: Any])?["error"] as? String {
+            if error == "sensitive_input" { throw FileDropServiceError.sensitive }
+            if error == "engine_changed" { throw FileDropServiceError.engineChanged }
+            if ["drop_deadline", "TimeoutExpired"].contains(error) { throw FileDropServiceError.timeout }
+        }
+        if process.terminationReason == .uncaughtSignal { throw FileDropServiceError.timeout }
         guard process.terminationStatus == 0, result.count <= 64 * 1024 else { throw FileDropServiceError.unavailable }
         return result
     }

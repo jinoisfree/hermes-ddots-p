@@ -1962,7 +1962,7 @@ final class FakeSlack {
               && !SlackNotice.isSettled(newer, confirmed: confirmed)
               && SlackNotice.items([newer], confirmed: confirmed).first?.threads == [newer.id],
               "a different approval request in the same thread reopens its buttons, state and count")
-        check(SlackNotice.approveText == "승인" && SlackNotice.denyText == "거부", "the buttons send the words Hermes reads as yes and no")
+        check(SlackNotice.approveText == "승인" && SlackNotice.denyText == "거절", "the buttons send the words Hermes reads as yes and no")
         check(SlackNotice.items(waiting, dismissed: ["slack:H:2.0": 2.2, "slack:H:3.0": 9]).map(\.title) == ["답 안 한 DM"], "a question marked read leaves the count, but an unanswered customer message cannot be waved away")
         var unread = heard; unread.replies["H"]?["2.0"] = nil
         check(SlackNotice.items(unread.threads(room: "H", characters: characters)).count == 1, "a thread whose replies are not read yet is not counted")
@@ -2351,7 +2351,7 @@ final class FakeSlack {
             check(!SlackNotice.isLearningReport(body), "not a learning report: \(body)")
         }
         let ordinary = talk([(false, "승인하면 보낼게")])
-        check(SlackNotice.answerText(ordinary, approve: true) == "승인" && SlackNotice.answerText(ordinary, approve: false) == "거부", "ordinary approval words stay unchanged")
+        check(SlackNotice.answerText(ordinary, approve: true) == "승인" && SlackNotice.answerText(ordinary, approve: false) == "거절", "ordinary approval words stay unchanged")
         let drafts = ["### 안내 메일 초안\n\n> 예약 실행이라 발송하지 않았습니다. 발송은 승인 전입니다.\n> *할 일*\n> 이 초안의 발송을 요청해 주세요.",
                       "회의 안내 메일 초안 만들었어. 아직 안 보냈어.", "메일 초안이야. 발송 대기 중이야."]
         for body in drafts {
@@ -2841,6 +2841,17 @@ final class FakeSlack {
             check(!FileManager.default.fileExists(atPath: keptFile.path) && (try? FileManager.default.contentsOfDirectory(atPath: shelfFolder.path))?.isEmpty != false, "without a place to keep it nothing is written")
         }
 
+        do {
+            let tokenCanary = "xoxb-" + "SYNTHETIC-ONLY"
+            let metadata = ["[ERROR] missing required field: channel_id", "filename private-document.pdf " + tokenCanary + " SYNTHETIC_BODY"]
+            let failure = SlackAPI(transport: { _, _ in .success(try! JSONSerialization.data(withJSONObject: ["ok": false, "error": "invalid_arguments", "response_metadata": ["messages": metadata]])) })
+            if case .failure(let error) = failure.call("files.completeUploadExternal", ["initial_comment": "SYNTHETIC_BODY"]) {
+                check(SlackAPI.message(error) == "슬랙 오류: invalid_arguments", "T-08b existing card error wording")
+            } else { check(false, "T-08b injected write failure") }
+            let diagnostics = SlackBridge(api: failure).diagnostics(room: "SYNTHETIC")
+            check(diagnostics.contains("invalid_arguments") && diagnostics.contains("missing required field: channel_id"), "T-08b write code and metadata reach existing diagnostics")
+            check(!diagnostics.contains(tokenCanary) && !diagnostics.contains("private-document.pdf") && !diagnostics.contains("SYNTHETIC_BODY"), "T-08b diagnostics omit token, file name and body")
+        }
         // Closed window: rooms take turns
         request.open = false
         let quiet = SlackBridge(api: slack.api)
@@ -3057,6 +3068,9 @@ final class FakeSlack {
                             "read:c.txt", "files.getUploadURLExternal:c.txt", "bytes:c.txt", "files.completeUploadExternal:"],
                   "each file is read only after the one before it was sent, and all are attached at the end: \(order)")
             check(fake.posted.last?["thread_ts"] == "300.0" && fake.posted.last?["files"]?.contains("F3") == true && uploader.uploadedFileIDs == ["F2", "F3", "F4"], "the files keep their IDs and their thread")
+            check(uploader.upload(room: "CTRUTH", thread: nil, text: "합성 맡김", files: [file("hub.txt", 2)]) == nil
+                  && fake.posted.last?["channel_id"] == "CTRUTH" && fake.posted.last?["thread_ts"] == nil,
+                  "AC-07 the caller-selected top hub reaches the upload API as a new post")
             order = []
             check(uploader.upload(room: "CCOW", thread: nil, text: "", files: [file("a.txt", 2), file("b.txt", 3, fails: true), file("c.txt", 4)]) == "파일을 읽지 못했어요: b.txt"
                   && order == ["read:a.txt", "files.getUploadURLExternal:a.txt", "bytes:a.txt", "read:b.txt"] && uploader.uploadedFileIDs.isEmpty, "a file that cannot be read stops the send before it is attached: \(order)")

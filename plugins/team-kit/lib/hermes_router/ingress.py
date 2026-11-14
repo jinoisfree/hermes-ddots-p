@@ -30,6 +30,8 @@ def route_event(runner: Any, event: Any, adapter: Any = None, *, store_class: An
                 or getattr(adapter, "_hermes_router_contract", None) or {})
     if not contract.get("enabled") or bool(getattr(event, "internal", False)):
         return True
+    from hermes_router.owner_contract import resolved
+    contract = resolved(contract)
 
     source = getattr(event, "source", None)
     platform = str(getattr(getattr(source, "platform", None), "value", "") or "").lower()

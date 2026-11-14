@@ -78,6 +78,7 @@ struct FileDropContext: Codable {
     var outcomes: [String: String]
     var agentRoles: [String: [String]]? = nil
     var works: [String]? = nil
+    var engine: FileDropEnginePolicy? = nil
 }
 
 enum FileDropClaude {
@@ -86,13 +87,26 @@ enum FileDropClaude {
         let s = try JSONSerialization.jsonObject(with: JSONEncoder().encode(signals))
         let input = try JSONSerialization.data(withJSONObject: ["mode": "context", "signals": s])
         let result = try await Task.detached(priority: .userInitiated) {
-            if let remote { return try remote.suggestDrop(input, files: []) }
+            if let remote { return try remote.contextDrop(input) }
             return try FileDropRunner.run(input, home: home)
         }.value
-        return try JSONDecoder().decode(FileDropContext.self, from: result)
+        let context = try JSONDecoder().decode(FileDropContext.self, from: result)
+        if let seconds = context.engine?.seconds, !seconds.isFinite || seconds <= 0 || seconds > FileDropTiming.maximumSeconds { throw FileDropServiceError.unavailable }
+        return context
     }
 
-    static func request(_ signals: FileDropSignals, files: [URL], home: URL, remote: RemoteHermes?) async throws -> FileDropAnswer {
+    static func policy(home: URL, remote: RemoteHermes?, model: String? = nil, effort: String? = nil) async throws -> FileDropEnginePolicy {
+        var request: [String: Any] = ["mode": model == nil ? "read" : "write", "source": Host.current().localizedName ?? "local"]
+        if let model { request["model"] = model; request["effort"] = effort.map { $0 as Any } ?? NSNull() }
+        let input = try JSONSerialization.data(withJSONObject: request)
+        let result = try await Task.detached(priority: .userInitiated) {
+            if let remote { return try remote.engineDrop(input) }
+            return try FileDropRunner.run(input, home: home, engine: true)
+        }.value
+        return try JSONDecoder().decode(FileDropEnginePolicy.self, from: result)
+    }
+
+    static func request(_ signals: FileDropSignals, files: [URL], home: URL, remote: RemoteHermes?, engine: FileDropEnginePolicy? = nil, deadline: Date? = nil) async throws -> FileDropAnswer {
         guard !signals.sensitive else { throw FileDropServiceError.sensitive }
         var signals = signals
         let originals = Array(files.filter {
@@ -101,7 +115,9 @@ enum FileDropClaude {
         }.prefix(5))
         func encode() throws -> Data {
             let s = try JSONSerialization.jsonObject(with: JSONEncoder().encode(signals))
-            return try JSONSerialization.data(withJSONObject: ["signals": s, "files": originals.map(\.path), "deadline": Date().addingTimeInterval(15).timeIntervalSince1970])
+            var request: [String: Any] = ["signals": s, "files": originals.map(\.path), "deadline": (deadline ?? Date().addingTimeInterval(engine?.seconds ?? FileDropTiming.legacySeconds)).timeIntervalSince1970]
+            if let engine { request["engine_revision"] = engine.revision }
+            return try JSONSerialization.data(withJSONObject: request)
         }
         var data = try encode()
         while data.count > 60 * 1024 && !signals.content.isEmpty {

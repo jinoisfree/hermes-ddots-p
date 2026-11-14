@@ -61,13 +61,13 @@ def background(env):
 def owner_chat(home, env):
     """Prove the same owner/channel identity for every write, not just a nonempty user id."""
     from hermes_facility import app_registry
-    from hermes_facility.config_assembly import yaml_load
+    from hermes_facility.config_assembly import CONFIG, yaml_load
     if background(env): return False
     platform, user = env('HERMES_SESSION_PLATFORM', '').lower(), env('HERMES_SESSION_USER_ID', '')
     if platform not in ('slack', 'photon') or not user or not env('HERMES_SESSION_CHAT_ID', ''): return False
     config_path = Path(home) / 'config.yaml'
     if not config_path.is_file(): return False
-    config = yaml_load(config_path.read_bytes())
+    config = yaml_load(config_path.read_bytes(), CONFIG)
     allowed = config.get('platforms', {}).get(platform, {}).get('api_human_users', [])
     return isinstance(allowed, list) and user in allowed
 

@@ -1,5 +1,6 @@
 """Account-bound Calendar event inverses; raw API state and etags stay private."""
 from copy import deepcopy
+from datetime import date,datetime
 import json
 import time
 import uuid
@@ -7,6 +8,7 @@ from hermes_governance import app_tools,app_undo,calendar_undo,write_policy
 from hermes_facility import app_registry
 from hermes_packs.calendar import google_calendar_accounts as g
 
+WEEKDAYS='월화수목금토일'
 MUTABLE={'title':'summary','notes':'description','location':'location','start':'start','end':'end'}
 
 
@@ -106,8 +108,38 @@ def restore(home,td,entry,context=None):
     return {'ok':content(after)==content(entry['before']),'error':'APP_CALENDAR_RESTORE_UNVERIFIED' if content(after)!=content(entry['before']) else None}
 
 
+def target(entry):
+    """One Google event however it was reached: its account, calendar and event ID."""
+    names=tuple(entry.get(key) for key in ('account','calendar_id','id'))
+    return ('google_event',)+names if all(isinstance(name,str) and name for name in names) else None
+
+
+def calendar_label(td,account):
+    try:
+        cfg=td.personal_scopes.config(td) or {}
+        scope=next((name for name in ('personal','company') if cfg[name]['gmail']==account),None)
+    except (AttributeError,KeyError,TypeError):scope=None
+    return {'personal':'개인 캘린더','company':'회사 캘린더'}.get(scope,account)
+
+
+def when(row):
+    start,end=row.get('start') or {},row.get('end') or {}
+    try:
+        if 'date' in start:
+            day=date.fromisoformat(start['date']);return f"{day.month}/{day.day}({WEEKDAYS[day.weekday()]}) 종일"
+        first=datetime.fromisoformat(start['dateTime']);last=datetime.fromisoformat(end['dateTime'])
+        return f"{first.month}/{first.day}({WEEKDAYS[first.weekday()]}) {first:%H:%M}~{last:%H:%M}"
+    except (KeyError,TypeError,ValueError):return ''
+
+
+def line(td,entry):
+    verb={'create':'일정 만들기','update':'일정 수정','delete':'일정 삭제'}.get((entry.get('arguments') or {}).get('action'),'일정 변경')
+    row=entry.get('after') or entry.get('before') or {}
+    return verb,' · '.join(part for part in (' '.join(part for part in (when(row),row.get('summary')) if part),calendar_label(td,entry.get('account'))) if part)
+
+
 def register(ctx,home,td):
     from hermes_governance import app_results
     def undo(entry):
         with app_tools.host_source(home):return restore(home,td,entry)
-    app_results.register(ctx,home,'google_calendar',undo)
+    app_results.register(ctx,home,'google_calendar',undo,target=target,line=lambda entry:line(td,entry))

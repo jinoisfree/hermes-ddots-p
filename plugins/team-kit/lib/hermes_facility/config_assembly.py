@@ -13,19 +13,43 @@ from pathlib import Path
 import tempfile
 
 
-def yaml_load(data):
+CONFIG = 'config'  # profile config.yaml and plugin.yaml: Hermes reads them with hermes_yaml (YAML 1.1)
+OWNER = 'owner'    # owner/ files and undo fragments: their readers use ruamel YAML 1.2
+
+
+def _editor(kind):
+    """The writer must parse and emit a file the way its reader reads it."""
+    if kind == CONFIG:
+        import hermes_yaml
+        return hermes_yaml.roundtrip_yaml()
+    if kind == OWNER:
+        from ruamel.yaml import YAML
+        return YAML()
+    raise ValueError('CONFIG_INVALID')
+
+
+def _read_back(kind, data):
+    if kind == CONFIG:
+        import hermes_yaml
+        return hermes_yaml.safe_load(data)
     from ruamel.yaml import YAML
-    value = YAML().load(data) if data else {}
+    return YAML(typ='safe').load(data)
+
+
+def yaml_load(data, kind=OWNER):
+    value = _editor(kind).load(data) if data else {}
     if value is None: value = {}
     if not isinstance(value, dict): raise ValueError('CONFIG_INVALID')
     return value
 
 
-def yaml_bytes(value):
-    from ruamel.yaml import YAML
+def yaml_bytes(value, kind=OWNER):
+    """Serialize, then prove the file's own reader sees exactly `value` before anyone writes it."""
     stream = StringIO()
-    YAML().dump(value, stream)
-    return stream.getvalue().encode('utf-8')
+    _editor(kind).dump(value, stream)
+    data = stream.getvalue().encode('utf-8')
+    if _read_back(kind, data) != value: raise ValueError('CONFIG_INVALID')
+    return data
 
 
 def missing_merge(current, defaults):
@@ -41,7 +65,7 @@ def assemble_config(before, *, defaults=None, packs=(), plugins=(), app_settings
         config = json.loads(before) if before.strip() else {}
         json_format = True
     except ValueError:
-        config = yaml_load(before)
+        config = yaml_load(before, CONFIG)
         json_format = False
     if not isinstance(config, dict): raise ValueError('CONFIG_INVALID')
     missing_merge(config, defaults or {})
@@ -75,12 +99,12 @@ def assemble_config(before, *, defaults=None, packs=(), plugins=(), app_settings
         chosen = config['platforms']['slack']['common_router_thread_routes'].setdefault('profiles', [])
         for profile in routes['profiles']:
             if profile not in chosen: chosen.append(profile)
-    return (json.dumps(config, ensure_ascii=False, indent=2) + '\n').encode() if json_format else yaml_bytes(config)
+    return (json.dumps(config, ensure_ascii=False, indent=2) + '\n').encode() if json_format else yaml_bytes(config, CONFIG)
 
 
 def assemble_manifest(before, default_tools, app_tools, *, required=None):
     """Tool declarations are the base policy plus capabilities chosen in the roster."""
-    value=yaml_load(before)
+    value=yaml_load(before,CONFIG)
     if not isinstance(default_tools,list) or not isinstance(app_tools,list):raise ValueError('MANIFEST_INVALID')
     combined=list(dict.fromkeys([*default_tools,*app_tools]))
     if any(not isinstance(t,str) or not t for t in combined):raise ValueError('MANIFEST_INVALID')
@@ -93,7 +117,7 @@ def assemble_manifest(before, default_tools, app_tools, *, required=None):
         merged=list(dict.fromkeys([*current,*names]))
         if current!=merged:value[field]=merged;changed=True
     if not changed:return before
-    return yaml_bytes(value)
+    return yaml_bytes(value,CONFIG)
 
 
 def app_manifests(root,home,profile,tools):
@@ -114,7 +138,7 @@ def app_manifests(root,home,profile,tools):
     links=store.read_links(root)
     for plugin in store.PLUGINS:
         canonical=root/'plugin-store'/plugin/'plugin.yaml'
-        source_manifest=yaml_load(canonical.read_bytes());declared=source_manifest.get('provides_tools',[])
+        source_manifest=yaml_load(canonical.read_bytes(),CONFIG);declared=source_manifest.get('provides_tools',[])
         host=store.host_path(root,str((home/'plugins'/plugin).relative_to(root)))
         before_host=store.snapshot(root,host)
         before=(host/'plugin.yaml').read_bytes() if (host/'plugin.yaml').exists() else None
@@ -135,9 +159,9 @@ def app_manifests(root,home,profile,tools):
         else:
             template=before if before is not None else canonical.read_bytes()
             original_host=before_host
-        initial=yaml_load(template).get('provides_tools',[]) if (baseline and baseline.get('existed',True) or not baseline and before is not None) else []
+        initial=yaml_load(template,CONFIG).get('provides_tools',[]) if (baseline and baseline.get('existed',True) or not baseline and before is not None) else []
         if not isinstance(initial,list):raise ValueError('MANIFEST_INVALID')
-        if baseline and not baseline.get('existed',True) and 'host' not in baseline and defaults.get(plugin)==yaml_load(template).get('provides_tools',[]):
+        if baseline and not baseline.get('existed',True) and 'host' not in baseline and defaults.get(plugin)==yaml_load(template,CONFIG).get('provides_tools',[]):
             defaults[plugin]=[]  # Earlier assembly inferred store-wide tools for a host that never existed.
         defaults.setdefault(plugin,list(initial))
         additions=[t for t in tools if t in declared]

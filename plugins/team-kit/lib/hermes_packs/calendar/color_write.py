@@ -5,7 +5,7 @@ import re
 import time
 import uuid
 from hermes_facility import app_registry,app_scope
-from hermes_governance import app_tools,app_undo,write_policy
+from hermes_governance import app_tools,app_undo,google_calendar_undo,write_policy
 from . import google_calendar_accounts as accounts
 
 
@@ -130,8 +130,19 @@ def restore(home,td,entry,context=None):
         return {'ok':content(after)==content(entry['before']),'error':None if content(after)==content(entry['before']) else 'GOOGLE_CALENDAR_COLOR_RESTORE_UNVERIFIED'}
 
 
+def target(entry):
+    """An event colored through the account API is the same target as the event the calendar writer made."""
+    if entry.get('kind')!='event' or entry.get('account_api') is not True:return None
+    return google_calendar_undo.target(entry)
+
+
+def line(td,entry):
+    color=str((entry.get('arguments') or {}).get('color_id') or '')
+    return '일정 색 지정',getattr(td,'GOOGLE_CALENDAR_COLOR_NAMES',{}).get(color) or ('색 '+color if color else '')
+
+
 def register(ctx,home,td):
     from hermes_governance import app_results
     def undo(entry):
         with app_tools.host_source(home):return restore(home,td,entry)
-    app_results.register(ctx,home,'calendar_color',undo)
+    app_results.register(ctx,home,'calendar_color',undo,target=target,line=lambda entry:line(td,entry))

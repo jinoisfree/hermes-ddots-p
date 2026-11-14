@@ -151,12 +151,34 @@ def read(identifier):
     return r
 
 
-def saved_requests():
+def saved_requests(*, pending_only=False):
     for item in folder().glob('*.json'):
         try:
+            if pending_only:
+                candidate = path(item.stem)
+                if candidate.stat().st_size > 64000:
+                    raise ValueError('Oversized request')
+                status = json.loads(candidate.read_text()).get('status')
+                if status in ('posted', 'night_done', 'normal', 'owner_needed', 'failed', 'no_post'):
+                    continue
             yield read(item.stem)
         except (ValueError, OSError, TypeError, KeyError, AttributeError) as exc:
+            if isinstance(exc, ValueError) and finished_record(item):
+                # A finished record from a closed room fails the current provenance check on every
+                # scan; it is excluded either way, so only unfinished records stay loud.
+                logger.debug('finished diagnosis request skipped: %s (%s)', item.name, type(exc).__name__)
+                continue
             logger.warning('diagnosis request skipped: %s (%s)', item.name, type(exc).__name__)
+
+
+def finished_record(item):
+    try:
+        if item.stat().st_size > 64000:
+            return False
+        r = json.loads(item.read_text())
+    except (ValueError, OSError):
+        return False
+    return isinstance(r, dict) and r.get('status') in ('posted', 'night_done', 'normal', 'owner_needed', 'failed', 'no_post')
 
 
 def save(r):

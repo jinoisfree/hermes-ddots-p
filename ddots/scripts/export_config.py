@@ -148,7 +148,13 @@ def export(home, team_kit_lib=None):
         raise ValueError('홈 폴더가 있는 직원이 명부에 없습니다.')
     config = yaml_load(home / 'config.yaml')
     router_config = mapping(config.get('gateway')).get('common_router')
-    raw = mapping(router_config)
+    try:
+        owner = importlib.import_module('hermes_router.owner_contract')
+    except ImportError as exc:
+        raise RuntimeError('team-kit의 lib 경로를 PYTHONPATH 또는 --team-kit-lib로 지정하세요.') from exc
+    # The router keeps rules only: the default responder is the roster's, staff Slack IDs are the vault's.
+    staff = mapping(mapping(yaml_load(home / 'owner' / 'vault.yaml').get('slack')).get('staff_user_ids'))
+    raw = owner.fill(mapping(router_config), roster, staff)
     hub = mapping(raw.get('project_hub'))
     rows = []
     if router_config is not None:
@@ -164,8 +170,7 @@ def export(home, team_kit_lib=None):
             rows.append(dict(text=text, base=router.select_profile(text, raw).profile,
                              hub=router.select_profile(text, effective).profile))
     else:
-        responders = sorted(p for p, _ in roots if 'responder' in roster[p]['roles'])
-        fallback = responders[0] if responders else ('default' if any(p == 'default' for p, _ in roots) else roots[0][0])
+        fallback = owner.default_responder(roster, {p for p, _ in roots})
         base = contract({'profiles': {'fallback': fallback}})
         home_contract = contract({'profiles': {'fallback': fallback}})
     profiles = {p for p, _ in roots}
@@ -182,7 +187,7 @@ def export(home, team_kit_lib=None):
         slack = mapping(mapping(cfg.get('platforms')).get('slack'))
         # Config loader merges platform's extra with its direct custom keys.
         extra = {**mapping(slack.get('extra')), **{k: v for k, v in slack.items() if k != 'extra'}}
-        solo = mapping(extra.get('solo_channel'))
+        solo = owner.solo_settings(mapping(extra.get('solo_channel')), staff)
         if solo.get('enabled') is True:
             team.update(strings(solo.get('team_bots'))); listeners.update(strings(solo.get('listener_bots')))
             excluded.update(strings(extra.get('report_channels')))

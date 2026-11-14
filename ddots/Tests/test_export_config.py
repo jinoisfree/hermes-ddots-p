@@ -13,6 +13,13 @@ sys.path.insert(0,str(SCRIPTS))
 import export_config as E
 import migrate_local_settings as M
 
+def _owner_contract():
+    path = Path(__file__).resolve().parents[2] / 'hermes/plugins/team-kit/lib/hermes_router/owner_contract.py'
+    spec = importlib.util.spec_from_file_location('owner_contract_under_test', path)
+    module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
+    return module
+
+
 class ConfigExportTests(unittest.TestCase):
     def test_conversation_allowlist(self):
         value = E.conversation_contract({'schema': 1, 'patterns': {'approval1': '[', 'secret': 'ignored'},
@@ -42,20 +49,23 @@ class ConfigExportTests(unittest.TestCase):
         project=SimpleNamespace(routing_contract=lambda raw,*args:raw)
         registry=SimpleNamespace(roster=lambda:{'guide':{'name':'Guide','label':'Guide','aliases':(), 'roles':()}}, home_of=lambda p,h:h)
         config={'gateway':{'common_router':{'profiles':{'fallback':'guide'},'aliases':{'guide':['Guide']},'patterns':{}}},'token':'xoxb-not-exported'}
+        owner=_owner_contract()
         calls=[]
         def read(path):
             calls.append(path.name)
-            return config if path.name=='config.yaml' else {'display_name':'Guide','secret':'sk-not-exported'}
-        with tempfile.TemporaryDirectory() as d, patch.object(E,'yaml_load',side_effect=read), patch.object(E.importlib,'import_module',side_effect=lambda n:registry if n.endswith('team_registry') else router if n.endswith('common_router') else project) as load:
+            return config if path.name=='config.yaml' else {} if path.name=='vault.yaml' else {'display_name':'Guide','secret':'sk-not-exported'}
+        modules={'hermes_facility.team_registry':registry,'hermes_router.owner_contract':owner,'hermes_router.common_router':router}
+        with tempfile.TemporaryDirectory() as d, patch.object(E,'yaml_load',side_effect=read), patch.object(E.importlib,'import_module',side_effect=lambda n:modules.get(n,project)) as load:
             first=E.export(Path(d));second=E.export(Path(d))
             self.assertEqual(first,second)
             self.assertEqual([member['profile'] for member in first['members']], ['guide'])
             self.assertEqual(first['routing']['base']['profiles']['fallback'], 'guide')
             self.assertGreaterEqual(len(first['routing_samples']),30)
             self.assertNotIn('not-exported',json.dumps(first))
-            self.assertEqual(set(calls),{'config.yaml'})
+            self.assertEqual(set(calls),{'config.yaml','vault.yaml'})
             self.assertEqual([call.args[0] for call in load.call_args_list],
-                             ['hermes_facility.team_registry', 'hermes_router.common_router', 'hermes_router.project_threads'] * 2)
+                             ['hermes_facility.team_registry', 'hermes_router.owner_contract',
+                              'hermes_router.common_router', 'hermes_router.project_threads'] * 2)
 
     def test_missing_router_reports_team_kit_lib(self):
         config = {'gateway': {'common_router': {'profiles': {'fallback': 'guide'}}}}
@@ -191,29 +201,39 @@ class RosterExportIntegrationTests(unittest.TestCase):
                     self.assertNotIn('zeta', members)
                     self.assertIn('zeta', result.stderr)
 
-    def test_multiple_responders_choose_sorted_id(self):
+    def test_multiple_responders_choose_first_in_roster(self):
+        # Same rule as the facility's first_with: roster order, so the router and ddots agree.
         self.agents['alpha']['roles'] = ['responder']
         self.write_roster()
         self.run_export()
-        self.assertEqual(json.loads(self.output.read_text())['defaults']['recipient'], 'alpha')
+        self.assertEqual(json.loads(self.output.read_text())['defaults']['recipient'], 'zeta')
 
-    def test_present_router_requires_a_member_fallback(self):
-        for raw in [{}, {'profiles': {'data_operations': 'alpha'}}]:
+    def test_present_router_takes_responder_from_roster(self):
+        # The router contract keeps rules only; its own fallback value is ignored.
+        for raw in [{}, {'profiles': {'data_operations': 'alpha'}}, {'profiles': {'fallback': 'unlisted'}},
+                    {'profiles': {'fallback': 'missing'}}]:
             with self.subTest(raw=raw):
                 (self.home / 'config.yaml').write_text(json.dumps({'gateway': {'common_router': raw}}))
-                self.output.write_bytes(b'previous')
-                self.run_export(1)
-                self.assertEqual(self.output.read_bytes(), b'previous')
+                self.run_export()
+                value = json.loads(self.output.read_text())
+                self.assertEqual(value['defaults']['recipient'], 'zeta')
+                self.assertEqual(value['routing']['base']['profiles']['fallback'], 'zeta')
+                self.assertEqual(value['routing']['hub']['profiles']['fallback'], 'zeta')
 
-    def test_router_fallback_outside_members_preserves_output(self):
-        for fallback in ['unlisted', 'missing', 'zeta']:
-            with self.subTest(fallback=fallback):
-                if fallback == 'zeta':
-                    import shutil
-                    shutil.rmtree(self.home / 'profiles/zeta')
-                (self.home / 'config.yaml').write_text(json.dumps({'gateway': {'common_router': {'profiles': {'fallback': fallback}}}}))
-                self.output.write_bytes(b'previous')
-                self.run_export(1)
-                self.assertEqual(self.output.read_bytes(), b'previous')
+    def test_roster_responder_without_home_preserves_output(self):
+        import shutil
+        shutil.rmtree(self.home / 'profiles/zeta')
+        (self.home / 'config.yaml').write_text(json.dumps({'gateway': {'common_router': {'profiles': {}}}}))
+        self.output.write_bytes(b'previous')
+        self.run_export(1)
+        self.assertEqual(self.output.read_bytes(), b'previous')
+
+    def test_vault_staff_ids_win_over_router_copy(self):
+        router = {'profiles': {}, 'project_hub': {'staff_user_ids': {'alpha': 'B_ROUTER'}}}
+        (self.home / 'config.yaml').write_text(json.dumps({'gateway': {'common_router': router}}))
+        (self.home / 'owner/vault.yaml').write_text(json.dumps({'slack': {'staff_user_ids': {'alpha': 'B_VAULT'}}}))
+        self.run_export()
+        members = {m['profile']: m for m in json.loads(self.output.read_text())['members']}
+        self.assertEqual(members['alpha']['slackUserID'], 'B_VAULT')
 
 if __name__=='__main__':unittest.main()

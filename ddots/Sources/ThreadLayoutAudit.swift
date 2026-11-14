@@ -218,7 +218,21 @@ final class ThreadLayoutWatch {
     func layoutFinished(_ coordinator: NativeThreadList.Coordinator) {
         guard ThreadLayoutDiagnosticsPolicy.enabled() else { return }
         let now = ProcessInfo.processInfo.systemUptime
-        guard now - lastLook >= ThreadLayoutDiagnosticsPolicy.checkInterval else { return }
+        let remaining = ThreadLayoutDiagnosticsPolicy.checkInterval - (now - lastLook)
+        if remaining > 0 {
+            // A quiet list may never lay out again. Keep one deferred look, or the already pending confirmation,
+            // rather than dropping the only notification of a lasting fault.
+            guard followUp == nil else { return }
+            let work = DispatchWorkItem { [weak self, weak coordinator] in
+                guard let self else { return }
+                self.followUp = nil
+                guard let coordinator else { return }
+                self.layoutFinished(coordinator)
+            }
+            followUp = work
+            DispatchQueue.main.asyncAfter(deadline: .now() + remaining, execute: work)
+            return
+        }
         look(coordinator, at: now)
     }
     func stop() { followUp?.cancel(); followUp = nil }

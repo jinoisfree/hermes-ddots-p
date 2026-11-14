@@ -90,7 +90,8 @@ def render_nights(nights):
         if rows or night.get('carried'):
             lines.append(f"*새벽 진단 · {night['day'][5:].replace('-', '/')} 03:00*")
         for row in rows:
-            label = VERDICTS.get(row['status'], row['status'])
+            label = ('판정만 있음(자동 수정 없음)' if row['status'] == 'night_done' and not row.get('fix_key')
+                     else VERDICTS.get(row['status'], row['status']))
             bad = bad or row['status'] in ('owner_needed', 'failed') or bool(row.get('fix_key'))
             head = f"  • {row['who']} · {label}" + (f" · 결함 `{row['fix_key']}`" if row.get('fix_key') else '')
             # assistant verdicts include the owner's action within 300 chars; keep that final line.
@@ -101,7 +102,7 @@ def render_nights(nights):
         if night.get('job'):
             bad = True
             lines.append('*새벽 자동 수정*\n' + '\n'.join(f'  • {R.layout.excerpt(t, 90)}' for t in night.get('items') or [])
-                         + f"\n  ↳ Paseo `{night['job']}` — 결과는 이 글의 스레드에 올린다. 커밋이 생기면 확인·되돌리기, 보류만 있으면 확인·의견 버튼으로 결정한다. 푸시는 확인 뒤다.")
+                         + f"\n  ↳ Paseo `{night['job']}` — 결과는 이 글의 스레드에 올린다. 커밋이 생기면 확인·되돌리기, 보류만 있으면 확인·의견 버튼으로 결정한다. 확인은 결과 확인이며, 미반영분만 Hermes가 원격 최신 위에 올린다.")
         if night.get('check_error'):
             lines.append(f"  • 새벽 점검 읽기 실패: `{night['check_error']}`")
         if night.get('enqueue_error'):
@@ -118,13 +119,14 @@ def render_nights(nights):
     return lines, bad
 
 
-def render(doctor, errors, notices, nights=()):
+def render(doctor, errors, notices, nights=(), waiting=""):
+    persisting = doctor.get("persisting", [])
     broken, recovered = doctor['broken'], doctor['recovered']
     night_lines, night_bad = render_nights(nights)
-    if not (broken or recovered or errors or notices or night_lines):
+    if not (broken or recovered or errors or notices or night_lines or persisting or waiting):
         return ''
     bad = any(row['level'] in ('warning', 'error', 'critical', 'fail') for row in notices) or night_bad
-    color = '🔴' if broken or bad else '🟡' if errors else '🟢'
+    color = '🔴' if broken or persisting or waiting or bad else '🟡' if errors else '🟢'
     owner_rows = [row for night in nights for row in night.get('diagnoses', []) if row.get('status') == 'owner_needed']
     lines = [_owner_text(f'*{color} <<doctor_name>> 아침 시스템 보고*'),
              f'*핵심 변화*\n새 문제 {len(broken)}건 · 회복 {len(recovered)}건 · 새 오류 {len(errors)}종 · 정비 {len(notices)}건']
@@ -133,6 +135,13 @@ def render(doctor, errors, notices, nights=()):
     elif any(n.get('job') for n in nights):
         lines.append('*처리 상태*\n자동 수정 결과는 이 스레드에 이어진다. 커밋이 생기면 확인·되돌리기, 보류만 있으면 확인·의견 버튼에서 결정해 줘.')
     lines.extend(night_lines)
+    if waiting:
+        lines.append(waiting)
+    if persisting:
+        now = datetime.fromisoformat(doctor['state']['ranAt'])
+        lines.append(f'*계속 고장 {len(persisting)}건*\n' + '\n'.join(
+            f"  • `{r['id']}`: {r['detail']} · {(now - datetime.fromisoformat(r['since'])).days + 1}일째"
+            for r in persisting))
     if broken or recovered:
         lines.append('*매일 점검*')
         for label, rows in (('새 문제', broken), ('회복', recovered)):
@@ -167,6 +176,19 @@ def render(doctor, errors, notices, nights=()):
     return '\n\n'.join(lines)
 
 
+def waiting_summary(home, now, root=None):
+    from hermes_schedule.policy import section
+    policy = section('autofix_policy', {}, root=root or team.root_home())
+    days = policy.get('persist_days') if isinstance(policy, dict) else None
+    if type(days) is not int or not 1 <= days <= 30:
+        return ''
+    state = module('paseo_autofix').load(home)
+    ages = [(now.timestamp() - j.get('phase_at', j.get('queued_at', now.timestamp()))) / 86400
+            for j in state['jobs'].values() if j.get('status') in ('held', 'reported')]
+    ages = [int(age) for age in ages if age > days]
+    return f'확인 대기 {len(ages)}건 · 가장 오래된 것 {max(ages)}일' if ages else ''
+
+
 def run(root, home, agents, document, *, dry_run=False, now=None):
     root, home = Path(root), Path(home)
     now = now or datetime.now(ZoneInfo('Asia/Seoul'))
@@ -189,7 +211,15 @@ def run(root, home, agents, document, *, dry_run=False, now=None):
             errors = E.prepare(root, home, now=now.timestamp())
             sent, notices = Q.snapshot(queue)
             nights = unreported(home)
-            text = render(doctor, errors['new'], notices, nights)
+            covered = pending.get('complete') and pending.get('day') == now.date().isoformat()
+            waiting = ''
+            if not covered:
+                try:
+                    waiting = waiting_summary(home, now, root=root)
+                except Exception:
+                    waiting = '확인 대기 읽기 실패'
+            text = render({**doctor, 'persisting': []} if covered else doctor, errors['new'], notices, nights,
+                          waiting)
             pending = {'day': now.date().isoformat(), 'text': text, 'doctor': doctor,
                        'errors': {k: v for k, v in errors.items() if k != 'path'},
                        'queue': sent, 'nights': nights, 'channel': CHANNEL, 'complete': False,

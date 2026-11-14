@@ -62,6 +62,7 @@ struct RelayFrame: Codable {
         }
     }
     var dropVersion: Int?
+    var dropEngine: Int?
     var drop: Data?
     var file: Int?
     var part: Int?

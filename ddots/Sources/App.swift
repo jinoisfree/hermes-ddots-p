@@ -568,6 +568,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
                 }
                 self.capture(destination: destination)
                 if CommandLine.arguments.contains("--ui-smoke-bubble-reply-live") { Task { @MainActor in await self.verifyBubbleReplyLive(destination: destination) } }
+                else if CommandLine.arguments.contains("--ui-smoke-drop-clock") { Task { @MainActor in await self.verifyFileDropClock(destination: destination); NSApp.terminate(nil) } }
+                else if CommandLine.arguments.contains("--ui-smoke-drop-model") { Task { @MainActor in await self.verifyFileDropModel(destination: destination) } }
                 else if CommandLine.arguments.contains("--ui-smoke-file-drop-live") { Task { @MainActor in await self.verifyFileDropLive(destination: destination) } }
                 else if CommandLine.arguments.contains("--ui-smoke-file-drop") { Task { @MainActor in await self.verifyFileDrop(destination: destination) } }
                 else if CommandLine.arguments.contains("--ui-smoke-clipboard") { Task { @MainActor in await self.verifyClipboard(destination: destination) } }
@@ -1667,7 +1669,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         if !isSmoke { bindFileDropHistory(force: true) }
         slack.syncSend = remote.map { client in { entries, user, replace in client.sendSync(user: user, entries: entries, replace: replace) } }
         old?.stop()
-        if hermesEnabled { remote?.start() }
+        remote?.setEnabled(chat: hermesEnabled, fileDrop: fileDropSettings.enabled)
     }
     /// Sources are selected on the main thread and captured by each background request, so switching never waits for I/O.
     func replaceHermesSource(_ source: HermesSource) {
@@ -1780,7 +1782,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
             connectHermesSource()
         case .alertSecondButtonReturn:
             UserDefaults.standard.set(false, forKey: "hermesChatEnabled")
-            remoteHermes?.stop()
+            connectHermesSource()
             replaceHermesSource(HermesBridge())
             collapseChat(); pendingMessages = []; sendNotice = nil; applyChat(nil); updatePet()
         default: return

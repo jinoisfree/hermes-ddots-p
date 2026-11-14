@@ -383,6 +383,11 @@ def _mail_app_execute(services, operation: str, values: dict[str, Any], gmail_er
 
 def _mail_app_accounts(services, runner):
     configured = services._gmail_account().strip().casefold()
+    scopes = services.personal_scopes
+    cfg = scopes.config(services.host) if scopes is not None else None
+    if isinstance(cfg, dict) and not cfg.get('invalid') and scopes.current(services.host) in scopes.OWNERS:
+        # MAIL_ACCOUNT holds the address asked about; the gmail route is the connected mailbox only.
+        configured = str(cfg[scopes.OWNERS[scopes.current(services.host)]]['gmail']).strip().casefold()
     return [{**row, "routes": {a: "gmail" if a == configured else "mail_app" for a in row["addresses"]}}
             for row in services.mail_app.accounts(runner)]
 

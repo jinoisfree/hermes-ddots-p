@@ -8,6 +8,7 @@ _owner_library = str((_OwnerPath(__file__).resolve().parent / '..').resolve())
 if _owner_library not in _owner_sys.path:
     _owner_sys.path.insert(0, _owner_library)
 from hermes_facility.owner_text import render as _owner_text
+from hermes_schedule.policy import clock
 
 
 import argparse
@@ -438,7 +439,7 @@ def daily(home, now=None, *, dry_run=False, summarizer=None):
         return 0
     with learning.locked(path(home)):
         record_midnight(home, now)
-        if (now.hour, now.minute) < _rest_day().start(now, (8, 29)):
+        if (now.hour, now.minute) < _rest_day().start(now, clock('skill_report_start', (8, 29))):
             return 0
         state = prune(load(home), now)
         key = now.date().isoformat()  # Today only: a missed day is not sent late.

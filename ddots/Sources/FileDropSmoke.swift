@@ -62,6 +62,7 @@ extension AppDelegate {
         }
         collapseChat(); pet.previewRow = nil; pet.previewLook = false
         let card = fileDrop
+        let productionEngine = card.engine
         card.pasteboard = { board }
         let syntheticCast = FileDropCast(members: ["work-x", "home-y", "doc-z"], roles: ["work-x": ["work"], "home-y": ["personal"], "doc-z": ["doctor"]], fallback: "work-x")
         card.cast = { syntheticCast }
@@ -96,6 +97,12 @@ extension AppDelegate {
         text("합성 일반 자료"); card.engine = { _, _ in throw FileDropServiceError.unavailable }; card.receive(board)
         await until("Claude failure origin", { card.origin == "기본 제안이에요 · Claude 연결 실패" })
         check(card.proposals.count == 3 && card.origin == "기본 제안이에요 · Claude 연결 실패", "AC-11 failed Claude boundary keeps fallback and states why on the status line")
+        for reason in ["맥미니 주소를 입력해 주세요", "연결 코드를 다시 입력해 주세요", "맥미니 연결 확인 · 12:34", "맥미니 앱을 업데이트해 주세요"] {
+            card.close(); card.engine = { _, _ in throw FileDropServiceError.connection(reason) }
+            text("합성 연결 사유"); card.receive(board)
+            await until("T-08c connection reason", { card.origin == FileDropCard.basic(reason) })
+            check(card.origin == FileDropCard.basic(reason), "T-08c distinct connection reason on actual card: " + reason)
+        }
         card.close(); card.engine = { _, _ in throw FileDropServiceError.notConnected }; text("합성 연결 없음"); card.receive(board)
         await until("not connected origin", { card.origin == "기본 제안이에요 · 맥미니에 연결되지 않았어요" })
         check(card.proposals.count == 3 && card.status.isEmpty && !card.origin.contains("맥 AI"), "AC-09 no link to the Mac mini keeps the default proposals and says why")
@@ -304,7 +311,7 @@ extension AppDelegate {
         performFileDrop(action)
         await until("file handoff", { script.sent.count == beforeSend + 1 && !card.sending })
         let sent = script.sent.last!
-        check(sent["channel_id"] == "CCOW" && sent["thread_ts"] == nil && sent["initial_comment"]?.hasPrefix("<@Uoffice> 📎 ddots 파일 맡김") == true && sent["initial_comment"]?.contains("지시: 세 줄 요약") == true && sent["files"]?.contains("두쪽.pdf") == true, "AC-16/41 fixed format, file, explicit mention and top pinned new post")
+        check(sent["channel_id"] == "CTRUTH" && sent["thread_ts"] == nil && sent["initial_comment"]?.hasPrefix("<@Uoffice> 📎 ddots 파일 맡김") == true && sent["initial_comment"]?.contains("지시: 세 줄 요약") == true && sent["files"]?.contains("두쪽.pdf") == true, "AC-16/41 fixed format, file, explicit mention and top hub new post")
         card.close(); faces()
         card.engine = { _, _ in FileDropAnswer(suggestions: [], summary: "합성 업무", confidence: 0.3, works: ["합성 장비 구매"]) }
         put([pdf]); card.receive(board)
@@ -328,11 +335,24 @@ extension AppDelegate {
         card.close(); faces([], hub: "CTRUTH"); text("기본 채널 합성 글"); card.receive(board)
         let beforeHub = script.sent.count; performFileDrop(action)
         await until("hub handoff", { script.sent.count == beforeHub + 1 && !card.sending })
-        check(script.sent.last?["channel"] == "CTRUTH" && script.sent.last?["thread_ts"] == nil, "AC-41 empty pins falls back to default channel")
-        card.close(); faces([], hub: nil); text("채널 없음"); card.receive(board)
-        let beforeMissing = script.sent.count; performFileDrop(action)
-        check(script.sent.count == beforeMissing && card.problem == "맨 위에 고정한 채널이 필요해요", "AC-41 both channels missing refuses send")
-        card.close(); faces(); slack.model.members["CCOW"] = [.init(profile: "doc-z", name: "진단담당", user: "UDOCTOR")]
+        check(script.sent.last?["channel"] == "CTRUTH" && script.sent.last?["thread_ts"] == nil, "AC-41 empty pins still use the top hub")
+        card.close(); faces(["", "", "", "", "CCOW"]); text("다섯째 고정 칸 합성 글"); card.receive(board)
+        let beforeFifth = script.sent.count; performFileDrop(action)
+        await until("fifth pin handoff", { script.sent.count == beforeFifth + 1 && !card.sending })
+        check(script.sent.last?["channel"] == "CTRUTH", "T-09 fifth pin is ignored in favor of the top hub")
+        card.close(); faces(["", "", "", "", ""], hub: "CTRUTH"); text("빈 다섯 칸 합성 글"); card.receive(board)
+        let beforeEmptyFive = script.sent.count; performFileDrop(action)
+        await until("empty five hub handoff", { script.sent.count == beforeEmptyFive + 1 && !card.sending })
+        check(script.sent.last?["channel"] == "CTRUTH", "T-08a all five empty pins use hub")
+        let beforeMissing = script.sent.count
+        for hub: String? in [nil, ""] {
+            card.close(); faces(["", "", "", "", "CCOW"], hub: hub); text("채널 없음"); card.receive(board)
+            let callsBefore = script.requestCount
+            let accepted = performFileDrop(action)
+            await pause()
+            check(!accepted && script.requestCount == callsBefore && script.sent.count == beforeMissing && card.problem == "고정 채널이 필요해요", "T-08a missing or empty hub makes zero Slack calls even with a fifth pin")
+        }
+        card.close(); faces(); slack.model.members["CTRUTH"] = [.init(profile: "doc-z", name: "합성 점검원", user: "UDOCTOR")]
         text("absent 합성 글"); card.receive(board); performFileDrop(action)
         check(script.sent.count == beforeMissing && card.problem.contains("이 채널에 없어요"), "REQ-FD-22 absent does not reroute")
         card.close(); faces(); slack.model.source = .slack; slack.model.show(room: "CCOW"); showChat(); await pause(0.4)
@@ -340,7 +360,7 @@ extension AppDelegate {
         let attachment = AttachmentDropView(frame: pet.bounds); attachment.model = slack.model; pet.addSubview(attachment)
         check(attachment.drop(from: board, at: CGPoint(x: 20, y: 20)) && slack.model.attachments.contains(pdf), "AC-02 expanded conversation keeps attachment destination")
         attachment.removeFromSuperview(); slack.model.attachments = []
-        if let existing = slack.fileDropThreads.first(where: { $0.room == "CCOW" }) {
+        if let existing = slack.fileDropThreads.first(where: { $0.room == "CTRUTH" }) {
             fileDropWatch.notices = [.init(assignment: "synthetic-open", thread: existing, profile: "work-x", label: "세 줄 요약", state: .closed)]
             collapseChat(); updatePet(); check(pet.headline.hasPrefix("🟢 ") && pet.headline.contains("끝냈어요"), "AC-42 real completion bubble with green status point")
             await pause(0.6); capture(destination: destination.appendingPathComponent("design-complete"))
@@ -420,8 +440,8 @@ extension AppDelegate {
         check(claudeSelections == 1, "AC-12 a stored legacy engine value is ignored; only the Claude engine is called on the drop")
         check(claudeRecent, "AC-37 the Claude engine boundary receives recent summaries and excludes the 49-hour record")
         card.close()
-        var persistedThread = slack.fileDropThreads.first { $0.room == "CCOW" }!
-        var persistedReply = ChatMessage(id: "slack:CCOW:synthetic-reply", fromUser: false, speaker: "업무비서", body: "합성 결과", date: Date())
+        var persistedThread = slack.fileDropThreads.first { $0.room == "CTRUTH" }!
+        var persistedReply = ChatMessage(id: "slack:CTRUTH:synthetic-reply", fromUser: false, speaker: "합성 업무원", body: "합성 결과", date: Date())
         persistedReply.hermesReplyState = .closed; persistedThread.replies = [persistedReply]
         fileDropWatch.assignments = [.init(room: persistedThread.room, ts: persistedThread.ts, files: [], profile: "work-x", label: "세 줄 요약")]
         fileDropWatch.notices = []; fileDropWatch.onChange?(); fileDropWatch.update([persistedThread])
@@ -518,6 +538,7 @@ extension AppDelegate {
             }
             NSApp.appearance = nil; panel.appearance = nil; card.enrich = enrich; card.profileName = originalName
         }
+        await verifyFileDropSequence(destination: destination, engine: productionEngine)
         print("PASS file-drop early-stage smoke; actual card/PDFKit, engine doubles; see file-drop-checks.txt")
         NSApp.terminate(nil)
     }

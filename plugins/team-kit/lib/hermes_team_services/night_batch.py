@@ -80,7 +80,7 @@ def save(home, state, Q):
 
 
 def pending_requests(DR):
-    rows = [r for r in DR.saved_requests() if r.get('status') == 'pending' and r.get('deferred') == 'night']
+    rows = [r for r in DR.saved_requests(pending_only=True) if r.get('status') == 'pending' and r.get('deferred') == 'night']
     return sorted(rows, key=lambda r: r['created_at'])
 
 
@@ -116,6 +116,29 @@ def retention(root):
     return {'total': total, 'rows': [[name, count] for name, count, *_ in rows if count]}
 
 
+def persistent_items(doctor, state, root, now):
+    from hermes_schedule.policy import section
+    policy = section('autofix_policy', {}, root=root)
+    keys = ('persist_days', 'persist_repeat_days')
+    if not isinstance(policy, dict) or not all(k in policy for k in keys):
+        return [], {}
+    if any(type(policy[k]) is not int or not 1 <= policy[k] <= 30 for k in keys):
+        raise ValueError('invalid autofix persistence policy')
+    handed, selected = state.get('persist_handed', {}), []
+    for row in doctor.get('persisting', []):
+        since = datetime.fromisoformat(row['since'])
+        if (now - since).days < policy['persist_days']:
+            continue
+        old = handed.get(row['id'], {})
+        if (old.get('detail') == row['detail'] and old.get('day') and
+                (now.date() - datetime.fromisoformat(old['day']).date()).days < policy['persist_repeat_days']):
+            continue
+        selected.append(row)
+    text = '\n'.join(f"{r['id']}: {r['detail']} (since {r['since']})" for r in selected)
+    return ([system_item(text)] if selected else []), {
+        r['id']: {'detail': r['detail'], 'day': now.date().isoformat()} for r in selected}
+
+
 def run(root, home, agents, document, *, dry_run=False, now=None):
     root, home = Path(root), Path(home)
     now = now or datetime.now(KST)
@@ -142,12 +165,18 @@ def run(root, home, agents, document, *, dry_run=False, now=None):
                 done = {**r, 'status': 'failed', 'error': type(exc).__name__}
             results.append(summary(done))
         try:
+            doctor = {}
             doctor = D.prepare(root, home, agents, document, now=now)
             errors = E.prepare(root, home, now=now.timestamp())
-            checked = MS.render(doctor, errors['new'], []) if (doctor['broken'] or errors['new']) else ''
+            checked = MS.render({**doctor, 'persisting': []}, errors['new'], []) if (doctor['broken'] or errors['new']) else ''
             check_error = ''
         except Exception as exc:  # the diagnoses above are already done; keep them
             checked, check_error = '', type(exc).__name__
+        persistent, handed = [], {}
+        try:
+            persistent, handed = persistent_items(doctor, state, root, now)
+        except Exception as exc:
+            check_error = type(exc).__name__
         defects = [row for row in results if row['status'] == 'night_done' and row['fix_key']]
         key = 'night-' + day
         queued, items, enqueue_error = None, [], ''
@@ -155,6 +184,7 @@ def run(root, home, agents, document, *, dry_run=False, now=None):
         try:
             items = [A.incident_item(DR.read(row['id']), row['fix_key'], str(DR.path(row['id'])), [])
                      for row in defects]
+            items.extend(persistent)
             if checked:
                 items.append(system_item(checked))
             if items and not dry_run:
@@ -177,6 +207,8 @@ def run(root, home, agents, document, *, dry_run=False, now=None):
             except Exception as exc:
                 night['retention'] = {'error': type(exc).__name__}
         if not dry_run:
+            if queued in ('queued', 'duplicate'):
+                state.setdefault('persist_handed', {}).update(handed)
             state['nights'][day] = night
             save(home, state, Q)
         return night

@@ -923,6 +923,28 @@ def _register_news_watch_note(ctx) -> None:
                       description=reader.SCHEMA['description'], emoji='📰')
 
 
+def _register_cctv(ctx) -> None:
+    """Reference photos and the owner-approved reconnect for the CCTV check (customers role, macOS). Owner chat is proven again on every call."""
+    if _sys.platform != "darwin":
+        return
+    from hermes_constants import get_hermes_home
+    home = Path(get_hermes_home())
+    if not team.home_has_role(home, "customers"):
+        return
+    from hermes_packs.cctv import reference
+    ctx.register_tool(name="cctv_reference", toolset="team-kit", schema=reference.SCHEMA,
+                      handler=lambda args, **kwargs: reference.handle(home, args, **kwargs),
+                      description=reference.SCHEMA["description"], emoji="📷")
+    from hermes_packs.cctv import now
+    ctx.register_tool(name="cctv_now", toolset="team-kit", schema=now.SCHEMA,
+                      handler=lambda args, **kwargs: now.handle(home, args, **kwargs),
+                      description=now.SCHEMA["description"], emoji="📷")
+    # The reconnect the owner approves in the customer room: the background check only proposes it (shared Windows account).
+    from hermes_governance import proposal_decisions
+    from hermes_packs.cctv import executor
+    executor.register(home, proposal_decisions)
+
+
 def _register_x_read(ctx) -> None:
     """Public X reading (settings.x_read): one owner-chat tool and its prompt note."""
     configured = ctx.get_config("x_read", {})
@@ -1294,6 +1316,10 @@ def register(ctx) -> None:
     except Exception:
         logger.exception("team-kit X reading registration failed")
     try:
+        _register_cctv(ctx)
+    except Exception:
+        logger.exception("team-kit CCTV reference registration failed")
+    try:
         _register_slack_read(ctx)
     except Exception:
         logger.exception("team-kit Slack reading registration failed")
@@ -1339,6 +1365,12 @@ def register(ctx) -> None:
         app_receipts.register(ctx)
     except Exception:
         logger.exception('team-kit app receipt registration failed')
+    try:
+        from hermes_constants import get_hermes_home
+        from hermes_governance import proposal_decisions
+        proposal_decisions.register(ctx, get_hermes_home())
+    except Exception:
+        logger.exception('team-kit proposal decision registration failed')
     _register_app_packs(ctx)
     ctx.register_hook("pre_tool_call", _pre_tool_call)
     try:

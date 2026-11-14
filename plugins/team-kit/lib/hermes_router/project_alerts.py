@@ -33,7 +33,8 @@ async def annotate(adapter, event, routing_text, bot_uid):
 async def origin(adapter, event):
     source = event.source
     runner = getattr(adapter, 'gateway_runner', None)
-    contract = getattr(getattr(runner, 'config', None), 'common_router', {}) or {}
+    from hermes_router.owner_contract import resolved
+    contract = resolved(getattr(getattr(runner, 'config', None), 'common_router', {}) or {})
     hub = contract.get('project_hub', {})
     if (hub.get('enabled') is not True or source.chat_id != hub.get('channel_id')
             or not source.thread_id or source.thread_id == event.message_id):

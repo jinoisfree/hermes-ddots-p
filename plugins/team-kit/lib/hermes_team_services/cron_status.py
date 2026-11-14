@@ -28,11 +28,24 @@ FIELDS = ("id", "name", "enabled", "state", "schedule", "schedule_display", "rep
           "paused_at", "paused_reason", "next_run_at", "last_run_at", "last_status",
           "last_error", "last_delivery_error", "last_delivery_unverified", "failure_streak",
           "deliver", "failure_deliver")
-NOTE = (_owner_text("[예약 상태 조회] 소유자가 예약 등록 여부·활성 상태·다음 실행·최근 결과를 물으면 "
+def schedule_references(text):
+    from hermes_schedule.catalog import read
+    path = team.root_home() / 'owner/policy.yaml'
+    if not path.exists():
+        return text
+    policy = read(path)
+    matches = [b['job_id'] for b in policy['schedule_bindings'] if b.get('key') == 'work.meeting.report']
+    if len(matches) > 1:
+        raise ValueError('MEETING_SCHEDULE_BINDING_DUPLICATED')
+    return text.replace('<<work_meeting_job_id>>', matches[0] if matches else '미연결').replace(
+        '<<retired_meeting_job_id>>', policy.get('schedule_references', {}).get('work.meeting.retired', '없음'))
+
+
+NOTE = (_owner_text(schedule_references("[예약 상태 조회] 소유자가 예약 등록 여부·활성 상태·다음 실행·최근 결과를 물으면 "
         "cron_status(action='list') 또는 cron_status(action='get', job_id='예약 ID')로 현재 상태를 읽는다. "
-        "<<meeting_report_title>>은 <<work_name>> 예약(bbf498cc15a0)이라 이 도구로 보이지 않는다. 1a932448f6da는 2026-10-17 이관 뒤 멈춘 옛 예약이다. 과거 대화·문서만 보고 확인을 Paseo에 떠넘기지 않는다. "
+        "<<meeting_report_title>>은 <<work_name>> 예약(<<work_meeting_job_id>>)이라 이 도구로 보이지 않는다. <<retired_meeting_job_id>>는 2026-10-17 이관 뒤 멈춘 옛 예약이다. 과거 대화·문서만 보고 확인을 Paseo에 떠넘기지 않는다. "
         "next_run_at_kst는 저장된 예정 시각이며 실제 실행·전달 성공을 보장하지 않는다. "
-        "last_run_at가 없으면 아직 실행 이력이 없다고 말한다. 새 예약·변경·수동 실행은 이 도구의 범위가 아니다."))
+        "last_run_at가 없으면 아직 실행 이력이 없다고 말한다. 새 예약·변경·수동 실행은 이 도구의 범위가 아니다.")))
 
 
 def enabled(config):

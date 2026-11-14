@@ -27,10 +27,10 @@ def path_for(home): return Path(home) / 'state/app-undo.json'
 def legacy_paths(home):
     from hermes_facility.app_registry import root_of
     from hermes_facility.app_registry import read_team, profile_of
-    from hermes_facility.config_assembly import yaml_load
+    from hermes_facility.config_assembly import CONFIG, yaml_load
     paths = [Path(home) / 'state/notion-rollback.json', Path(home) / 'state/personal-work-rollback.json']
     cfg_path = Path(home) / 'config.yaml'
-    cfg = yaml_load(cfg_path.read_bytes()) if cfg_path.exists() else {}
+    cfg = yaml_load(cfg_path.read_bytes(), CONFIG) if cfg_path.exists() else {}
     roles_on = cfg.get('plugins', {}).get('entries', {}).get('team-delegation', {}).get('settings', {}).get('personal_roles', {}).get('enabled') is True
     role = 'work' if roles_on else 'personal'
     agents = read_team(root_of(home)).get('agents', {})

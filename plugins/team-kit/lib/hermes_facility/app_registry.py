@@ -204,9 +204,9 @@ class AppContext:
     def get_config(self, key, default=None):
         root = root_of(self._home); profile = profile_of(self._home)
         if not explicit(root, profile): return self._context.get_config(key, default)
-        from hermes_facility.config_assembly import yaml_load
+        from hermes_facility.config_assembly import CONFIG, yaml_load
         path = self._home / 'config.yaml'
-        config = yaml_load(path.read_bytes()) if path.exists() else {}
+        config = yaml_load(path.read_bytes(), CONFIG) if path.exists() else {}
         derived = derived_settings(config, grants(root, profile, config), values(root, profile))
         plugin = getattr(self._context, 'plugin_name', '') or getattr(getattr(self._context,'manifest',None),'name','')
         # Each host only requests the settings it owns; overlapping keys are absent here.

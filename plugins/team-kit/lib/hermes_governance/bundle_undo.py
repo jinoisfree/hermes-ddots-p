@@ -4,6 +4,7 @@ from contextlib import contextmanager
 from copy import deepcopy
 import hashlib
 import json
+import subprocess
 import threading
 import time
 from hermes_facility import app_scope,app_registry
@@ -15,7 +16,21 @@ _SELECTED=ContextVar('personal_result_entry',default=None)
 _DISPATCH=ContextVar('personal_bundle_dispatch',default=None)
 
 
+# The host abandons a pre_tool_call guard after 30s and then fails the same guard
+# closed for 60s. All approval pre-reads share one budget below that cap.
+GATE_READ_BUDGET_SECONDS=20.0
+
+
 def selected():return _SELECTED.get()
+
+
+def bounded_runner(runner):
+    deadline=time.monotonic()+GATE_READ_BUDGET_SECONDS
+    def run(command,*args,timeout=None,**kwargs):
+        left=deadline-time.monotonic()
+        if left<=0:raise subprocess.TimeoutExpired(command,0)
+        return runner(command,*args,timeout=left if timeout is None else min(timeout,left),**kwargs)
+    return run
 
 
 @contextmanager
@@ -85,7 +100,7 @@ def gate(home,td,args,context):
     if not write_policy.owner_chat(home,app_tools.env):raise ValueError('APP_OWNER_CHAT_REQUIRED')
     digest=td._bundle_digest(normalized)
     if td._common_work_store().bundle_receipt(bundle_key=td._bundle_key(digest),payload_digest=digest) is not None:return None
-    rows=prepare(home,td,operations,context)
+    rows=prepare(home,td,operations,{**context,'runner':bounded_runner(context.get('runner') or subprocess.run)})
     needs=kind(rows) not in (write_policy.READ,write_policy.REVERSIBLE)
     digest=td._bundle_digest(normalized)[:16]
     with _LOCK:

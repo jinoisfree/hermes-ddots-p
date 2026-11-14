@@ -287,6 +287,33 @@ def _quoted_body(content):
     return origin, body.removeprefix(ORIGIN_NOTE).strip()
 
 
+# The only notes the gateway puts in front of an owner's text when it attaches a picture
+# (gateway/run_inbound.py auto-analysis, agent/vision_message_prep.py, agent/image_routing.py).
+# Each carries the cached file's path. Nothing else is skipped before the Slack user header.
+_MEDIA_NOTES = tuple(re.compile(pattern, re.S) for pattern in (
+    r"\[The user sent an image~ Here's what I can see:\n.*?\]\n\[If you need a closer look, use vision_analyze with image_url: (?P<path>[^\n]+?) ~\]",
+    r"\[The user sent an image but I couldn't quite see it this time \(>_<\) You can try looking at it yourself with vision_analyze using image_url: (?P<path>[^\n\]]+)\]",
+    r"\[The user sent an image but something went wrong when I tried to look at it~ You can try examining it yourself with vision_analyze using image_url: (?P<path>[^\n\]]+)\]",
+    r"\[The (?:user|assistant|tool result) attached an image\. Here's what it contains:\n.*?\]\n\[If you need a closer look, use vision_analyze with image_url: (?P<path>[^\n\]]+)\]",
+    r"\[Image attached at: (?P<path>[^\]\n]+)\]",
+))
+_AFTER_NOTES_FORBIDDEN = re.compile(r"vision_analyze (?:with|using) image_url:|Slack user <@")
+
+
+def _strip_media_notes(text):
+    """(text without the leading picture notes, their file paths). Only the exact gateway notes are removed."""
+    paths = []
+    while True:
+        for pattern in _MEDIA_NOTES:
+            found = pattern.match(text)
+            if found:
+                paths.append(found.group("path").strip())
+                text = text[found.end():].lstrip()
+                break
+        else:
+            return text, paths
+
+
 def _source_row(row, allowed_users, session_id, *, allow_approval=False):
     if not row or row[0] != "slack":
         raise ValueError("Learning requires a current owner Slack message.")
@@ -295,6 +322,7 @@ def _source_row(row, allowed_users, session_id, *, allow_approval=False):
     if str(row[5]).lstrip().startswith(STEER_MARKER_OPEN):
         raise ValueError('Steer messages are followups, not bound owner requests.')
     current = str(row[5]).rsplit("[New message]", 1)[-1].strip()
+    current, media = _strip_media_notes(current)
     prefix = re.match(r"^\[[^\]\n]*Slack user <@([^>]+)>\]\s*", current)
     if prefix:
         user = prefix.group(1)
@@ -302,6 +330,9 @@ def _source_row(row, allowed_users, session_id, *, allow_approval=False):
     elif row[3] == "dm" and "Slack user <@" not in current.split("\n", 1)[0]:
         user = row[1]
     else:
+        raise ValueError("Could not verify the current human message.")
+    if media and _AFTER_NOTES_FORBIDDEN.search(current):
+        # A picture description or caption that imitates a note or a header must not pick the sender.
         raise ValueError("Could not verify the current human message.")
     if user not in allowed_users:
         raise ValueError("Only the configured Slack owner may teach rules.")
@@ -315,7 +346,7 @@ def _source_row(row, allowed_users, session_id, *, allow_approval=False):
         raise ValueError("A bare approval or refusal does not teach a working rule.")
     return {"text": current, "user_id": user, "chat_id": row[2], "chat_type": row[3],
             "thread_id": row[4], "at": row[6], "message_id": row[7],
-            "platform_message_id": row[8], "session_id": session_id}
+            "platform_message_id": row[8], "session_id": session_id, "media": media}
 
 
 def quote_source(home, session_id, quote):

@@ -12,6 +12,7 @@ _owner_library = str((_OwnerPath(__file__).resolve().parent / '../..').resolve()
 if _owner_library not in _owner_sys.path:
     _owner_sys.path.insert(0, _owner_library)
 from hermes_facility.owner_text import render as _owner_text
+from hermes_schedule.policy import clock
 
 from hermes_facility.loading import source_path
 
@@ -104,7 +105,7 @@ def diagnosis_status(root, request_id):
 def quiet_hours(now=None):
     """00:00~08:29 KST: 새벽 판정 결과를 소유자에게 바로 내보내지 않는다(2026-10-28 사용자 결정)."""
     now = datetime.fromtimestamp(time.time() if now is None else now, seoul())
-    return (now.hour, now.minute) < (8, 30)
+    return (now.hour, now.minute) < clock('quiet_until', (8, 30))
 
 
 def work_error_reason(exc):

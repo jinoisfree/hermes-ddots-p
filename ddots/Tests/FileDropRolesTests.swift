@@ -18,6 +18,14 @@ import Foundation
         restarted.learn(roles: [:])
         check(FileDropSettings(defaults: defaults).roles == first.roles, "AC-55 an empty answer never erases stored roles")
 
+        first.engine = .init(model: "haiku", effort: nil, seconds: 15, revision: "synthetic", choices: [.init(model: "haiku", efforts: [nil])])
+        first.model = "haiku"; first.effort = "high"
+        var saves = 0
+        first.saveEngine = { _, _ in saves += 1; throw FileDropServiceError.unavailable }
+        first.save()
+        check(first.efforts == [nil] && saves == 0, "T-08f unsupported effort is absent and never submitted")
+        check(FileDropSettings(defaults: defaults).engine == nil, "T-08f engine selection is not copied to UserDefaults")
+
         // The cast: stored roles ∩ ddots members, the default recipient or the first agent when nothing is stored.
         let none = FileDropCast(members: ["lead-q", "other-r"], roles: [:], fallback: "other-r")
         check(none.candidates == ["other-r"] && none.profile(role: "personal") == "other-r", "AC-55 no stored roles: the default recipient leads")

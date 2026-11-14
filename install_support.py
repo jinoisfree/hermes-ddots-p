@@ -124,13 +124,20 @@ def plugin_activation(config):
     return enabled, disabled
 
 
-def enable_managed_plugins(config, plugins, slug):
-    enabled, disabled = plugin_activation(config)
-    enabled = list(enabled)
+def report_disabled_plugins(config, plugins, slug):
+    """Tell the owner which managed plugins stay off because their config disables them."""
+    _, disabled = plugin_activation(config)
     for plugin in plugins:
         if plugin in disabled:
             print(f'{slug}: {plugin}은 plugins.disabled에 있어 활성 목록에 추가하지 않았습니다. 사용하려면 disabled에서 해제하세요.')
-        elif plugin not in enabled:
+
+
+def enable_managed_plugins(config, plugins, slug):
+    report_disabled_plugins(config, plugins, slug)
+    enabled, disabled = plugin_activation(config)
+    enabled = list(enabled)
+    for plugin in plugins:
+        if plugin not in disabled and plugin not in enabled:
             enabled.append(plugin)
     config.setdefault('plugins', {})['enabled'] = enabled
 
@@ -495,9 +502,9 @@ def modern_main(root, argv=None):
     managed.update({name: {'link': target} for name, target in links.items()})
     if not args.update:
         profiles = {slug: 'default' if slug == default else slug for slug in selected}
-        fallback = profiles.get('work-assistant', profiles[default])
         router = {'enabled': True, 'claim_database_path': str(home / 'shared/common-router-claims.sqlite3'),
-                  'profiles': {'fallback': fallback, **{slug: profile for slug, profile in profiles.items()}}, 'aliases': {}}
+                  # The default responder is the roster's responder role (owner/team.yaml), not a contract value.
+                  'profiles': {slug: profile for slug, profile in profiles.items()}, 'aliases': {}}
         root_model = mapping(home / 'config.yaml', home).get('model')
         for slug in selected:
             relative = Path(destinations[slug]);destination = home / relative
@@ -515,6 +522,8 @@ def modern_main(root, argv=None):
             config_path = destination / 'config.yaml'
             # The facility owns pack attachment and round-trip serialization.
             # Route defaults are merged as before without rewriting channel choices.
+            # The facility composer keeps disabled plugins off silently; the installer tells the owner.
+            report_disabled_plugins(mapping(config_path, home), plugins, slug)
             files[str(relative / 'config.yaml')] = compose_employee_config(
                 root, home, config_path, defaults=config, packs=packs, plugins=plugins)
             for name in ('profile.yaml', 'SOUL.md', 'slack-manifest.json', 'README.md'):
@@ -528,7 +537,7 @@ def modern_main(root, argv=None):
         for name, value in {
             'owner/team.yaml': {'version': 1, 'agents': {profiles[slug]: {'name': available[slug]['name'], 'roles': available[slug]['roles']} for slug in selected}},
             'owner/vault.yaml': {'version': 1, 'channels': {}, 'accounts': {}, 'notion': {}, 'obsidian': {}},
-            'owner/policy.yaml': {'version': 1, 'time_policy': {'rest_start': '11:00', 'quiet_until': '08:30'}, 'profile_packs': {profiles[slug]: packs for slug in selected}, 'schedule_bindings': [], 'rest_day_wrappers': {}},
+            'owner/policy.yaml': {'version': 1, 'time_policy': {'rest_start': '11:00', 'quiet_until': '08:30', 'skill_report_start': '08:29'}, 'profile_packs': {profiles[slug]: packs for slug in selected}, 'schedule_bindings': [], 'rest_day_wrappers': {}},
         }.items():
             path = home / name
             if name == 'owner/vault.yaml' and path.exists(): continue

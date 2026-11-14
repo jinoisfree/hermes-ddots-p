@@ -19,7 +19,7 @@ export DDOTS_CONFIG_ROOT="$TEST_CONFIG/record" HERMES_HOME="$TEST_CONFIG/hermes"
 mkdir -p "$HERMES_HOME"
 python3 "$ROOT/Tests/prepare_config.py" "$DDOTS_CONFIG_ROOT"
 xcrun swiftc -swift-version 5 "$ROOT/Sources/AppIdentity.swift" "$ROOT/Sources/SettingsSync.swift" "$ROOT/Sources/FileDropHistory.swift" "$ROOT/Tests/FileDropHistoryTests.swift" -o "$ROOT/.build/FileDropHistoryTests"
-xcrun swiftc -swift-version 5 "$ROOT/Sources/AppIdentity.swift" "$ROOT/Sources/SettingsSync.swift" "$ROOT/Sources/FileDropHistory.swift" "$ROOT/Sources/FileDropSettings.swift" "$ROOT/Tests/FileDropRolesTests.swift" -o "$ROOT/.build/FileDropRolesTests"
+xcrun swiftc -swift-version 5 "$ROOT/Sources/AppIdentity.swift" "$ROOT/Sources/SettingsSync.swift" "$ROOT/Sources/FileDropHistory.swift" "$ROOT/Sources/FileDropService.swift" "$ROOT/Sources/FileDropSettings.swift" "$ROOT/Tests/FileDropRolesTests.swift" -o "$ROOT/.build/FileDropRolesTests"
 "$ROOT/.build/FileDropRolesTests"
 # 직원 id 경계는 아래 unittest의 test_airport_boundaries.py에서 Sources 전체를 검사한다.
 "$ROOT/.build/FileDropHistoryTests"

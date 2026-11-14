@@ -29,7 +29,7 @@ def followups(jobs):
     """
     closed = set()
     for job in jobs.values():
-        if job.get('status') not in ('reported', 'confirmed', 'confirming'):
+        if job.get('status') not in ('reported', 'confirmed'):
             continue
         result = job.get('result') or {}
         if result.get('schema_version') != 2:

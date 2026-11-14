@@ -29,12 +29,13 @@ if team is None:
     team = _sys.modules['hermes_team_registry'] = _ilu.module_from_spec(_spec)
     _spec.loader.exec_module(team)
 
+from hermes_schedule.policy import clock
+
 _spec = importlib.util.spec_from_file_location("team_kit_ai_digest_base", Path(__file__).with_name("learning_report.py"))
 base = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(base)
 learning, layout, KST = base.learning, base.layout, base.KST
 
-REPORT_AT = (8, 30)
 MAX_BYTES = 4 * 1024 * 1024
 MAX_PENDING = 80
 MAX_SEEN = 3000
@@ -411,7 +412,7 @@ def run(home, now=None, *, reader=fetch, summarizer=summarize):
         collect(state, sources, now.timestamp(), reader)
         learning.save(path(home), state)
         key = now.date().isoformat()
-        if (now.hour, now.minute) >= base._rest_day().start(now, REPORT_AT):
+        if (now.hour, now.minute) >= base._rest_day().start(now, clock('quiet_until', (8, 30))):
             if key not in state["reports"]:
                 build(home, state, sources, now.date(), summarizer)
                 learning.save(path(home), state)

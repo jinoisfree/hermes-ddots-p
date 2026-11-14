@@ -8,6 +8,9 @@ final class HermesRelayServer {
         let fd: Int32
         var drops: [Int: FileDropUpload] = [:]
         var dropRunning = false
+        var contextRunning = false
+        var engineRunning = false
+        var sourceMac = ""
         var source: DispatchSourceRead?
         var buffer = Data()
         var authorized = false
@@ -53,6 +56,8 @@ final class HermesRelayServer {
     private(set) var polls = 0
     var onTapFailure: ((ThreeTapFailure) -> Void)?
     var dropSuggest: ((Data) throws -> Data)?
+    var dropContext: ((Data) throws -> Data)?
+    var dropEngine: ((Data) throws -> Data)?
     var dropOriginalsAllowed: ((Int32) -> Bool)?
     // Paseo usage of this Mac, read off the relay queue at most once a minute while another Mac is connected.
     private let usageQueue = DispatchQueue(label: AppIdentity.bundleID + ".relay-usage", qos: .utility)
@@ -126,6 +131,7 @@ final class HermesRelayServer {
         var patience = timeval(tv_sec: 5, tv_usec: 0)
         setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &patience, socklen_t(MemoryLayout<timeval>.size))
         let client = Client(fd)
+        log(client, "connected")
         clients[fd] = client
         let source = DispatchSource.makeReadSource(fileDescriptor: fd, queue: queue)
         source.setEventHandler { [weak self, weak client] in
@@ -151,9 +157,14 @@ final class HermesRelayServer {
     }
     private func drop(_ client: Client) {
         guard clients[client.fd] === client else { return }
+        log(client, "disconnected")
         clients[client.fd] = nil
         client.source?.cancel(); client.source = nil
         if !clients.values.contains(where: \.authorized) { timer?.cancel(); timer = nil; streamTimer?.cancel(); streamTimer = nil }
+    }
+    private func log(_ client: Client, _ result: String) {
+        print("\(ISO8601DateFormatter().string(from: Date())) relay=\(result); address=\(FileDropEncryptedRoute.peer(client.fd) ?? "unknown")")
+        fflush(stdout)
     }
     private func send(_ frame: RelayFrame, to client: Client) {
         guard clients[client.fd] === client else { return }
@@ -174,14 +185,18 @@ final class HermesRelayServer {
     private func handle(_ frame: RelayFrame, from client: Client) {
         guard client.authorized else {
             guard frame.op == "hello", let offered = frame.token, RelaySettings.matches(offered, token) else {
+                log(client, "denied")
                 send(RelayFrame(op: "denied"), to: client); drop(client)
                 return
             }
             client.authorized = true
+            client.sourceMac = String((frame.text ?? FileDropEncryptedRoute.peer(client.fd) ?? "remote").prefix(100))
             client.unread = frame.unread.map(Date.init(timeIntervalSince1970:)); client.unreadChanged = client.unread != nil
             var welcome = RelayFrame(op: "welcome")
             welcome.checkVersion = 1
             welcome.dropVersion = dropSuggest != nil || FileDropRunner.available(bridge.home) ? 1 : 0
+            welcome.dropEngine = FileDropRunner.engineAvailable(bridge.home) || (dropEngine != nil && dropContext != nil) ? 1 : 0
+            log(client, "welcome; dropVersion=\(welcome.dropVersion ?? 0)")
             send(welcome, to: client)
             if timer == nil {
                 let timer = DispatchSource.makeTimerSource(queue: queue)
@@ -217,6 +232,9 @@ final class HermesRelayServer {
         case "drop-open", "drop-chunk", "drop-run":
             receiveDrop(frame, from: client)
             return
+        case "drop-context", "drop-engine":
+            receiveDropControl(frame, from: client)
+            return
         case "three-tap-failure":
             if let failure = frame.tapFailure, failure.valid { onTapFailure?(failure) }
             return
@@ -237,6 +255,35 @@ final class HermesRelayServer {
         default: return
         }
         send(reply, to: client)
+    }
+
+    /// Context never owns an upload/request slot. Only the engine writer can change policy.
+    private func receiveDropControl(_ frame: RelayFrame, from client: Client) {
+        guard let id = frame.id, id > 0, let data = frame.drop, data.count <= 64 * 1024 else { return }
+        let context = frame.op == "drop-context"
+        guard !(context ? client.contextRunning : client.engineRunning),
+              var request = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { return }
+        if context {
+            guard request["mode"] as? String == "context" else { return }
+            client.contextRunning = true
+        } else {
+            guard request["mode"] as? String == "read" || request["mode"] as? String == "write" else { return }
+            request["source"] = client.sourceMac
+            client.engineRunning = true
+        }
+        guard let input = try? JSONSerialization.data(withJSONObject: request) else { return }
+        let home = bridge.home, invoke = context ? dropContext : dropEngine
+        DispatchQueue.global(qos: .userInitiated).async { [weak self, weak client] in
+            var reply = RelayFrame(op: "result"); reply.id = id
+            do { reply.drop = try invoke?(input) ?? FileDropRunner.run(input, home: home, engine: !context) }
+            catch { reply.reason = "drop_unavailable" }
+            let answer = reply
+            self?.queue.async { [weak self, weak client] in
+                guard let self, let client else { return }
+                if context { client.contextRunning = false } else { client.engineRunning = false }
+                self.send(answer, to: client)
+            }
+        }
     }
 
     /// Another Mac may only run the read-only `check` command, and only for a profile/connection this Mac's own latest
@@ -291,7 +338,7 @@ final class HermesRelayServer {
                     encrypted = peer && local
                 }
                 client.drops[id] = try FileDropUpload(data: data, originals: encrypted)
-                queue.asyncAfter(deadline: .now() + 15) { [weak self, weak client] in
+                queue.asyncAfter(deadline: .now() + FileDropTiming.remaining(data) + FileDropTiming.processGrace) { [weak self, weak client] in
                     guard let self, let client, client.drops[id] != nil else { return }
                     client.drops[id] = nil
                     var reply = RelayFrame(op: "result"); reply.id = id; reply.reason = "drop_timeout"

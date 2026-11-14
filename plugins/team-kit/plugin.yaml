@@ -58,3 +58,5 @@ provides_tools:
   - notes_read
   - file_link
   - file_location
+  - cctv_reference
+  - cctv_now

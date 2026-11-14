@@ -11,7 +11,7 @@ import time
 import unicodedata
 from hermes_facility import app_registry as registry
 from hermes_facility import plugin_store as store
-from hermes_facility.config_assembly import assemble_config, app_manifests, atomic_write, locked, yaml_bytes, yaml_load, checked_path
+from hermes_facility.config_assembly import CONFIG, assemble_config, app_manifests, atomic_write, locked, yaml_bytes, yaml_load, checked_path
 from hermes_packs.mac_apps import catalog, discovery
 from hermes_facility.mac_permission import internet_accounts, mac_account_settings
 
@@ -125,7 +125,7 @@ def legacy_values(config, bundles):
     delegation = config.get('plugins', {}).get('entries', {}).get('team-delegation', {}).get('settings', {})
     scope_path = delegation.get('personal_roles', {}).get('scope_config')
     if not scopes and scope_path:
-        source = yaml_load(Path(scope_path).expanduser().read_bytes())
+        source = yaml_load(Path(scope_path).expanduser().read_bytes(), CONFIG)
         scopes = source.get('plugins', {}).get('entries', {}).get('team-kit', {}).get('settings', {}).get('personal_scopes', {})
     combined = [v for v in scopes.values() if isinstance(v, dict)]
     result = {}
@@ -503,7 +503,7 @@ def run(root, action, profile, bundle, *, account=None, scopes=None, default=Non
                     _input_scope(root,home,profile,bundle,path,prior)
                     if action=='disconnect':_cancel_input(root,home,profile,bundle,path,prior)
         # All preflight choices are read-only. Even a single account requires a choice.
-        config = yaml_load(config_path.read_bytes()) if config_path.exists() else {}
+        config = yaml_load(config_path.read_bytes(), CONFIG) if config_path.exists() else {}
         record = read_record(path, clock)
         if resume=='internet_accounts' and mac_account_settings(app):
             if record.get('phase')=='choosing':
@@ -604,7 +604,7 @@ def run(root, action, profile, bundle, *, account=None, scopes=None, default=Non
         with locked(root / 'owner/.app-connect.lock'):
             # Another caller must not invalidate the choices/config while we were checking them.
             current = config_path.read_bytes() if config_path.exists() else b''
-            if yaml_load(current) != config: return response(profile, bundle, reason='CONFIG_CHANGED')
+            if yaml_load(current, CONFIG) != config: return response(profile, bundle, reason='CONFIG_CHANGED')
             if not pending:
                 record = transact(root, profile, bundle, action, config, selected, clock,app)
             result['steps'] = steps_from(record)

@@ -2642,7 +2642,7 @@ extension ChatView {
                             Text(approval.previewText ?? "스레드의 변경안을 확인해 주세요.").textSelection(.enabled)
                             HStack {
                                 Button("이 변경 승인") { slack.projectChoice(thread, approval: approval, approve: true) }
-                                Button("거부") { slack.projectChoice(thread, approval: approval, approve: false) }
+                                Button("거절") { slack.projectChoice(thread, approval: approval, approve: false) }
                             }.disabled(!slack.connected)
                         }.font(.system(size: ChatMetrics.auxiliaryFont)).padding(6)
                     }

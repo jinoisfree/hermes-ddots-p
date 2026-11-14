@@ -6,6 +6,7 @@ final class SlackSendScript {
     private let lock = NSLock()
     private var plan: [(ok: Bool, gate: DispatchSemaphore?)] = []
     private var sentLog: [[String: String]] = []
+    private var requests = 0
     let workspace: String
     init(workspace: String) { self.workspace = workspace }
     /// The script of the run, when `--ui-smoke-slack-send` is given.
@@ -18,6 +19,8 @@ final class SlackSendScript {
         return gate
     }
     var sent: [[String: String]] { lock.lock(); defer { lock.unlock() }; return sentLog }
+    var requestCount: Int { lock.lock(); defer { lock.unlock() }; return requests }
+    private func recordRequest() { lock.lock(); requests += 1; lock.unlock() }
     private func take() -> (ok: Bool, gate: DispatchSemaphore?) {
         lock.lock(); defer { lock.unlock() }
         return plan.isEmpty ? (true, nil) : plan.removeFirst()
@@ -27,6 +30,7 @@ final class SlackSendScript {
     var api: SlackAPI {
         let base = SlackSmokeFixture.api()
         return SlackAPI(transport: { [self] method, parameters in
+            recordRequest()
             switch method {
             case "auth.test": return answer(["ok": true, "user_id": "UME", "url": workspace])
             case "files.getUploadURLExternal":
@@ -41,7 +45,10 @@ final class SlackSendScript {
                 return answer(["ok": true, "message": message])
             default: return base.transport(method, parameters)
             }
-        }, raw: { url, body in body == nil ? base.raw(url, body) : .success(Data("OK".utf8)) })
+        }, raw: { [self] url, body in
+            recordRequest()
+            return body == nil ? base.raw(url, body) : .success(Data("OK".utf8))
+        })
     }
 }
 

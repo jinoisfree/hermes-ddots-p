@@ -24,7 +24,16 @@ if vault is None:
 
 ACCOUNT=vault.text('accounts.personal.gmail')
 DM=vault.text('dms.personal')
-JOB_ID='30e7a58f5bdc'
+def summary_job_id():
+    from hermes_schedule.catalog import read
+    path = team.root_home() / 'owner/policy.yaml'
+    if not path.exists():
+        return ''
+    matches = [b['job_id'] for b in read(path)['schedule_bindings'] if b.get('key') == 'personal.mail.summary']
+    if len(matches) > 1:
+        raise ValueError('PERSONAL_MAIL_SCHEDULE_BINDING_DUPLICATED')
+    return matches[0] if matches else ''
+
 RETENTION_DAYS=30
 KST=ZoneInfo('Asia/Seoul')
 
@@ -47,7 +56,9 @@ def settings(home):
     data=hermes_yaml.safe_load(path.read_text()) if path.exists() else {}
     cfg=(data or {}).get('plugins',{}).get('entries',{}).get('team-kit',{}).get('settings',{}).get('personal_mail_summary',{})
     if not isinstance(cfg,dict):raise ValueError('PERSONAL_MAIL_CONFIG_INVALID')
-    return {key:cfg.get(key,default) for key,default in [('account',ACCOUNT),('dm_chat_id',DM),('job_id',JOB_ID)]}
+    result = {key:cfg.get(key,default) for key,default in [('account',ACCOUNT),('dm_chat_id',DM)]}
+    result['job_id'] = cfg['job_id'] if 'job_id' in cfg else summary_job_id()
+    return result
 
 
 def recent(rows,now):

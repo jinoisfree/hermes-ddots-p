@@ -53,7 +53,12 @@ struct NativeThreadList: NSViewRepresentable {
     final class Table: NSTableView {
         var afterLayout: (() -> Void)?
         var beforeDraw: (() -> Void)?
-        override func layout() { super.layout(); afterLayout?() }
+        override func layout() {
+            // Resolve offscreen row spans before AppKit positions the live row views.
+            for row in 0..<numberOfRows { _ = rect(ofRow: row) }
+            super.layout()
+            afterLayout?()
+        }
         override func viewWillDraw() { super.viewWillDraw(); beforeDraw?() }
         override func mouseDown(with event: NSEvent) {
             // Cells own card/text/button events; empty table space has no row selection.

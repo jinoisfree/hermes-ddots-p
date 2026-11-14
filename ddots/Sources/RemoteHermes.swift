@@ -18,9 +18,23 @@ final class RemoteHermes: HermesSource {
     var linked: Bool { lock.lock(); defer { lock.unlock() }; return isLinked }
     private var isLinked = false
     private var dropVersion = 0
+    private var dropEngine = 0
+    private var dropFailureAt: Date?
+    private var dropDenied = false
     private var checkVersion = 0
     var dropOriginalsAllowed: ((NWConnection) -> Bool)?
     var supportsDrop: Bool { lock.lock(); defer { lock.unlock() }; return isLinked && dropVersion == 1 }
+    var supportsDropEngine: Bool { lock.lock(); defer { lock.unlock() }; return isLinked && dropEngine == 1 }
+    var dropFailure: String {
+        lock.lock(); defer { lock.unlock() }
+        if dropDenied { return "연결 코드를 다시 입력해 주세요" }
+        if isLinked { return "맥미니 앱을 업데이트해 주세요" }
+        if let at = dropFailureAt {
+            let format = DateFormatter(); format.dateFormat = "HH:mm"
+            return "맥미니 연결 확인 · " + format.string(from: at)
+        }
+        return "맥미니에 연결하는 중이에요"
+    }
     var lastReceivedAt: Date? { lock.lock(); defer { lock.unlock() }; return lastStateAt }
     private var relayedUsage: RelayUsage?
     /// Paseo usage of the sharing Mac. Kept across a lost link; each value expires by its own observation time.
@@ -69,6 +83,9 @@ final class RemoteHermes: HermesSource {
             timer.resume(); watchdog = timer
         }
     }
+    func setEnabled(chat: Bool, fileDrop: Bool) {
+        if chat || fileDrop { start() } else { stop() }
+    }
     func stop() {
         lock.lock(); isLinked = false; relayedStreams = []; lock.unlock()
         queue.sync { startupTapFailure = nil; stopped = true; watchdog?.cancel(); watchdog = nil; connection?.cancel(); connection = nil; welcomed = false }
@@ -88,6 +105,7 @@ final class RemoteHermes: HermesSource {
             switch state {
             case .ready:
                 var hello = RelayFrame(op: "hello"); hello.token = self.token
+                hello.text = Host.current().localizedName
                 self.lock.lock(); hello.unread = self.unread?.timeIntervalSince1970; self.lock.unlock()
                 connection.send(content: hello.line(), completion: .contentProcessed { _ in })
                 self.receive(connection)
@@ -102,6 +120,7 @@ final class RemoteHermes: HermesSource {
         startupTapFailure = nil; connection = nil; welcomed = false; old.cancel()
         lock.lock()
         latest.status = .unavailable(wasDenied ? Self.denied : Self.lost); latest.typing = []; relayedSlack.writers = []; relayedStreams = []; isLinked = false
+        dropFailureAt = Date()
         let waiting = Array(pending.values); pending = [:]
         lock.unlock()
         waiting.forEach { $0.done.signal() }
@@ -128,10 +147,12 @@ final class RemoteHermes: HermesSource {
     private func handle(_ frame: RelayFrame) {
         lastHeard = Date()
         switch frame.op {
-        case "denied": startupTapFailure = nil; wasDenied = true
+        case "denied":
+            startupTapFailure = nil; wasDenied = true
+            lock.lock(); dropDenied = true; lock.unlock()
         case "welcome":
             welcomed = true; wasDenied = false; attempts = 0
-            lock.lock(); isLinked = true; dropVersion = frame.dropVersion ?? 0; checkVersion = frame.checkVersion ?? 0; lock.unlock()
+            lock.lock(); isLinked = true; dropDenied = false; dropVersion = frame.dropVersion ?? 0; dropEngine = frame.dropEngine ?? 0; checkVersion = frame.checkVersion ?? 0; lock.unlock()
             if let failure = startupTapFailure { startupTapFailure = nil; reportTapFailure(failure) }
             onLinked?()
         case "drop-sync":
@@ -242,7 +263,24 @@ final class RemoteHermes: HermesSource {
     }
 
     /// Called off the main thread. Unknown/old relay versions fail without sending originals.
-    func suggestDrop(_ signals: Data, files: [URL]) throws -> Data {
+    func contextDrop(_ data: Data) throws -> Data {
+        if supportsDropEngine {
+            return try controlDrop(data, op: "drop-context")
+        }
+        return try suggestDrop(data, files: [], context: true)
+    }
+    func engineDrop(_ data: Data) throws -> Data {
+        guard supportsDropEngine else { throw CocoaError(.featureUnsupported) }
+        return try controlDrop(data, op: "drop-engine")
+    }
+    private func controlDrop(_ data: Data, op: String) throws -> Data {
+        guard data.count <= 64 * 1024, supportsDropEngine else { throw FileDropServiceError.unavailable }
+        var frame = RelayFrame(op: op); frame.drop = data
+        let limit = op == "drop-engine" ? FileDropTiming.engineLimit(data) + FileDropTiming.processGrace : FileDropTiming.contextSeconds
+        guard let reply = requestFrame(frame, timeout: limit), let result = reply.drop else { throw FileDropServiceError.unavailable }
+        return result
+    }
+    func suggestDrop(_ signals: Data, files: [URL], context: Bool = false) throws -> Data {
         guard signals.count <= 64 * 1024, supportsDrop else { throw CocoaError(.featureUnsupported) }
         let waiter = Pending()
         lock.lock(); nextID += 1; let id = nextID; pending[id] = waiter; lock.unlock()
@@ -276,10 +314,16 @@ final class RemoteHermes: HermesSource {
                 connection.send(content: run.line(), completion: .contentProcessed { _ in })
             } catch { waiter.done.signal() }
         }
-        _ = waiter.done.wait(timeout: .now() + 15)
-        lock.lock(); pending.removeValue(forKey: id); let result = waiter.reply?.drop; let reason = waiter.reply?.reason; lock.unlock()
+        let limit = context ? FileDropTiming.contextSeconds : FileDropTiming.remaining(signals) + FileDropTiming.processGrace
+        _ = waiter.done.wait(timeout: .now() + limit)
+        lock.lock(); pending.removeValue(forKey: id); let reply = waiter.reply; let result = reply?.drop; let reason = reply?.reason; lock.unlock()
+        if context && reply == nil { throw FileDropServiceError.legacyContextTimeout }
         if reason == "drop_sensitive" { throw FileDropServiceError.sensitive }
+        if reason == "drop_timeout" { throw FileDropServiceError.timeout }
         guard let result else { throw FileDropServiceError.unavailable }
+        let error = ((try? JSONSerialization.jsonObject(with: result)) as? [String: Any])?["error"] as? String
+        if error == "engine_changed" { throw FileDropServiceError.engineChanged }
+        if ["drop_deadline", "TimeoutExpired"].contains(error ?? "") { throw FileDropServiceError.timeout }
         return result
     }
 

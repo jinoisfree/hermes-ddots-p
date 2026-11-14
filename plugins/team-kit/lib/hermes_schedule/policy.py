@@ -18,3 +18,9 @@ def clock(key, default, root=None):
     if not 0 <= hour < 24 or not 0 <= minute < 60:
         raise ValueError('invalid owner time policy')
     return hour, minute
+
+
+def section(name, default=None, root=None):
+    """Read an owner decision directly; absent sections do not enable a feature."""
+    path = Path(root or root_home()) / 'owner/policy.yaml'
+    return read(path).get(name, default) if path.exists() else default

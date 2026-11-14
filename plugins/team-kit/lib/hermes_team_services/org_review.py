@@ -735,8 +735,8 @@ def render(day, items, *, weekly=False, auto=False, notes='', full=False, paseo=
     if not items:
         return title + ('\n\n*주간 다이어트*\n후보 0건' if weekly else '') + ('\n\n' + notes if notes else '')
     lines = [f'*{title}*', '새벽 3시에 Paseo가 판단해 진행할 항목을 고쳤어. 결과와 확인·되돌리기 버튼은 이 스레드에 있다(덜 끝났으면 끝나는 대로). '
-             '푸시는 확인 뒤다.' if auto else
-             '번호로 승인·거부·보류해 줘. 승인한 항목만 Paseo가 고치고 이 스레드에 결과와 확인·되돌리기 버튼을 올린다. 푸시는 확인 버튼 뒤다.'
+             '확인은 결과 확인이다. 확인 전에도 04:30 자동 기록으로 원격에 반영될 수 있고 되돌리기가 통제 수단이다.' if auto else
+             '번호로 승인·거부·보류해 줘. 승인한 항목만 Paseo가 고치고 이 스레드에 결과와 확인·되돌리기 버튼을 올린다. 확인은 결과 확인이다. 확인 전에도 04:30 자동 기록으로 반영될 수 있고 되돌리기로 통제한다.'
              if paseo else '번호로 승인·거부·보류해 줘. 승인은 작업지시문 준비이며 실제 수정이나 푸시 승인이 아니야.']
     ordered = [i for i in items if not i['title'].startswith('다이어트: ')] + [i for i in items if i['title'].startswith('다이어트: ')]
     diet_heading = False
@@ -977,7 +977,7 @@ def plain(text):
 
 # Owner decision 2026-10-31: the whole-report buttons are the common 승인 · 거절. In this report's own thread
 # (the only place poll reads) they mean every item approved or rejected, as 모두 승인/모두 거부 did. 확인 is not
-# mapped: in this thread it already answers an autofix result (push approval, autofix_thread_reply).
+# mapped: in this thread it already answers an autofix result (result acknowledgment, autofix_thread_reply).
 WHOLE = {'승인': '모두 승인', '거절': '모두 거부'}
 
 
@@ -1072,7 +1072,7 @@ def autofix_thread_reply(home, event, source, thread):
     if not key:
         return None
     # The same thread asks the daily-cap question before the fix and carries the result after it: while the
-    # job waits for the owner, 승인/거절/확인 answer the cap; afterwards 확인 approves the push (owner, 2026-10-31).
+    # job waits for the owner, 승인/거절/확인 answer the cap; afterwards 확인 acknowledges the result; the runtime publishes only missing patches.
     waiting = fix.load(home)['jobs'].get(key, {}).get('status') == fix.WAITING_OWNER
     if waiting and action in fix.CAP_ANSWERS:
         reply = fix.decide_cap(home, key, action)

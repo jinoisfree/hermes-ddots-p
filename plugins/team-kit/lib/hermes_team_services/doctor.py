@@ -74,7 +74,7 @@ def launchd_rows(text):
     for line in text.splitlines():
         fields = line.split()
         if len(fields) == 3 and managed(fields[2]):
-            result[fields[2]] = int(fields[1])
+            result[fields[2]] = 0 if fields[0].isdigit() else int(fields[1])
     return result
 
 
@@ -98,7 +98,8 @@ def check_launchd(folder, runner):
     rows = launchd_rows(loaded.stdout)
     missing = launchd_files(folder) - rows.keys()
     failed = [label for label, code in rows.items() if code != 0]
-    return item("launchd", not (missing or failed), f"미로드 {len(missing)}건 · 종료 코드 비0 {len(failed)}건")
+    return item("launchd", not (missing or failed), f"미로드 {len(missing)}건 · 종료 코드 비0 {len(failed)}건"
+                + (" · " + ", ".join(sorted(missing | set(failed))[:5]) if missing or failed else ""))
 
 
 def check_copies(root, runner):
@@ -328,9 +329,15 @@ def prepare(root, home, agents, document, *, now=None, runner=run_command):
         raise ValueError("symlink state")
     previous = json.loads(path.read_text()).get("items") if path.exists() else None
     current = collect(root, agents, document, now, runner)
+    before = {x['id']: x for x in previous or []}
+    for row in current:
+        if row['status'] == 'broken':
+            old = before.get(row['id'], {})
+            row['since'] = old.get('since', now.isoformat()) if old.get('status') == 'broken' else now.isoformat()
     broken, recovered = changes(previous, current)
     return {"state": {"ranAt": now.isoformat(), "items": current},
-            "broken": broken, "recovered": recovered}
+            "broken": broken, "recovered": recovered,
+            "persisting": [x for x in current if x["status"] == "broken"]}
 
 
 def run(root, home, agents, document, *, dry_run=False, now=None, runner=run_command):

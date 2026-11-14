@@ -605,6 +605,59 @@
       "tools": [
         "ego_browser"
       ]
+    },
+    "cctv": {
+      "schema_version": 1,
+      "id": "cctv",
+      "entrypoint": "hermes_packs.cctv",
+      "requires": {
+        "packs": [],
+        "services": [
+          "role_roster",
+          "owner_vault",
+          "session_authority",
+          "reply_buttons",
+          "slack_report",
+          "proposal_decisions"
+        ]
+      },
+      "safety": {
+        "tools": "owner_chat_only",
+        "capture": "remote_session_window_only",
+        "credentials": "never_entered_or_accepted",
+        "situation_record": "owner_button_through_facility_only",
+        "reconnect": "owner_button_through_facility_only",
+        "background_write": "capture_reading_owner_room_post_locker_state_and_policy_relive_only",
+        "preserve": [
+          "customer_isolation",
+          "button_labels"
+        ],
+        "relive": "owner_policy_auto_within_connected_session_only",
+        "input": "exact_desktop_icon_double_then_zero_tabs_plus_then_path_disclosure_max3_then_channel_right_then_exact_live_left_or_escape_only",
+        "focus": "wakeup_context_only_restore_previous_app_in_finally"
+      },
+      "platforms": {
+        "window_capture": [
+          "darwin"
+        ]
+      },
+      "settings": {
+        "cctv_watch": {
+          "type": "object",
+          "default": {},
+          "private": true
+        }
+      },
+      "compatibility": {
+        "hosts": [
+          "team-kit"
+        ],
+        "registration": "host"
+      },
+      "tools": [
+        "cctv_reference",
+        "cctv_now"
+      ]
     }
   }
 }

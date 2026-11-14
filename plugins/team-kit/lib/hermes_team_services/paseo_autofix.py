@@ -10,15 +10,14 @@ restart never kills it) calls ``tick`` every two minutes:
                "그 제안에 따라 진행해"; nothing to do -> short report
   implementing Paseo implements, tests, ./sync, commits with the job marker and writes result.json
   reported     report in the 조직개편안 thread with [[버튼: 확인 | 롤백]]
-  확인          the Paseo conversation pushes the marked commits (owner click = push approval) so
-               Paseo records the push and paints its workspace blue; 진단담당 then checks the remote
-               itself and pushes only what the conversation left out
+  확인          acknowledge the result; the Hermes runtime classifies remote patches and publishes
+               missing originals by fast-forward, or cherry-picks when the remote advanced
   롤백          revert the marked commits, write the reverted mirror files back to the live paths,
                ./sync, restart the gateway when code changed, push the revert when the original
                had reached the remote
 
-Paseo pushes only after the owner's 확인, exactly the targets 진단담당 names. Commits are identified by
-the marker in their subject, never by trust in the agent's own report.
+Paseo never publishes. Commits are identified by the marker in their subject, and the runtime
+verifies each remote commit independently of the agent report.
 
 2026-10-29 사용자 결정: 조직개편안은 03:00 ``org_review.night``가 미리 만들어 승인 없이 넘기고(``org_review_auto``),
 08:30 보고 스레드에 결과·확인·롤백이 붙는다(끄면 10-28처럼 소유자가 승인한 항목만). 진단 결함·매일 점검·새 오류는 03:00 ``night_batch``가 묻지 않고 한 작업(kind ``night``)으로 넘긴다.
@@ -45,6 +44,7 @@ import shutil
 import subprocess
 import sys
 import time
+import tempfile
 from datetime import datetime
 from pathlib import Path
 import importlib.util as _ilu, pathlib as _pl, sys as _sys
@@ -81,11 +81,10 @@ MIRRORS = (('hermes/', ROOT), ('launchd/', Path.home() / 'Library/LaunchAgents')
 # Owner decision 2026-10-25: 일반개발, Opus 5.5 medium only.
 RUN_ARGS = ['--provider', 'claude', '--model', 'claude-opus-5-5', '--thinking', 'medium', '--mode', 'bypassPermissions']
 AGENT_TIMEOUT = 3 * 3600
-PUSH_TIMEOUT = 1800
 NO_FILE_GRACE = 180
 WAIT_NOTICE = 3 * 3600
 FRESH_EDIT = 3600
-ACTIVE = {'analyzing', 'implementing', 'confirming', 'rolling_back'}
+ACTIVE = {'analyzing', 'implementing', 'publishing', 'rolling_back'}
 # Members write these themselves all day; the 04:30 자동 기록 commits them. They never mean "someone is working".
 AGENT_DATA = ('/memories/', '/skills/', '/learning/')
 INCIDENT_CAP_DEFAULT = 5
@@ -125,8 +124,8 @@ def marker(key):
     return _owner_text(f'[<<doctor_name>> 자동개편 {key}]')
 
 
-def sh(args, *, cwd=None, timeout=120, check=True):
-    proc = subprocess.run(args, cwd=cwd, capture_output=True, text=True, timeout=timeout,
+def sh(args, *, cwd=None, timeout=120, check=True, input=None):
+    proc = subprocess.run(args, cwd=cwd, capture_output=True, text=True, timeout=timeout, input=input,
                           env={**os.environ, 'GIT_TERMINAL_PROMPT': '0', 'HERMES_DISABLE_LAZY_INSTALLS': '1'})
     if check and proc.returncode:
         raise RuntimeError(f'{Path(args[0]).name} {args[1] if len(args) > 1 else ""} failed ({proc.returncode}): '
@@ -206,7 +205,7 @@ def implement_prompt(key, numbers, path, analysis=None):
             '질문 도구를 쓰지 마라.\n'
             'AGENTS.md 절차를 따른다: 실행 원본 수정, 플러그인 사본 맞춤과 --check, 게이트웨이 Python 테스트, 관련 docs 갱신, ./sync. '
             f'커밋 메시지 첫 줄은 Hermes-ddots와 hermes-agent 모두 반드시 "{mark} "로 시작한다. '
-            '다른 작업의 미커밋 변경은 커밋에 넣지 않는다. 푸시는 하지 마라(소유자가 결과 보고의 확인 버튼으로 승인하면 <<doctor_name>>이 이 대화에 푸시를 맡긴다). '
+            '다른 작업의 미커밋 변경은 커밋에 넣지 않는다. 푸시는 하지 마라. 확인은 결과 확인이며, 미반영분 게시는 Hermes 런타임이 맡는다. '
             '플러그인 .py나 본체를 바꿨으면 AGENTS.md의 게이트웨이 재시작 절차(처리 중인 턴 확인, 재시작, 연결·오류 기록 확인)를 따른다. '
             '테스트가 실패한 항목은 변경을 되돌리고 실패로 적는다.\n'
             f'끝나면 {path} 에 JSON 하나만 써라: '
@@ -216,20 +215,12 @@ def implement_prompt(key, numbers, path, analysis=None):
             '경고만 고쳐 원래 실패가 남으면 부분 해결/unresolved, 수정 후 실제 복구·효과 확인이 남으면 검증 대기/unverified. '
             '완료 외에는 remaining·next_check를 반드시 쓴다. 이미 해결돼 보류면 resolved와 증거를 쓰고 remaining·next_check는 비운다. '
             'scope·evidence·remaining·next_check는 각각 600자 이내. '
+            'tests는 phase=after(기본)|before|suite, log=이 작업 폴더 안의 상대 로그 경로를 쓴다. '
+            'before·suite는 같은 command로 pytest -rfE를 실행하고 python=실제 인터프리터 경로, revision=실행 SHA를 쓴다. '
+            'before revision은 작업 base, suite revision은 이 작업의 최신 표식 커밋이어야 한다. '
+            'after 검사 하나 이상이 모두 성공해야 하고 suite 새 실패·비교 불가는 완료·부분 해결을 거부한다. '
             'resolves는 이번에 해결 증거를 확인한 기존 review_followups의 ref 배열이며 확인·푸시만으로 채우지 않는다. '
             '마지막에 실제 diff와 검사 로그를 다시 읽어 고정한 criterion 충족 여부를 검토하라. 증거가 없으면 완료 금지.'))
-
-
-def push_prompt(targets):
-    commands = '\n'.join(f"git -C {t['repository']} push {t['remote']} {t['commit']}:refs/heads/{t['branch']}" for t in targets)
-    return (_owner_text('<<doctor_name>>: 소유자가 Slack 결과 보고의 확인 버튼으로 아래 푸시를 명시적으로 승인했다'
-            '(2026-10-25 소유자 결정: 확인 클릭이 표식 커밋의 푸시 승인). 질문 도구를 쓰지 마라. 파일은 고치지 마라.\n'
-            '대상마다 아래 명령을 다른 명령과 묶지 않은 단독 셸 명령으로 그대로 실행하라. 옵션을 붙이지 말고, 실패하면 '
-            'pull/rebase/merge/강제 푸시로 우회하지 말고 출력만 보고하라.\n') + commands + '\n'
-            '실행 뒤 git -C <저장소> ls-remote <원격> refs/heads/<브랜치>로 원격 해시를 확인하고, 다르면 fetch 뒤 '
-            'merge-base --is-ancestor <커밋> <원격>/<브랜치>로 포함 여부를 확인하라.\n'
-            f'끝에 "푸시대상: {json.dumps(targets, ensure_ascii=False)}" 줄을 쓰고, 모든 대상이 원격에 포함됐을 때만 '
-            '"작업상태: 푸시" 줄을 써라.')
 
 
 def read_json(path):
@@ -239,31 +230,120 @@ def read_json(path):
         return None
 
 
-def valid_analysis(data, count, strict=False):
-    if not isinstance(data, dict) or not isinstance(data.get('items'), list):
-        return None
-    rows = {}
-    for row in data['items']:
-        if (not isinstance(row, dict) or type(row.get('n')) is not int or row.get('decision') not in ('진행', '보류')
-                or not isinstance(row.get('reason'), str) or not isinstance(row.get('plan', ''), str)):
-            return None
-        if strict and not Q.text_fields(row, Q.ANALYSIS_FIELDS, ('problem', 'scope', 'criterion', 'counterevidence')):
-            return None
-        if strict and (not row['reason'].strip() or (row['decision'] == '진행' and not row.get('plan', '').strip())):
-            return None
-        if strict and row.get('remaining') and not row.get('next_check', '').strip():
-            return None
-        if row['n'] in rows:
-            return None
-        rows[row['n']] = {'n': row['n'], 'decision': row['decision'], 'reason': row['reason'][:300], 'plan': row.get('plan', '')[:400]}
+def valid_analysis(data, count, strict=False, *, salvage=False, errors=None):
+    """Validate independently, preserving valid rows after the single correction request."""
+    issues, rows, seen, good = {}, {}, set(), 0
+    incoming = data.get('items') if isinstance(data, dict) else None
+    if not isinstance(incoming, list):
+        incoming = []
+    for row in incoming:
+        if not isinstance(row, dict) or type(row.get('n')) is not int or not 1 <= row['n'] <= count:
+            issues.setdefault(0, []).append('항목 번호 형식 오류')
+            continue
+        n = row['n']
+        if n in seen:
+            issues.setdefault(n, []).append('중복 번호')
+        seen.add(n)
+        why = issues.setdefault(n, [])
+        if row.get('decision') not in ('진행', '보류'):
+            why.append('decision 형식 오류')
+        for field in ('reason', 'plan'):
+            value = row.get(field, '' if field == 'plan' else None)
+            if not isinstance(value, str):
+                why.append(field + ' 형식 오류')
         if strict:
-            rows[row['n']].update({k: row[k] for k in Q.ANALYSIS_FIELDS})
-    if set(rows) != set(range(1, count + 1)):
+            for field in Q.ANALYSIS_FIELDS:
+                value = row.get(field)
+                if not isinstance(value, str):
+                    why.append(field + ' 형식 오류')
+                elif len(value) > 600:
+                    why.append(f'{field} {len(value)}자>600')
+                elif field in ('problem', 'scope', 'criterion', 'counterevidence') and not value.strip():
+                    why.append(field + ' 비어 있음')
+            if not str(row.get('reason') or '').strip():
+                why.append('reason 비어 있음')
+            if row.get('decision') == '진행' and not str(row.get('plan') or '').strip():
+                why.append('plan 비어 있음')
+            if row.get('remaining') and not str(row.get('next_check') or '').strip():
+                why.append('next_check 비어 있음')
+        rows[n] = row
+    for n in range(1, count + 1):
+        if n not in seen:
+            issues[n] = ['누락']
+    messages = [f'n={n} ' + ', '.join(why) for n, why in sorted(issues.items()) if why]
+    if errors is not None:
+        errors.extend(messages)
+    if messages and not salvage:
         return None
-    return [rows[n] for n in sorted(rows)]
+    result = []
+    for n in range(1, count + 1):
+        if issues.get(n):
+            row = dict(n=n, decision='보류', reason='판단 형식 오류: ' + ', '.join(issues[n]), plan='',
+                       problem='판단 형식 오류', scope='판단 보류', criterion='형식 수정 뒤 판단',
+                       counterevidence='미판단', remaining='판단 형식 오류로 미판단',
+                       next_check='다음 조직개편안에서 다시 판단')
+        else:
+            good += 1
+            source = rows[n]
+            row = {k: source.get(k, '') for k in ('n', 'decision', 'reason', 'plan')}
+            row['reason'], row['plan'] = row['reason'][:300], row['plan'][:400]
+            if strict:
+                row.update({k: source[k] for k in Q.ANALYSIS_FIELDS})
+        result.append(row)
+    return result if good else None
 
 
-def valid_result(data, expected=None, strict=False, allowed_refs=()):
+def test_verdict(tests, *, folder=None, base=None, revision=None):
+    """Read pytest -rfE evidence ourselves; counts alone cannot establish a baseline."""
+    verdict = {'after_failed': [], 'new_failures': [], 'incomparable': []}
+    for row in tests:
+        phase = row.get('phase', 'after')
+        if phase == 'after' and row['exit_code'] != 0:
+            verdict['after_failed'].append(row['command'])
+        if phase != 'suite':
+            continue
+        try:
+            before = [t for t in tests if t.get('phase') == 'before' and t['command'] == row['command']]
+            if len(before) != 1:
+                raise ValueError('before 짝 없음 또는 중복')
+            before = before[0]
+            if not row.get('python') or row.get('python') != before.get('python'):
+                raise ValueError('python 불일치')
+            if not base or before.get('revision') != base or not revision or row.get('revision') != revision:
+                raise ValueError('revision 불일치')
+            failures = []
+            for t in (before, row):
+                if folder is None or not isinstance(t.get('log'), str):
+                    raise ValueError('로그 없음')
+                relative = Path(t['log'])
+                path = (Path(folder) / relative).resolve()
+                if relative.is_absolute() or not path.is_relative_to(Path(folder).resolve()):
+                    raise ValueError('작업 폴더 밖 로그')
+                text = path.read_text()
+                if re.search(r'^!+\s+.*\b(?:Interrupted|errors? during collection)\b|^=+\s+.*\binterrupted\b', text, re.I | re.M):
+                    raise ValueError('수집 오류 또는 중단')
+                last_line = next((line.strip() for line in reversed(text.splitlines()) if line.strip()), '')
+                if not re.fullmatch(r'={2,}\s+\d+ (?:passed|failed|errors?|skipped|xfailed|xpassed|deselected)\b[^\n]*\bin [0-9]+(?:\.[0-9]+)?s(?: \([^)\n]+\))?\s+={2,}', last_line):
+                    raise ValueError('요약 줄 없음')
+                identifiers = set(re.findall(r'^(?:FAILED|ERROR)[ \t]+(.+?)(?: - [^\n]*)?$', text, re.M))
+                if t['exit_code'] != 0 and not identifiers:
+                    raise ValueError('실패 식별자 없음')
+                if t['exit_code'] == 0 and identifiers:
+                    raise ValueError('종료 코드와 실패 요약 불일치')
+                failures.append(identifiers)
+            verdict['new_failures'].extend(sorted(failures[1] - failures[0]))
+        except (ValueError, OSError) as exc:
+            verdict['incomparable'].append(row['command'] + ': ' + str(exc))
+    return verdict
+
+
+def verdict_errors(verdict):
+    return (['새 실패: ' + c for c in verdict['new_failures']] +
+            ['after 실패: ' + c for c in verdict['after_failed']] +
+            ['비교 불가: ' + c for c in verdict['incomparable']])
+
+
+def valid_result(data, expected=None, strict=False, allowed_refs=(), *, folder=None, base=None, revision=None, errors=None):
     if not isinstance(data, dict) or not isinstance(data.get('items'), list) or not data['items']:
         return None
     version = data.get('schema_version')
@@ -306,8 +386,20 @@ def valid_result(data, expected=None, strict=False, allowed_refs=()):
     if not isinstance(tests, list) or any(not isinstance(t, dict) or not isinstance(t.get('command'), str)
                                          or type(t.get('exit_code')) is not int for t in tests):
         return None
-    if version == 2 and any(r['status'] in ('완료', '부분 해결') for r in items) and (not tests or any(t['exit_code'] != 0 for t in tests)):
+    if any(t.get('phase', 'after') not in ('after', 'before', 'suite') or
+           (t.get('phase') in ('before', 'suite') and
+            (not isinstance(t.get('python'), str) or not t['python'] or not isinstance(t.get('revision'), str) or not t['revision']))
+           for t in tests):
         return None
+    verdict = test_verdict(tests, folder=folder, base=base, revision=revision)
+    if version == 2 and any(r['status'] in ('완료', '부분 해결') for r in items):
+        reasons = verdict_errors(verdict)
+        if not any(t.get('phase', 'after') == 'after' for t in tests):
+            reasons.append('after 검사 없음')
+        if reasons:
+            if errors is not None:
+                errors.extend(reasons)
+            return None
     return {'schema_version': version or 1, 'items': items, 'tests': tests,
             'restarted': data.get('restarted') is True, 'notes': str(data.get('notes', ''))[:4000]}
 
@@ -331,18 +423,159 @@ def changed_files(repo, commits):
     return sorted(files)
 
 
-def on_remote(repo, remote, branch, sha):
-    git(repo, 'fetch', '--quiet', remote, branch, timeout=120)
-    return git(repo, 'merge-base', '--is-ancestor', sha, f'{remote}/{branch}', check=False).returncode == 0
+def remote_commits(repo, remote, branch, originals, base, *, runner=None):
+    """Classify each original against one fetched remote snapshot, without writing a ledger."""
+    run = runner or git
+    run(repo, 'fetch', '--quiet', remote, branch, timeout=120)
+    ref = f'{remote}/{branch}'
+    candidates = run(repo, 'rev-list', f'{base}..{ref}').stdout.splitlines() if base else []
+    patches = None
+    def patch(sha):
+        content = run(repo, 'show', '--pretty=format:', '--no-ext-diff', sha).stdout
+        result = run(repo, 'patch-id', '--stable', input=content).stdout.split()
+        return result[0] if result else None
+    rows = []
+    for sha in originals:
+        if run(repo, 'merge-base', '--is-ancestor', sha, ref, check=False).returncode == 0:
+            found, how = sha, 'ancestor'
+        else:
+            if patches is None:
+                patches = {}
+                for candidate in candidates:
+                    value = patch(candidate)
+                    if value:
+                        patches.setdefault(value, candidate)
+            found = patches.get(patch(sha))
+            how = 'patch' if found else 'missing'
+        rows.append({'original': sha, 'remote_sha': found, 'how': how})
+    return rows
 
 
-def push(repo, remote, branch, sha):
-    """Push exactly ``sha``; accepted only when the remote then contains it. Never forced."""
-    proc = git(repo, 'push', remote, f'{sha}:refs/heads/{branch}', timeout=180, check=False)
-    remote_head = git(repo, 'ls-remote', remote, f'refs/heads/{branch}', timeout=60).stdout.split('\t')[0].strip()
-    if remote_head == sha or on_remote(repo, remote, branch, sha):
-        return {'ok': True, 'remote_head': remote_head}
-    return {'ok': False, 'remote_head': remote_head, 'output': (proc.stderr or proc.stdout).strip()[-300:]}
+def rollback_marker(key, scope):
+    return f'Autofix-Rollback: {key} {scope}'
+
+
+def marked_rollback(repo, key, scope, ref='HEAD', base=None, *, runner=None):
+    run = runner or git
+    marker_line = rollback_marker(key, scope)
+    out = run(repo, 'log', '--format=%H', '--fixed-strings', '--grep=' + marker_line,
+              f'{base}..{ref}' if base else ref).stdout.splitlines()
+    for sha in out:
+        if marker_line in run(repo, 'show', '-s', '--format=%B', sha).stdout.splitlines():
+            return sha
+    return None
+
+
+def push_revision(repo, remote, branch, revision, *, runner=None):
+    """Publish one explicit revision without force and verify the remote head."""
+    run = runner or git
+    proc = run(repo, 'push', remote, f'{revision}:refs/heads/{branch}', timeout=180, check=False)
+    verification = run(repo, 'ls-remote', remote, f'refs/heads/{branch}', check=False)
+    fields = verification.stdout.split()
+    remote_head = fields[0] if fields else ''
+    output = (proc.stderr or proc.stdout).strip()
+    if verification.returncode or not fields:
+        output += '\n원격 head 확인 실패: ' + ((verification.stderr or verification.stdout).strip() or '빈 응답')
+    return {'ok': proc.returncode == 0 and verification.returncode == 0 and remote_head == revision,
+            'remote_head': remote_head, 'revision': revision, 'output': output[-1000:]}
+
+
+def remote_write(repo, remote, branch, commits, key, *, undo=False, runner=None):
+    """The Hermes runtime alone publishes through a disposable worktree. Tests inject git."""
+    run = runner or git
+    folder = Path(tempfile.mkdtemp(prefix='autofix-')) / 'worktree'
+    mapped = {}
+    try:
+        run(repo, 'worktree', 'add', '--detach', str(folder), f'{remote}/{branch}')
+        if undo:
+            proc = run(folder, 'revert', '--no-commit', *commits, check=False)
+            if proc.returncode:
+                run(folder, 'revert', '--abort', check=False)
+                return {'ok': False, 'output': (proc.stderr or proc.stdout)[-1000:], 'how': 'revert', 'diverged': True}
+            run(folder, 'commit', '-q', '-m', marker(key) + ' 롤백\n\n' + rollback_marker(key, 'remote'))
+        else:
+            for sha in commits:
+                proc = run(folder, 'cherry-pick', sha, check=False)
+                if proc.returncode:
+                    conflicts = run(folder, 'diff', '--name-only', '--diff-filter=U').stdout.strip()
+                    run(folder, 'cherry-pick', '--abort', check=False)
+                    return {'ok': False, 'output': (proc.stderr or proc.stdout)[-1000:], 'conflicts': conflicts,
+                            'how': 'cherry-pick', 'diverged': True}
+                mapped[sha] = run(folder, 'rev-parse', 'HEAD').stdout.strip()
+        revision = run(folder, 'rev-parse', 'HEAD').stdout.strip()
+        outcome = push_revision(folder, remote, branch, revision, runner=run)
+        outcome.update(how='revert' if undo else 'cherry-pick', diverged=True)
+        if not undo:
+            # Record before push: git may advance the shared remote-tracking ref on success.
+            outcome['mapped'] = mapped
+        return outcome
+    finally:
+        run(repo, 'worktree', 'remove', '--force', str(folder), check=False)
+        run(repo, 'worktree', 'prune', check=False)
+        shutil.rmtree(folder.parent, ignore_errors=True)
+
+
+def publish(job, *, runner=None, checkpoint=None):
+    pushed = {}
+    for name, originals in (job.get('commits') or {}).items():
+        if not originals or name not in REMOTES:
+            continue
+        repo, remote, branch = REMOTES[name]
+        entry = {'commit': originals[0], 'commits': [], 'ok': None, 'by': 'hermes'}
+        pushed[name] = entry
+        job['pushed'] = pushed
+        if checkpoint:
+            checkpoint()
+        try:
+            rows = remote_commits(repo, remote, branch, originals, job.get('base', {}).get(name), runner=runner)
+            entry['commits'] = rows
+            missing = [r['original'] for r in reversed(rows) if not r['remote_sha']]
+            if not missing:
+                entry.update(ok=True, note='이미 원격 반영됨')
+            else:
+                run = runner or git
+                tip = originals[0]  # marked_commits returns newest first
+                if run(repo, 'merge-base', '--is-ancestor', f'{remote}/{branch}', tip, check=False).returncode == 0:
+                    count = int(run(repo, 'rev-list', '--count', f'{remote}/{branch}..{tip}').stdout.strip())
+                    result = push_revision(repo, remote, branch, tip, runner=run)
+                    result.update(how='fast-forward', published_count=count, additional_count=count-len(missing),
+                                  mapped={sha: sha for sha in missing})
+                else:
+                    entry['diverged'] = True
+                    result = remote_write(repo, remote, branch, missing, job['key'], runner=run)
+                entry.update({k: v for k, v in result.items() if k != 'mapped'})
+                if result['ok']:
+                    for row in rows:
+                        if row['original'] in result['mapped']:
+                            row.update(remote_sha=result['mapped'][row['original']], how=result['how'])
+        except Exception as exc:
+            entry.update(ok=False, output=str(exc)[-1000:])
+        if entry['ok'] is False:
+            # Verification can fail after the remote write. A failed recheck must not
+            # replace this failure or erase already observed remote commits.
+            try:
+                entry['commits'] = remote_commits(repo, remote, branch, originals, job.get('base', {}).get(name), runner=runner)
+            except Exception as exc:
+                entry['output'] = (entry.get('output', '') + '\n반영 재판정 실패: ' + str(exc))[-1000:]
+        if checkpoint:
+            checkpoint()
+    return pushed
+
+
+def publish_revert(repo, remote, branch, targets, key, base, *, local_sha=None, runner=None):
+    run = runner or git
+    run(repo, 'fetch', '--quiet', remote, branch)
+    found = (marked_rollback(repo, key, 'remote', f'{remote}/{branch}', base, runner=run)
+             or marked_rollback(repo, key, 'local', f'{remote}/{branch}', base, runner=run))
+    if found:
+        return {'ok': True, 'revert_sha': found, 'done': True}
+    if local_sha and run(repo, 'merge-base', '--is-ancestor', f'{remote}/{branch}', local_sha, check=False).returncode == 0:
+        count = int(run(repo, 'rev-list', '--count', f'{remote}/{branch}..{local_sha}').stdout.strip())
+        result = push_revision(repo, remote, branch, local_sha, runner=run)
+        result.update(how='fast-forward', published_count=count)
+    else:
+        result = remote_write(repo, remote, branch, targets, key, undo=True, runner=run)
+    return {**result, 'revert_sha': result.get('revision'), 'done': result['ok']}
 
 
 def restore_live(files, repo=None, mirrors=None):
@@ -360,19 +593,23 @@ def restore_live(files, repo=None, mirrors=None):
             shutil.copy2(source, target)
         elif target.is_file() or target.is_symlink():
             target.unlink()
-        else:
+        elif target.exists():
             skipped.append(rel)
+        # Both missing is already restored, including after a process interruption.
     return skipped
 
 
 def revert(repo, commits, key):
     if not commits:
         return None
+    found = marked_rollback(repo, key, 'local')
+    if found:
+        return found
     proc = git(repo, 'revert', '--no-commit', *commits, check=False)
     if proc.returncode:
         git(repo, 'revert', '--abort', check=False)
         raise RuntimeError('되돌리기 충돌: ' + (proc.stderr or proc.stdout).strip()[-300:])
-    git(repo, 'commit', '-q', '-m', _owner_text(f'{marker(key)} 롤백\n\n소유자가 <<doctor_name>> 자동개편 결과 보고에서 롤백을 눌렀다. 되돌린 커밋: ') + ', '.join(c[:10] for c in commits))
+    git(repo, 'commit', '-q', '-m', _owner_text(f'{marker(key)} 롤백\n\n소유자가 <<doctor_name>> 자동개편 결과 보고에서 롤백을 눌렀다. 되돌린 커밋: ') + ', '.join(c[:10] for c in commits) + '\n\n' + rollback_marker(key, 'local'))
     return head(repo)
 
 
@@ -570,8 +807,8 @@ def result_report(job):
         lines.append('• claude-subscription 플러그인 클론이 바뀜 — 롤백은 수동 확인 필요')
     lines.append(_owner_text(f"• Paseo 대화: `{job.get('agent_id', '')[:8]}` (<<doctor_name>> 자동개편 {key})"))
     if any(commits.values()):
-        lines.append('확인·푸시는 변경 기록 처리이며 미해결 문제의 종결이 아니다.')
-        lines.append(_owner_text('*확인*을 누르면 위 커밋을 원격에 올린다(Hermes-ddots origin main, 강제 푸시 없음. hermes-agent 커밋은 로컬에 두고 core-backup으로 보관).\n'
+        lines.append('확인은 결과 확인이며 미해결 문제의 종결이 아니다. 확인 전에도 04:30 자동 기록으로 원격에 반영될 수 있고 되돌리기가 통제 수단이다.')
+        lines.append(_owner_text('*확인*은 결과 확인이다. 미반영분만 Hermes가 원격 최신 위에 올린다(강제 푸시 없음. hermes-agent 커밋은 로컬에 두고 core-backup으로 보관).\n'
                      '*되돌리기*를 누르면 되돌림 커밋을 만들고 실제 파일을 되돌린 뒤 필요하면 게이트웨이를 재시작한다. '
                      '원본이 이미 원격에 있으면 되돌림 커밋도 올린다.'))
         return '\n'.join(lines) + '\n[[버튼: 확인 | 되돌리기]]'
@@ -652,14 +889,14 @@ def incident_item(record, fix_key, record_path, previous):
 CAP_CHOICES = ('승인', '거절', '확인')
 CAP_LEGACY = ('오늘 계속 고쳐', '이것만 고쳐', '내일로')
 CAP_ANSWERS = CAP_CHOICES + CAP_LEGACY
-# The result report's buttons (owner, 2026-10-31): 확인 = push approval, 되돌리기 = the former 롤백.
+# The result report's buttons (owner, 2026-10-31): 확인 = result acknowledgment, 되돌리기 = the former 롤백.
 UNDO = ('되돌리기', '롤백')
 WAITING_OWNER = 'awaiting_owner'
 # Only holds, with a remaining problem: the owner confirms the hold or says what to do instead (2026-11-05).
 HELD = 'held'
 HELD_LEGEND = '*확인* = 보류 판단을 받아들이고 종결(푸시 없음), *의견* = 다르게 할 일을 직접 지시'
 NEEDS_DECISION = ('reported', 'failed', HELD)
-IN_FLIGHT = ('queued', 'analyzing', 'implementing', 'confirming', 'rolling_back')
+IN_FLIGHT = ('queued', 'analyzing', 'implementing', 'publishing', 'rolling_back')
 
 
 def cap_question(job, cap):
@@ -780,7 +1017,7 @@ def request(home, key, action, ts):
         job = state['jobs'].get(key)
         if not job:
             return None
-        if job['status'] == 'confirming':
+        if job['status'] in ('publishing', 'rolling_back'):
             return '확인 처리 중이야. 끝나면 결과를 알릴게.'
         if job['status'] == HELD:
             if action == '롤백':
@@ -790,7 +1027,9 @@ def request(home, key, action, ts):
             job['held_confirmed_ts'] = ts
             L.save(state_path(home), state)
             closed = dict(job)
-        elif job['status'] not in ('reported', 'failed'):
+        elif job['status'] == 'rollback_failed' and action != '롤백':
+            return '롤백 일부 실패 상태야. 되돌리기를 다시 눌러 이어서 처리해 줘.'
+        elif job['status'] not in ('reported', 'failed', 'rollback_failed') and not (job['status'] == 'confirmed' and action == '롤백'):
             return '아직 자동개편이 끝나지 않았어. 결과 보고 뒤에 눌러 줘.' if job['status'] not in ('confirmed', 'rolled_back', 'nothing') else '이미 처리된 작업이야.'
         else:
             if action == '롤백' and not any((job.get('commits') or {}).values()):
@@ -803,7 +1042,7 @@ def request(home, key, action, ts):
     if closed:
         paint(home, closed, 'done', '확인')
         return '확인했어. 보류 판단대로 종결할게.'
-    return '확인 접수. 원격에 올린 뒤 결과를 알릴게.' if action == '확인' else '되돌리기 접수. 되돌린 뒤 결과를 알릴게.'
+    return '확인 접수. 결과를 확인하고 미반영분만 원격 최신 위에 올린 뒤 알릴게.' if action == '확인' else '되돌리기 접수. 되돌린 뒤 결과를 알릴게.'
 
 
 def save(home, state):
@@ -840,6 +1079,7 @@ def agent_status(job):
 
 def finish_report(home, job, status):
     job['status'] = status
+    job['phase_at'] = time.time()
     job['report_ts'] = say(home, job, result_report(job), role='report')
     if job.get('kind') == 'night':
         job['origin_pending'] = True
@@ -858,6 +1098,28 @@ def collect_commits(job):
     if base.get('clone') and (CLONE / '.git').exists():
         job['clone_changed'] = head(CLONE) != base['clone']
     return commits
+
+
+def format_retry(home, job, phase, errors):
+    retries = job.setdefault('format_retry', {})
+    if retries.get(phase, 0) >= 1:
+        return False
+    prompt = (f'{phase}.json의 형식·증거를 한 번 수정하라. 같은 대화에서 기존 판단 자료와 기준을 유지한다. '
+              '새 구현·푸시는 하지 마라. 완료 조건을 만족하지 않으면 검증 대기나 실패로 써라. 오류: ' +
+              '; '.join(errors) + f". 수정 파일: {run_dir(home, job['key']) / (phase + '.json')}")
+    path = run_dir(home, job['key']) / (phase + '.json')
+    previous = path.read_bytes() if path.exists() else None
+    path.unlink(missing_ok=True)  # remove stale input before a fast reply can replace it
+    try:
+        sh([PASEO, 'send', job['agent_id'], '--no-wait', '--prompt', prompt])
+    except Exception:
+        if previous is not None and not path.exists():
+            path.write_bytes(previous)
+        raise
+    retries[phase] = 1
+    job['phase_at'] = time.time()
+    persist_job(home, job)
+    return True
 
 
 def advance(home, job):
@@ -896,10 +1158,19 @@ def advance(home, job):
         if data is None:
             if time.time() - job['phase_at'] < NO_FILE_GRACE:
                 return True
-            fail(home, job, f'Paseo가 {name}을 남기지 않고 멈췄다 (상태 {status}).')
-            return False
+            phase = 'analysis' if job['status'] == 'analyzing' else 'result'
+            if format_retry(home, job, phase, [f'{name} 없음 또는 JSON 오류']):
+                return True
+            if phase == 'result':
+                fail(home, job, f'Paseo가 {name}을 남기지 않고 멈췄다 (상태 {status}).')
+                return False
         if job['status'] == 'analyzing':
-            analysis = valid_analysis(data, len(job['items']), strict=job.get('review_version') == 2)
+            errors = []
+            analysis = valid_analysis(data, len(job['items']), strict=job.get('review_version') == 2, errors=errors)
+            if analysis is None and format_retry(home, job, 'analysis', errors):
+                return True
+            if analysis is None:
+                analysis = valid_analysis(data, len(job['items']), strict=job.get('review_version') == 2, salvage=True)
             if analysis is None:
                 fail(home, job, 'Paseo 판단 결과 형식이 맞지 않는다.')
                 return False
@@ -910,6 +1181,7 @@ def advance(home, job):
                 if any(r.get('remaining') for r in analysis):
                     # A problem remains: the owner confirms the hold or gives another instruction (2026-11-05).
                     job['status'] = HELD
+                    job['phase_at'] = time.time()
                     report = result_report(job)
                 else:
                     job['status'] = 'nothing'
@@ -922,32 +1194,45 @@ def advance(home, job):
             job.update(status='implementing', phase_at=time.time())
             return True
         expected = [i['n'] for i in job['items']] if job.get('review_version') == 2 else None
-        result = valid_result(data, expected, strict=job.get('review_version') == 2, allowed_refs=job.get('review_refs', []))
+        job['commits'] = collect_commits(job)
+        revisions = job['commits'].get('setting') or []
+        errors = []
+        context = dict(folder=folder, base=job.get('base', {}).get('setting'), revision=revisions[0] if revisions else None)
+        result = valid_result(data, expected, strict=job.get('review_version') == 2, allowed_refs=job.get('review_refs', []), errors=errors, **context)
         if result is None:
+            if format_retry(home, job, 'result', errors or ['항목·상태·완료 증거 형식 오류']):
+                return True
             fail(home, job, 'Paseo 결과의 항목·상태·완료 증거가 맞지 않는다. 원본 result.json을 확인해야 한다.')
             return False
         job['result'] = result
-        job['commits'] = collect_commits(job)
-        if any(t['exit_code'] not in (0, None) for t in job['result']['tests']):
-            job['error'] = '실패한 검사가 있다. 결과를 확인해 줘.'
+        warnings = verdict_errors(test_verdict(result['tests'], **context))
+        if warnings:
+            job['error'] = '실패한 검사가 있다. ' + '; '.join(warnings[:5])
+        else:
+            job.pop('error', None)
         finish_report(home, job, 'reported')
         return False
     if job['status'] == 'confirming':
-        try:
-            status = agent_status(job)
-        except Exception:
-            status = None
-        if status == 'running':
-            if time.time() - job['phase_at'] <= PUSH_TIMEOUT:
-                return True
-            sh([PASEO, 'stop', job['agent_id']], check=False)
-            job['push_note'] = 'Paseo 대화가 30분 안에 푸시를 끝내지 않아 멈췄다.'
-        finish_confirm(home, job)
+        job['status'] = 'reported'
+        consumed = job.pop('action', None)
+        persist_job(home, job, consumed_action=consumed)
+        return False
+    if job['status'] == 'publishing':
+        started = job.get('publishing', {}).get('at')
+        if isinstance(started, (int, float)) and time.time() - started < 3600:
+            return False
+        for repo, _, _ in REMOTES.values():
+            git(repo, 'worktree', 'prune', check=False)
+        job.update(status='reported', action={'kind': '확인'})
+    if job['status'] == 'rolling_back':
+        if busy(own=(job.get('agent_id', ''),)):
+            return True
+        rollback(home, job)
         return False
     action = (job.get('action') or {}).get('kind')
     if job['status'] in ('reported', 'failed') and action == '확인':
         return confirm(home, job)
-    elif job['status'] in ('reported', 'failed') and action == '롤백':
+    elif job['status'] in ('reported', 'failed', 'confirmed', 'rollback_failed') and action == '롤백':
         if busy(own=(job.get('agent_id', ''),)):
             return False
         rollback(home, job)
@@ -959,105 +1244,158 @@ def push_targets(job):
             for name, commits in (job.get('commits') or {}).items() if commits and name in REMOTES]
 
 
-def confirm(home, job):
-    """Hand the approved push to the job's own Paseo conversation, so Paseo holds the push evidence."""
-    targets = push_targets(job)
-    job.pop('push_note', None)
-    if targets and job.get('agent_id'):
-        try:
-            if agent_status(job) == 'running':
-                return False  # the owner may still be talking to it; push once it is idle
-            sh([PASEO, 'send', job['agent_id'], '--no-wait', '--prompt', push_prompt(targets)])
+def persist_job(home, job, *, consumed_action=None):
+    """Write each completed stage immediately without losing a concurrent receipt/thread attachment."""
+    with L.locked(state_path(home)):
+        state = load(home)
+        latest = state['jobs'].get(job['key'], {})
+        if latest.get('action') and latest['action'] != consumed_action:
+            job['action'] = latest['action']
+        elif job.get('action') == consumed_action:
             job.pop('action', None)
-            job.update(status='confirming', phase_at=time.time())
-            return True
-        except Exception as exc:
-            job['push_note'] = f'Paseo 대화에 푸시를 맡기지 못했다 ({type(exc).__name__}).'
-    finish_confirm(home, job)
+        for field in ('receipt_ts', 'receipt_source', 'channel', 'thread_ts'):
+            if latest.get(field):
+                job[field] = latest[field]
+        state['jobs'][job['key']] = dict(job)
+        save(home, state)
+
+
+def confirm(home, job):
+    from hermes_schedule.policy import section
+    consumed = job.pop('action', None)
+    try:
+        policy = section('autofix_policy', {}, root=ROOT)
+    except Exception:
+        policy = None  # A malformed instruction must have the same refusal as a missing one.
+    if not isinstance(policy, dict) or policy.get('confirm') != 'result':
+        job['push_note'] = '지시서 확인 필요'
+        persist_job(home, job, consumed_action=consumed)
+        finish_reply(home, job, '*🔴 결과 확인 보류*\n지시서 확인 필요')
+        return False
+    job.update(status='publishing', publishing={'at': time.time(), 'targets': push_targets(job)})
+    persist_job(home, job, consumed_action=consumed)  # write-ahead before any remote write
+    try:
+        job['pushed'] = publish(job, checkpoint=lambda: persist_job(home, job, consumed_action=consumed))
+        problems = [f"{name}: {row.get('conflicts', '')} {row.get('output', '')}" for name, row in job['pushed'].items() if not row['ok']]
+    except Exception as exc:
+        problems = [str(exc)[:1000]]
+    job['status'] = 'failed' if problems else 'confirmed'
+    job.pop('publishing', None)
+    job['push_note'] = '사람 확인 필요: ' + '; '.join(problems) if problems else ''
+    persist_job(home, job, consumed_action=consumed)
+    lines = [_owner_text(f"*{'🔴' if problems else '🟢'} <<doctor_name>> 자동개편 결과 확인 {'실패' if problems else '완료'} — {job['key']}*")]
+    for name, row in job.get('pushed', {}).items():
+        lines.append(f"• {name}: " + ('사람 확인 필요' if problems else row.get('note', '미반영분 원격 반영 확인')))
+        lines.extend(publication_lines(name, row))
+    if problems:
+        lines.append(R.escape(job['push_note']))
+    finish_reply(home, job, '\n'.join(lines))
+    paint(home, job, 'failed' if problems else 'done', '결과 확인')
     return False
 
 
-def finish_confirm(home, job):
-    """Accept what the conversation pushed only when the remote contains it; push the rest directly."""
-    via_paseo = job['status'] == 'confirming'
-    pushed, problems = {}, []
-    for name, commits in (job.get('commits') or {}).items():
-        if commits and name in REMOTES:
-            repo, remote, branch = REMOTES[name]
-            if via_paseo and on_remote(repo, remote, branch, commits[0]):
-                outcome = {'ok': True, 'by': 'paseo'}
-            else:
-                outcome = {**push(repo, remote, branch, commits[0]), 'by': 'hermes'}
-            pushed[name] = {'commit': commits[0], **outcome}
-            if not outcome['ok']:
-                problems.append(f"{name}: {outcome.get('output', '')} (원격 {outcome['remote_head'][:7]})")
-    direct = [name for name, row in pushed.items() if row['by'] == 'hermes' and row['ok']]
-    notes = [job.get('push_note', '')]
-    if direct:
-        notes.append(('Paseo 대화가 올리지 않아 ' if via_paseo else '') + _owner_text('<<doctor_name>>이 직접 올린 대상(') + ', '.join(direct)
-                     + ')은 Paseo 작업에 파란불이 켜지지 않는다.')
-    job['push_note'] = ' '.join(n for n in notes if n)
-    job['pushed'] = pushed
-    job['status'] = 'confirmed' if not problems else 'failed'
-    job.pop('action', None)
-    if not pushed:
-        finish_reply(home, job, _owner_text(f'*🟢 <<doctor_name>> 자동개편 확인 완료 — {job["key"]}*\n추가로 올릴 커밋이 없어 확인 처리했다.'))
-        paint(home, job, 'done', '확인')
-        return
-    lines = [_owner_text(f"*{'🟢' if not problems else '🔴'} <<doctor_name>> 자동개편 {'푸시 완료' if not problems else '푸시 실패'} — {job['key']}*")]
-    for name, row in pushed.items():
-        repo, remote, branch = REMOTES[name]
-        by = 'Paseo 대화가 올림, ' if row['by'] == 'paseo' else ''
-        lines.append(f"• {repo.name} {remote}/{branch} `{short(row['commit'])}` — {by}{'원격 반영 확인' if row['ok'] else '반영 안 됨'}")
-    lines.extend('• ' + R.escape(p) for p in problems)
-    if job['push_note']:
-        lines.append('• ' + R.escape(job['push_note']))
-    finish_reply(home, job, '\n'.join(lines))
-    paint(home, job, 'done' if not problems else 'failed', '확인·푸시' if not problems else '푸시 실패')
+def publication_lines(name, row):
+    lines = []
+    if row.get('ok') and row.get('how') == 'fast-forward':
+        lines.append(f"• {name}: fast-forward · 함께 올라간 커밋 {row['published_count']}개"
+                     + (f" (표식 외 {row['additional_count']}개)" if 'additional_count' in row else ''))
+    if row.get('diverged'):
+        lines.append(f'• {name}: 로컬 main과 원격이 갈라짐 · 사람이 main을 맞춰야 함')
+    return lines
 
 
 def rollback(home, job):
+    if job.get('status') == 'rolled_back':
+        return
     commits = job.get('commits') or {}
-    notes, done = [], {}
+    consumed = job.pop('action', None)
+    notes = []
+    job['status'] = 'rolling_back'
     try:
+        rb = job.get('rollback')
+        if rb is None:
+            remote = {}
+            for name, originals in commits.items():
+                if originals and name in REMOTES:
+                    repo, origin, branch = REMOTES[name]
+                    rows = remote_commits(repo, origin, branch, originals, job.get('base', {}).get(name))
+                    remote[name] = {'targets': list(dict.fromkeys(r['remote_sha'] for r in rows if r['remote_sha'])), 'done': False}
+            rb = job['rollback'] = {'stage': 'local', 'local_sha': {}, 'live_restored': False, 'remote': remote}
+        persist_job(home, job, consumed_action=consumed)
+        for name, repo in (('agent', AGENT), ('setting', SETTING)):
+            if commits.get(name) and not rb['local_sha'].get(name):
+                rb['stage'] = 'local'
+                persist_job(home, job, consumed_action=consumed)
+                rb['local_sha'][name] = revert(repo, commits[name], job['key'])
+                persist_job(home, job, consumed_action=consumed)
         files = changed_files(SETTING, commits.get('setting') or [])
-        was_pushed = {name: bool(c) and on_remote(REMOTES[name][0], REMOTES[name][1], REMOTES[name][2], c[-1])
-                      for name, c in commits.items() if name in REMOTES}
-        if commits.get('agent'):
-            # First, so the ./sync below records the reverted core in core-backup/.
-            done['agent'] = revert(AGENT, commits['agent'], job['key'])
-        if commits.get('setting'):
-            done['setting'] = revert(SETTING, commits['setting'], job['key'])
+        if not rb['live_restored']:
+            rb['stage'] = 'live'
+            persist_job(home, job, consumed_action=consumed)
             skipped = restore_live(files)
             if skipped:
-                notes.append('실제 위치를 찾지 못한 파일: ' + ', '.join(skipped[:5]))
+                raise RuntimeError('실제 위치를 찾지 못한 파일: ' + ', '.join(skipped[:5]))
             sh([str(SETTING / 'sync')], cwd=SETTING, timeout=600)
-            if git(SETTING, 'status', '--porcelain').stdout.strip():
-                notes.append('./sync 뒤 남은 차이가 있다. 다른 변경이 섞였을 수 있어 커밋하지 않았다.')
+            if files and git(SETTING, 'status', '--porcelain', '--untracked-files=all', '--',
+                             *(':(literal)' + path for path in files)).stdout.strip():
+                raise RuntimeError('./sync 뒤 남은 차이 확인 필요')
+            if needs_restart(files, commits.get('agent')) and not restart_gateway()['ok']:
+                raise RuntimeError('게이트웨이 재시작 후 연결 확인 실패')
+            rb['live_restored'] = True
+            persist_job(home, job, consumed_action=consumed)
+        rb['stage'] = 'remote'
+        persist_job(home, job, consumed_action=consumed)
+        for name, remote in rb['remote'].items():
+            if remote['done']:
+                continue
+            if remote['targets']:
+                repo, origin, branch = REMOTES[name]
+                result = publish_revert(repo, origin, branch, remote['targets'], job['key'], job.get('base', {}).get(name),
+                                        local_sha=rb['local_sha'].get(name))
+                remote.update(result)
+                persist_job(home, job, consumed_action=consumed)
+                if not result['ok']:
+                    raise RuntimeError(result.get('output', '원격 되돌림 실패'))
+            else:
+                remote['done'] = True
+                persist_job(home, job, consumed_action=consumed)
+        rb['stage'] = 'done'
+        job.update(status='rolled_back', rolled_back=dict(rb['local_sha']))
         if job.get('clone_changed'):
-            notes.append('claude-subscription 플러그인 클론 변경은 되돌리지 않았다. 수동 확인 필요.')
-        if needs_restart(files, commits.get('agent')):
-            notes.append('게이트웨이 재시작 ' + ('완료' if restart_gateway()['ok'] else '후 연결 확인 실패'))
+            notes.append('claude-subscription 플러그인 클론 변경은 수동 확인 필요')
         if any(f.startswith('launchd/') for f in files):
-            notes.append('launchd 파일이 바뀌었다. 해당 예약은 launchctl로 다시 불러와야 한다.')
-        for name, sha in done.items():
-            if sha and was_pushed.get(name):
-                repo, remote, branch = REMOTES[name]
-                outcome = push(repo, remote, branch, sha)
-                notes.append(f'{repo.name} 되돌림 커밋 원격 반영 ' + ('확인' if outcome['ok'] else '실패'))
-        job['rolled_back'] = done
-        job['status'] = 'rolled_back'
-        ok = True
+            notes.append('launchd 다시 불러오기는 수동 확인 필요')
     except Exception as exc:
-        job['status'] = 'failed'
-        notes.append('롤백 실패: ' + str(exc)[:300])
-        ok = False
-    job.pop('action', None)
-    lines = [_owner_text(f"*{'🟢' if ok else '🔴'} <<doctor_name>> 자동개편 롤백 {'완료' if ok else '실패'} — {job['key']}*")]
-    lines.extend(f"• {name} 되돌림 커밋 `{short(sha)}`" for name, sha in done.items() if sha)
+        job['status'] = 'rollback_failed'
+        notes.append(f"롤백 일부 실패: {job.get('rollback', {}).get('stage', '준비')} · {str(exc)[:1000]}")
+    persist_job(home, job, consumed_action=consumed)
+    ok = job['status'] == 'rolled_back'
+    lines = [_owner_text(f"*{'🟢' if ok else '🔴'} <<doctor_name>> 자동개편 롤백 {'완료' if ok else '일부 실패'} — {job['key']}*")]
+    lines.extend(f"• {name} 되돌림 커밋 `{short(sha)}`" for name, sha in job.get('rollback', {}).get('local_sha', {}).items())
+    for name, row in job.get('rollback', {}).get('remote', {}).items():
+        lines.extend(publication_lines(name, row))
     lines.extend('• ' + R.escape(n) for n in notes)
     finish_reply(home, job, '\n'.join(lines))
     paint(home, job, 'declined' if ok else 'failed', '롤백' if ok else '롤백 실패')
+
+
+def clean_publish_worktrees():
+    """The tick lock excludes active publishers; remove registrations left by a killed tick.
+
+    mini-maintenance only prunes missing folders. Here existing autofix folders are
+    removed too, without touching other worktrees or their branches.
+    """
+    temp_root = Path(tempfile.gettempdir()).resolve()
+    for repo in {target[0] for target in REMOTES.values()}:
+        for field in git(repo, 'worktree', 'list', '--porcelain', '-z').stdout.split('\0'):
+            if not field.startswith('worktree '):
+                continue
+            path = Path(field[len('worktree '):]).resolve()
+            if path.name == 'worktree' and path.parent.name.startswith('autofix-') and path.parent.parent == temp_root:
+                result = git(repo, 'worktree', 'remove', '--force', str(path), check=False)
+                if result.returncode:
+                    print('autofix worktree cleanup failed: ' + (result.stderr or result.stdout).strip()[:300], file=sys.stderr)
+        git(repo, 'worktree', 'prune', check=False)
 
 
 def tick(home=HOME):
@@ -1066,6 +1404,10 @@ def tick(home=HOME):
         return
     HOLD_QUIET = True
     with L.locked(Path(home) / 'state/paseo-autofix-run.json'):
+        try:
+            clean_publish_worktrees()
+        except Exception as exc:
+            print(f'autofix worktree cleanup failed: {type(exc).__name__}: {str(exc)[:300]}', file=sys.stderr)
         with L.locked(state_path(home)):
             jobs = sorted(load(home)['jobs'])
         for key in jobs:
@@ -1077,12 +1419,12 @@ def tick(home=HOME):
                 holding = advance(home, job)
             except Exception as exc:
                 print(f'autofix {key} step failed: {type(exc).__name__}: {str(exc)[:300]}', file=sys.stderr)
-                holding = job.get('status') in ACTIVE
+                holding = job.get('status') in ACTIVE - {'publishing'}
             with L.locked(state_path(home)):
                 state = load(home)
                 # The poll may have recorded an owner action meanwhile; keep it unless this step consumed it.
                 latest = state['jobs'].get(key, {})
-                if 'action' in latest and 'action' not in job and job.get('status') in ('reported', 'failed'):
+                if latest.get('action') and latest['action'] != job.get('action'):
                     job['action'] = latest['action']
                     job['receipt_source'] = latest.get('receipt_source')
                     job.pop('receipt_ts', None)

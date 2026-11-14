@@ -9,7 +9,12 @@ logger = logging.getLogger(__name__)
 def _settings(adapter):
     extra = getattr(getattr(adapter, "config", None), "extra", {})
     settings = extra.get("solo_channel", {}) if isinstance(extra, dict) else {}
-    return settings if isinstance(settings, dict) else {}
+    if not isinstance(settings, dict):
+        return {}
+    # Slack bot IDs live in the owner vault; the settings name employees, not IDs.
+    from hermes_facility import owner_vault
+    from hermes_router.owner_contract import solo_settings
+    return solo_settings(settings, owner_vault.get("slack.staff_user_ids"))
 
 
 def _eligible(adapter, channel_id):

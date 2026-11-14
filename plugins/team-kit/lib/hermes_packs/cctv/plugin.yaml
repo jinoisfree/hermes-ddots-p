@@ -1,0 +1,6 @@
+name: cctv
+version: 1.0.0
+description: Reads the remote-session CCTV window on a schedule and proposes today's situation; the owner's button decides.
+provides_tools:
+  - cctv_reference
+  - cctv_now

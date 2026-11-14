@@ -50,11 +50,14 @@ final class FileDropCard: ObservableObject {
     var outcomes: [String: String] = [:]
     var pasteboard: () -> NSPasteboard = { .general }
     var enrich: (inout FileDropSignals) -> Void = { _ in }
-    typealias Engine = (FileDropSignals, [URL]) async throws -> FileDropAnswer
+    typealias Engine = @MainActor (FileDropSignals, [URL]) async throws -> FileDropAnswer
     var engine: Engine = { _, _ in throw CocoaError(.featureUnsupported) }
     var onAnswer: ((Double, Bool) -> Void)?
     private var work: Task<Void, Never>?
     private var deadline: Task<Void, Never>?
+    private var analysisStarted: Double = 0
+    private var droppedAt: Double?
+    var readSignals: (FileDropIntake.Payload, FileDropSignals) -> FileDropSignals = { FileDropSignals.read($0, initial: $1) }
     static let footer: CGFloat = 56
     var size: CGSize {
         let rows = min(3, payload.files.count)
@@ -81,6 +84,9 @@ final class FileDropCard: ObservableObject {
         if !append { close(notify: false) }
         visible = true; dragging = false; editing = false; status = "살펴보는 중"; onGeometry?()
         let generation = request
+        let dropped = ProcessInfo.processInfo.systemUptime
+        droppedAt = dropped; analysisStarted = dropped
+        setAnalysisDeadline(dropped + FileDropTiming.legacySeconds)
         intake.read(board) { [weak self] incoming in
             guard let self, self.request == generation else { return }
             if append {
@@ -125,22 +131,24 @@ final class FileDropCard: ObservableObject {
     func close(notify: Bool = true) {
         if sending { visible = false; onGeometry?(); return }
         if notify && visible && payload.count > 0 { onClose?() }
-        eventID = UUID().uuidString
+        eventID = UUID().uuidString; droppedAt = nil
         request = UUID(); work?.cancel(); deadline?.cancel(); intake.close(); visible = false; dragging = false; editing = false
         payload = .init(); proposals = []; draft = ""; notice = ""; problem = ""; origin = ""; status = ""; thumbnail = nil; confirmation = nil
         onGeometry?()
     }
     func cancelAnalysis() { request = UUID(); work?.cancel(); deadline?.cancel() }
     func analyze() {
+        let started = droppedAt ?? ProcessInfo.processInfo.systemUptime
+        droppedAt = nil
         cancelAnalysis(); summary = ""; outcomes = [:]; sensitive = false; origin = ""
         signals = FileDropSignals.initial(payload); enrich(&signals); assign(&signals)
         primaryProfile = signals.profile
         proposals = FileDropRules.rules(signals, cast: cast())
         status = profileName(primaryProfile) + Ddots.particle(profileName(primaryProfile)) + " 읽는 중"
-        let generation = request, payload = payload, initial = signals, invoke = engine
-        let started = ProcessInfo.processInfo.systemUptime
+        let generation = request, payload = payload, initial = signals, invoke = engine, reader = readSignals
+        analysisStarted = started
         work = Task { @MainActor [weak self] in
-            var signals = await Task.detached { FileDropSignals.read(payload, initial: initial) }.value
+            var signals = await Task.detached { reader(payload, initial) }.value
             guard let self, self.request == generation, self.visible else { return }
             self.enrich(&signals); self.assign(&signals)
             self.primaryProfile = signals.profile
@@ -177,14 +185,22 @@ final class FileDropCard: ObservableObject {
                 self.deadline?.cancel(); self.status = ""
                 if case FileDropServiceError.sensitive = error { self.sensitive = true; self.notice = "비밀처럼 보여 밖으로 보내지 않았어요"; self.origin = Self.basic("비밀 같은 내용이 있어 보내지 않았어요") }
                 else if case FileDropServiceError.notConnected = error { self.origin = Self.basic("맥미니에 연결되지 않았어요") }
+                else if case FileDropServiceError.connection(let reason) = error { self.origin = Self.basic(reason) }
+                else if case FileDropServiceError.timeout = error { self.origin = Self.basic("시간 초과") }
+                else if case FileDropServiceError.engineChanged = error { self.origin = Self.basic("설정이 바뀌는 중이었어요") }
                 else { self.origin = Self.basic("Claude 연결 실패") }
                 if signals.partial && !self.sensitive { self.notice = Self.unreadNotice }
                 self.onAnswer?(ProcessInfo.processInfo.systemUptime - started, true); self.onGeometry?()
             }
         }
-        let timeout: UInt64 = 15_000_000_000
+        setAnalysisDeadline(started + FileDropTiming.legacySeconds)
+    }
+    func setAnalysisDeadline(_ uptime: TimeInterval) {
+        deadline?.cancel()
+        let generation = request, started = analysisStarted
+        let remaining = max(0, uptime - ProcessInfo.processInfo.systemUptime)
         deadline = Task { @MainActor [weak self] in
-            do { try await Task.sleep(nanoseconds: timeout) } catch { return }
+            do { try await Task.sleep(nanoseconds: UInt64(remaining * 1_000_000_000)) } catch { return }
             guard let self, self.request == generation else { return }
             self.cancelAnalysis(); self.status = ""; self.origin = Self.basic("시간 초과")
             if self.signals.partial { self.notice = Self.unreadNotice }

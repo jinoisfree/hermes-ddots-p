@@ -26,19 +26,52 @@ extension AppDelegate {
             if yes { self.performFileDrop(.init(id: "attach_work", label: "업무에 붙이기", profile: self.fileDrop.primaryProfile)) }
             else { self.fileDrop.proposals = FileDropRules.rules(self.fileDrop.signals, cast: self.fileDropCast()) }
         }
-        // The one engine: Claude, through the Mac mini (or the relay). Without a link to it the card keeps the default proposals.
-        fileDrop.engine = { [weak self] signals, files in
-            let home = DdotsConfig.shared.hermes
-            guard self?.remoteHermes?.supportsDrop == true || FileDropRunner.available(home) else { throw FileDropServiceError.notConnected }
-            // The organization's roles come from the context answer. With none stored yet they are fetched first;
-            // otherwise they are refreshed beside the request so a renamed agent is picked up for the next drop.
-            let learn: () async -> Void = {
-                if let context = try? await FileDropClaude.context(signals, home: home, remote: self?.remoteHermes), let roles = context.agentRoles { self?.fileDropSettings.learn(roles: roles) }
-            }
-            if self?.fileDropSettings.roles.isEmpty ?? true { await learn() } else { Task { await learn() } }
-            return try await FileDropClaude.request(signals, files: files, home: home, remote: self?.remoteHermes)
+        fileDropSettings.loadEngine = { [weak self] in
+            try await FileDropClaude.policy(home: DdotsConfig.shared.hermes, remote: self?.remoteHermes)
         }
-        fileDropSettings.onEnabled = { [weak self] value in self?.fileDrop.enabled = value; if !value { self?.fileDrop.close() } }
+        fileDropSettings.saveEngine = { [weak self] model, effort in
+            try await FileDropClaude.policy(home: DdotsConfig.shared.hermes, remote: self?.remoteHermes, model: model, effort: effort)
+        }
+        fileDrop.engine = { [weak self] signals, files in
+            let home = DdotsConfig.shared.hermes, remote = self?.remoteHermes
+            if let remote {
+                guard remote.supportsDrop else { throw FileDropServiceError.connection(remote.dropFailure) }
+            } else if !FileDropRunner.available(home) {
+                let host = UserDefaults.standard.string(forKey: RelaySettings.hostKey).flatMap(RelaySettings.validHost)
+                throw FileDropServiceError.connection(host == nil ? "맥미니 주소를 입력해 주세요" : "연결 코드를 다시 입력해 주세요")
+            }
+            let generation = self?.fileDrop.request
+            self?.fileDrop.setAnalysisDeadline(ProcessInfo.processInfo.systemUptime + FileDropTiming.contextSeconds + FileDropTiming.legacySeconds)
+            var finalDeadline: Date?
+            for attempt in 0...1 {
+                let context: FileDropContext?
+                do { context = try await FileDropClaude.context(signals, home: home, remote: remote) }
+                catch FileDropServiceError.legacyContextTimeout { throw FileDropServiceError.timeout }
+                catch { context = nil }
+                guard !Task.isCancelled, self?.fileDrop.request == generation else { throw CancellationError() }
+                if let roles = context?.agentRoles { self?.fileDropSettings.learn(roles: roles) }
+                let engine = context?.engine, seconds = engine?.seconds ?? FileDropTiming.legacySeconds
+                if attempt == 0 {
+                    finalDeadline = Date().addingTimeInterval(seconds)
+                } else if (finalDeadline?.timeIntervalSinceNow ?? 0) < seconds {
+                    throw FileDropServiceError.engineChanged
+                }
+                let deadline = Date().addingTimeInterval(seconds)
+                self?.fileDrop.setAnalysisDeadline(ProcessInfo.processInfo.systemUptime + deadline.timeIntervalSinceNow + 1)
+                do {
+                    return try await FileDropClaude.request(signals, files: files, home: home, remote: remote, engine: engine, deadline: deadline)
+                } catch FileDropServiceError.engineChanged {
+                    if attempt == 1 { throw FileDropServiceError.engineChanged }
+                }
+            }
+            throw FileDropServiceError.engineChanged
+        }
+        fileDropSettings.onEnabled = { [weak self] value in
+            guard let self else { return }
+            self.fileDrop.enabled = value
+            if !value { self.fileDrop.close() }
+            self.remoteHermes?.setEnabled(chat: self.hermesEnabled, fileDrop: value)
+        }
         fileDropSettings.onClear = { [weak self] in
             guard let self else { return }
             let alert = NSAlert(); alert.messageText = "끌어놓기 습관을 지울까요?"; alert.informativeText = "쌓인 선택과 내 지시 버튼을 지워요. 다른 Mac에도 반영돼요."
@@ -87,7 +120,7 @@ extension AppDelegate {
             board.setData(Data(), forType: ClipboardPasteboard.generated); card.close(); return true
         default:
             guard slack.connected else { return refuse("Slack 연결이 필요해요") }
-            guard let room = slack.model.pins.first ?? slack.model.ddotsHub else { return refuse("맨 위에 고정한 채널이 필요해요") }
+            guard let room = slack.model.ddotsHub, !room.isEmpty else { return refuse("고정 채널이 필요해요") }
             let cast = fileDropCast()
             let profile = cast.candidates.contains(action.profile) ? action.profile : cast.lead
             guard let who = slack.model.ddotsMembers.first(where: { $0.profile == profile }) else { return refuse("담당 에이전트 설정이 필요해요") }

@@ -35,8 +35,8 @@ CHECKLISTS = ('일정 | 제출: lv1 | lv2 | 확인', '전체 | 노션 | 일정 |
 # (``'_script_buttons': '<owner>'``), so the same words from a staff member, a tool or another script never
 # become buttons. Nothing new goes here without an owner decision.
 SCRIPT_PENDING = {
-    # Owner decision 2026-10-31: 확인 = push approval, 되돌리기 = revert commit (the former 롤백).
-    'paseo_autofix': (('확인=푸시 승인, 되돌리기=되돌림 커밋', [r'확인', r'되돌리기']),),
+    # Owner decision 2026-11-11: 확인 = result acknowledgment, 되돌리기 = revert commit.
+    'paseo_autofix': (('확인=결과 확인, 되돌리기=되돌림 커밋', [r'확인', r'되돌리기']),),
     # Owner decision 2026-10-31: '어떤 후보를 연결할까요?' with the candidates' numbers, then 거절 · 의견 · 확인.
     'link_decisions': (('후보 번호', [r'\d+(?: \| \d+)*', r'거절', r'의견', r'확인']),),
 }
