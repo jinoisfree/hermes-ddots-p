@@ -36,9 +36,13 @@ PROFILES = {
 
 def context(home, learning, *, platform, kind, sender_id='', **_):
     profile = Path(home).name
-    if team.pick(PROFILES, profile, None) is None or platform != 'slack' or kind != 'chat':
+    if team.pick(PROFILES, profile, None) is None or platform not in {'slack', 'hejo'} or kind != 'chat':
         return ''
-    if not sender_id or sender_id not in learning.owners(home):
+    from gateway.session_context import get_session_env
+    from hermes_owner_chat import authenticated_owner
+    def env(key, default=''):
+        return {'HERMES_SESSION_PLATFORM': platform, 'HERMES_SESSION_USER_ID': sender_id}.get(key, get_session_env(key, default))
+    if not authenticated_owner(env, legacy_owner=lambda user: user in learning.owners(home)):
         return ''
     guidance = team.pick(PROFILES, profile)
     import hermes_yaml

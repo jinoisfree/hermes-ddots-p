@@ -412,6 +412,10 @@ def _notes_current_owner_text() -> str:
 
 
 
+def _current_owner_choice_source():
+    return governance_pack._current_owner_choice_source(_governance_services())
+
+
 def _notes_create_folder(requested: str) -> str:
     return governance_pack._notes_create_folder(_governance_services(), requested)
 
@@ -711,7 +715,8 @@ def _personal_mutation_approval_single(
 
 
 def _personal_mutation_approval(tool_name, args, tool_call_id='', turn_id='', session_id='', **context):
-    return governance_pack._personal_mutation_approval(_governance_services(), tool_name, args, tool_call_id, turn_id, session_id, **context)
+    with governance_pack.bound_hook_ids(session_id,turn_id,tool_call_id):
+        return governance_pack._personal_mutation_approval(_governance_services(), tool_name, args, tool_call_id, turn_id, session_id, **context)
 
 
 
@@ -2637,7 +2642,7 @@ def register(ctx) -> None:
         toolset="team-delegation",
         schema=COMMON_WORK_GET_SCHEMA,
         handler=_common_work_get,
-        description="Resolve one Common ID or one linked native source ID.",
+        description="Resolve one Common ID or one linked native source ID. Pass common_id, or domain together with source_id; a call with neither is rejected.",
         emoji="🔎",
     )
     register_tool(

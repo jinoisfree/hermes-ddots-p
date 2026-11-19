@@ -11,6 +11,7 @@ _owner_library = str((_OwnerPath(__file__).resolve().parent / '../..').resolve()
 if _owner_library not in _owner_sys.path:
     _owner_sys.path.insert(0, _owner_library)
 from hermes_facility.owner_text import render as _owner_text
+from hermes_owner_chat import OWNER_CHAT_PLATFORMS
 
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -90,7 +91,7 @@ def problem(td, args):
     if td.personal_scopes.background(td):
         return 'PERSONAL_SCOPE_BACKGROUND_REFUSED: 새 메일 쓰기·폴더·규칙 조회는 소유자 대화에서만 가능하다.'
     if args.get('action') in BASIC:
-        if td.get_session_env('HERMES_SESSION_PLATFORM','') not in {'slack','photon'} or not td.get_session_env('HERMES_SESSION_USER_ID','') or not td.get_session_env('HERMES_SESSION_CHAT_ID',''):
+        if td.get_session_env('HERMES_SESSION_PLATFORM','') not in OWNER_CHAT_PLATFORMS or not td.get_session_env('HERMES_SESSION_USER_ID','') or not td.get_session_env('HERMES_SESSION_CHAT_ID',''):
             return 'PERSONAL_SCOPE_OWNER_CHAT_REQUIRED'
         if is_mail(td,args):return 'MAIL_BACKEND_ACTION_MISMATCH'
         return None
@@ -99,7 +100,7 @@ def problem(td, args):
     if not (app_grant(td) and is_mail(td, args)) and (not team.has_role(td.personal_roles.profile(td), 'work') or cfg.get('full_mail_tools') is not True
             or not scopes.get('enabled') or scopes.get('invalid')):
         return _owner_text('FULL_MAIL_TOOLS_DISABLED: <<work_name>> 회사 메일 전용이다.')
-    if (td.get_session_env('HERMES_SESSION_PLATFORM', '') not in {'slack', 'photon'}
+    if (td.get_session_env('HERMES_SESSION_PLATFORM', '') not in OWNER_CHAT_PLATFORMS
             or not td.get_session_env('HERMES_SESSION_CHAT_ID', '')
             or not td.get_session_env('HERMES_SESSION_USER_ID', '')):
         return 'PERSONAL_SCOPE_OWNER_CHAT_REQUIRED'

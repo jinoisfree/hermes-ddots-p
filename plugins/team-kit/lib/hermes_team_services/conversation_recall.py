@@ -27,6 +27,7 @@ import importlib.util as _ilu, pathlib as _pl, sys as _sys
 _library = str(Path(__file__).resolve().parent.parent)
 if _library not in _sys.path:
     _sys.path.insert(0, _library)
+from hermes_owner_chat import OWNER_CHAT_PLATFORMS
 from hermes_team_services.learning import is_quoted_row, quoted_row_sql
 team = _sys.modules.get('hermes_team_registry')
 if team is None:
@@ -216,8 +217,8 @@ def candidates(db, terms):
         query = ' OR '.join('"' + t.replace('"', '""') + '"' for t in words)
         for r in db.execute(f'SELECT m.id,m.session_id,bm25({table}) AS rank FROM {table} '
                             f'JOIN messages m ON m.id={table}.rowid JOIN sessions s ON s.id=m.session_id '
-                            f'WHERE {table} MATCH ? AND s.source IN (\'slack\',\'photon\') '
-                            "AND m.role IN ('user','assistant') ORDER BY rank LIMIT 80", (query,)):
+                            f"WHERE {table} MATCH ? AND s.source IN ({','.join('?' for _ in OWNER_CHAT_PLATFORMS)}) "
+                            "AND m.role IN ('user','assistant') ORDER BY rank LIMIT 80", (query, *sorted(OWNER_CHAT_PLATFORMS))):
             result[r['id']] = (r['session_id'], abs(r['rank']))
     return result
 
@@ -240,7 +241,7 @@ def search_digests(home, query, cfg, *, now, limit=10):
             ids = d['session_ids']
             if not ids or any(sid not in sessions for sid in ids):
                 continue
-            if d['source'] not in ('slack', 'photon') or any(sessions[sid]['source'] not in ('slack', 'photon') for sid in ids):
+            if d['source'] not in OWNER_CHAT_PLATFORMS or any(sessions[sid]['source'] not in OWNER_CHAT_PLATFORMS for sid in ids):
                 continue
             if d.get('timestamp', 0) > now or d.get('exclude_tools') != sorted(cfg['exclude_tools']):
                 continue
@@ -268,7 +269,7 @@ def retrieve(home, session_id, user_message, cfg, *, now, deadline, bridged=True
     """Internal pure retrieval; returns (block, group ids). Used by time-sliced evaluation."""
     with closing(connect(home, deadline)) as db:
         sessions, roots = groups(db)
-        if session_id not in sessions or sessions[session_id]['source'] not in ('slack', 'photon'):
+        if session_id not in sessions or sessions[session_id]['source'] not in OWNER_CHAT_PLATFORMS:
             return '', []
         own = roots[session_id]
         cache_key = (str(Path(home).resolve()), own)
@@ -287,7 +288,7 @@ def retrieve(home, session_id, user_message, cfg, *, now, deadline, bridged=True
             ids = d['session_ids']
             if not ids or any(roots.get(sid) == own for sid in ids):
                 continue
-            if d['source'] not in ('slack', 'photon') or d.get('timestamp', 0) > now:
+            if d['source'] not in OWNER_CHAT_PLATFORMS or d.get('timestamp', 0) > now:
                 continue
             if d.get('exclude_tools') != sorted(cfg['exclude_tools']):
                 continue  # Policy changed: wait for regeneration, never reuse unsafe summaries.
@@ -472,7 +473,7 @@ def digest_profile(home, settings, *, days=14, dry_run=False, model=ask_model):
             sessions, roots = groups(db)
             buckets = {}
             for sid, s in sessions.items():
-                if s['source'] in ('slack', 'photon'):
+                if s['source'] in OWNER_CHAT_PLATFORMS:
                     buckets.setdefault(roots[sid], []).append(sid)
             for ids in buckets.values():
                 try:

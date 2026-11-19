@@ -746,8 +746,8 @@ def build_PERSONAL_WORK_BUNDLE_SCHEMA():
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "capture": {"type":"object","description":"업무 등급제 결정적 생성. 현재 소유자 원문의 lv1/개인/비공개 또는 lv2/공용/공유와 일정 선택을 코드가 확인한다. title, body, tasks:[{text,due?,done?,due_evidence?:날짜 원문 발췌,evidence:원문 발췌}], source:{text,account,message_id,thread_id?,rfc_id?,subject,url?,attachment_names?}, attachments?:다운로드 경로, calendar?:{start,end,evidence,start_evidence?,end_evidence?,location?}. 선택이 없으면 메일 제안은 아이콘 메모/메모+노션/확인 버튼을 보인다. 메일 마커가 확인된 스레드에서만 메모=lv1, 메모+노션=lv2이며 이전 선택 답은 유지한다. 생성 후 따로 노션을 만들지 않는다."},
-                    "scope_change": {"type":"object","description":"업무 등급 전환: common_id, scope(private|shared), token?(미리보기 응답). 먼저 제목·할 일·마감 또는 공개 철회 불가 경고와 버튼을 반환한다. 같은 소유자·스레드의 해당 버튼 답변만 실행한다."},
+                    "capture": {"type":"object","description":"업무 등급제 결정적 생성. 현재 소유자 원문의 lv1/개인/비공개 또는 lv2/공용/공유와 일정 선택을 코드가 확인한다. title, body, tasks:[{text,due?,done?,due_evidence?:날짜 원문 발췌,evidence:원문 발췌}], source:{text,account,message_id,thread_id?,rfc_id?,subject,url?,attachment_names?}, attachments?:다운로드 경로, calendar?:{start,end,evidence,start_evidence?,end_evidence?,location?}. 선택이 없으면 메일과 일반 요청 모두 고정 안내와 메모/메모+노션/확인 버튼만 보인다. 답한 글의 고정 안내가 있을 때만 맨 메모=개인, 메모+노션=공용이며 이전 선택 답은 유지한다. choice_ref?는 소유자가 쓴 항목 번호(2·②)나 이름(수출바우처)이며 정확한 키 줄 한 개의 선택만 읽는다. 여러 줄 답에는 각 업무에 해당하는 choice_ref를 지정한다. 선택이 거부되면 다른 도구로 메모·노션을 만들지 않고 다시 묻는다. 생성 후 따로 노션을 만들지 않는다."},
+                    "scope_change": {"type":"object","description":"업무 등급 전환: common_id, scope?(private|shared). 업무 제목과 메모/메모+노션/확인 안내가 있는 글에 답한 현재 소유자 선택 한 번으로 실행한다. 메모=개인, 메모+노션=공용, 확인=전환 없음. choice_ref?는 소유자가 답한 항목 번호(2·②)나 이름이며 정확히 한 줄만 골라 선택을 읽는다. 선택이 거부되면 다른 도구로 메모·노션을 만들지 않고 다시 묻는다. 별도 미리보기·토큰·추가 승인은 없다."},
                     "task_capture": {"type": "boolean", "default": False, "description": _owner_text("<<work_name>> 소유자 대화의 선택 등록. 선택한 새 일정·메모만 작성하고 종일 일정은 alarms=[]로 기본 알림 제거.")},
                     "title": {"type": "string", "minLength": 1},
                     "common_id": {

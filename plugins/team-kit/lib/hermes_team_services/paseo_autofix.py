@@ -157,7 +157,9 @@ def busy(own=()):
             name = str(agent.get('name') or '').strip()
             return 'Paseo 작업 진행 중 (' + str(agent.get('id', ''))[:8] + (f' "{name[:40]}"' if name else '') + ')'
     for name, repo in (('Hermes-ddots', SETTING), ('hermes-agent', AGENT)):
-        for line in git(repo, 'status', '--porcelain', '--untracked-files=all').stdout.splitlines():
+        # quotepath off: Korean paths must stay real names, or a stale leftover would block forever.
+        for line in git(repo, '-c', 'core.quotepath=off', 'status', '--porcelain',
+                        '--untracked-files=all').stdout.splitlines():
             rel = line[3:].split(' -> ')[-1].strip('"')
             path = repo / rel
             if any(part in '/' + rel for part in AGENT_DATA):

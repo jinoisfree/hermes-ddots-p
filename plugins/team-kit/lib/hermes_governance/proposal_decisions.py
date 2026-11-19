@@ -290,7 +290,9 @@ def _locate(home, button, label, source, fetch_parent):
     try:
         with ledger(home) as (rows, _):
             if button is not None:
-                return next((dict(row) for row in rows if row.get('message_ts') == button.get('message_ts')), None), False
+                # A press without a post id (e.g. hejo) never matches an unposted or failed row.
+                ts = button.get('message_ts')
+                return next((dict(row) for row in rows if ts and row.get('message_ts') == ts), None), False
             found = [dict(row) for row in rows if thread and row.get('message_ts') == thread]
             return (found[0] if len(found) == 1 else None), False
     except Exception:

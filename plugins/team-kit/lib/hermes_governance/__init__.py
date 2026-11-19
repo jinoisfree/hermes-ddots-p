@@ -75,6 +75,7 @@ from .approval import (
 )
 
 from .owner_context import (
+    bound_hook_ids,
     _personal_executor,
     _is_executor,
     _personal_actor,
@@ -83,6 +84,7 @@ from .owner_context import (
     _pending_personal_route,
     _current_inbound_route_reason,
     _notes_current_owner_text,
+    _current_owner_choice_source,
     _notes_create_folder,
     _pending_personal_path,
     _pending_personal_store,

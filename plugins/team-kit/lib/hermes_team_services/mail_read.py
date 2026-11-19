@@ -53,10 +53,16 @@ def authorize(home):
             any(str(env(k, '')).lower() not in ('', '0', 'false') for k in
                 ('HERMES_CRON_SESSION', 'HERMES_SINGLE_QUERY_SESSION', 'HERMES_KANBAN_TASK'))):
         raise ReadError('예약·단발·Kanban 실행에서는 개인 자료를 읽을 수 없습니다.')
+    if env('HERMES_SESSION_PLATFORM', '') == 'hejo':
+        from hermes_owner_chat import authenticated_owner
+        if not authenticated_owner(env, legacy_owner=lambda _: False):
+            raise ReadError('현재 소유자 대화에서만 메일·일정을 읽을 수 있습니다.')
+        return
     config = yaml.safe_load((Path(home) / 'config.yaml').read_text())
     owners = config.get('platforms', {}).get('slack', {}).get('api_human_users', [])
     user = env('HERMES_SESSION_USER_ID', '')
-    if env('HERMES_SESSION_PLATFORM', '') != 'slack' or not user or user not in owners:
+    from hermes_owner_chat import authenticated_owner
+    if env('HERMES_SESSION_PLATFORM', '') != 'slack' or not authenticated_owner(env, legacy_owner=lambda user: user in owners):
         raise ReadError('현재 소유자 Slack 대화에서만 메일·일정을 읽을 수 있습니다.')
 
 

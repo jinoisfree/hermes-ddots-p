@@ -47,6 +47,12 @@ def _block(message):
     return {"action": "block", "message": message}
 
 
+def _agent_owned(name):
+    """The core refuses background writes to skills without its agent mark; say so once, up front."""
+    from tools import skill_usage
+    return skill_usage._is_curator_managed_record(skill_usage.load_usage().get(name))
+
+
 def _created_today(data, now):
     start = datetime.fromtimestamp(now, KST).replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
     return sum(1 for entry in data.get("skill_events", [])
@@ -119,6 +125,9 @@ def guard(home, learning, *, args, session_id="", tool_call_id="", **_):
             return _block(f"스스로 만드는 스킬 이름은 `{prefix}`로 시작해야 한다(예: `{prefix}task-name`). "
                           "이름을 바꿔 다시 호출한다. 이 조직원의 기본·공통 스킬은 고치지 않는다.")
         folder = skills.locate(home, name)
+        if action != "create" and (folder / "SKILL.md").exists() and not _agent_owned(name):
+            return _block(f"`{name}`은 소유자 스킬이라 배경에서 고치지 않는다. 다시 시도하지 말고 "
+                          "고칠 점은 답에 적고 끝낸다.")
         if action == "delete":
             # Consolidation only: the whole skill moves into its umbrella and the core archives it.
             target = PurePosixPath(str(op.get("absorbed_into") or "")).name

@@ -44,6 +44,20 @@ KST = ZoneInfo("Asia/Seoul")
 PROFILES = tuple(team.profiles_sorted())
 CHANNEL = vault.text("dms.doctor")  # 소유자와 진단 담당의 DM. 금고에 없으면 보내지 않는다
 STAMP = re.compile(r"^(\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:[.,]\d+)?(?:[+-]\d{2}:\d{2}|Z)?)")
+# Same error lines as error_digest: leveled WARNING+ records, minus tool error results returned
+# to the model (ordinary work results). Progress text and traceback continuations are not errors;
+# a traceback header still counts so an unlogged crash is not missed.
+ERROR_LEVEL = re.compile(r"^\s+(WARNING|ERROR|CRITICAL)\s+(.*)$")
+TOOL_RETURN_ERROR = re.compile(r"^agent\.tool_executor:\s+Tool [\w.-]+ returned error\b")
+
+
+def error_line(line):
+    match = STAMP.match(line)
+    rest = line[match.end():] if match else line
+    if "Traceback (most recent call last)" in rest:
+        return True
+    level = ERROR_LEVEL.match(rest) if match else None
+    return bool(level) and not TOOL_RETURN_ERROR.match(level[2])
 
 
 from pathlib import Path as _AtomicPath
@@ -153,7 +167,7 @@ def gateway_status(log, errors, now):
         if current is None:
             undated += int(bool(line.strip()))
         elif now - timedelta(hours=24) <= current <= now:
-            count += int(bool(line.strip()))
+            count += int(error_line(line))
     expected = {("slack", p) for p in PROFILES} | {("photon", "default")}
     missing = expected - connected
     ok = started and not missing and count == 0 and undated == 0

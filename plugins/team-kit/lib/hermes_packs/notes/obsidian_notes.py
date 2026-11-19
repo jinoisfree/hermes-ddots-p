@@ -127,6 +127,14 @@ def identity(identifier):
     return {'owner_scope':'company','identity':data['original']}
 
 
+# Lookup returns up to 20 notes and every tool result is resent on later model calls, so each
+# listed body is capped. notes_read with note_id reads one note (up to its own 15000-char cap).
+# Writes never use this text: update re-reads the note and keeps its source section from disk.
+LOOKUP_BODY_LIMIT=6000
+LOOKUP_BODY_NOTICE=('목록 조회라 본문 앞부분만 실었다(body_length가 전체 길이). 뒷부분이 필요하면 notes_read에 note_id로 다시 읽는다. '
+                    '잘린 본문만 보고 메모 내용이 없다고 판단하지 않는다.')
+
+
 def lookup(td,args):
     store=disk.Store();limit=min(20,max(1,int(args.get('limit') or 10)));query=str(args.get('query') or '').casefold()
     folder=str(args.get('folder') or '')
@@ -139,9 +147,12 @@ def lookup(td,args):
         row={'stableNoteIdentifier':raw['note_id'],'note_id':raw['note_id'],'title':raw['title'],
              'folder':raw['folder'],'url':raw['url'],'path':raw['path'],'backend':'obsidian'}
         if args.get('include_body'):
-            row.update(body=snapshot(td,raw['note_id'])['edit_markup'],bodyAvailable=True,body_format='markdown',
+            body=snapshot(td,raw['note_id'])['edit_markup']
+            row.update(body=body[:LOOKUP_BODY_LIMIT],body_length=len(body),body_truncated=len(body)>LOOKUP_BODY_LIMIT,
+                       bodyAvailable=True,body_format='markdown',
                        summary_readable=True,body_representation='edit_markup',table_count=raw['body_html'].count('<table'),
                        attachments=raw['attachment_paths'])
+            if row['body_truncated']:row['body_notice']=LOOKUP_BODY_NOTICE
         rows.append(row)
         if len(rows)>=limit:break
     td._attach_common_work_links(rows,domain='notes',source_id_field='stableNoteIdentifier')
@@ -181,16 +192,19 @@ def scope(td,args,owner):
     return args
 
 
-def sync_properties(td,row,common=None):
-    cid=(common or {}).get('common_id') or row['properties'].get('common_id')
-    if not cid:return row
-    props={'common_id':cid,'notion':None}
-    item=td._common_work_store().get(cid)
-    props['scope']=item.get('scope','private')
+def work_properties(item):
+    props={'common_id':item['common_id'],'scope':item.get('scope','private'),'notion':None}
     urls=[]
     for ref in item.get('knowledge_refs',[]):
         if item.get('scope')!='private' and ref['ref_type']=='notion_page':urls.append(ref.get('metadata',{}).get('url') or 'https://www.notion.so/'+ref['external_id'].replace('-',''))
     if urls:props['notion']=urls[0] if len(urls)==1 else urls
+    return props
+
+
+def sync_properties(td,row,common=None):
+    cid=(common or {}).get('common_id') or row['properties'].get('common_id')
+    if not cid:return row
+    props=work_properties(td._common_work_store().get(cid))
     if all(row['properties'].get(k)==v for k,v in props.items()):return row
     return disk.Store().write(row['note_id'],row['markdown'],before=row,properties=props)
 

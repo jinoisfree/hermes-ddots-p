@@ -48,11 +48,12 @@ def owner_text(home=None, **context):
         raise ValueError('Paseo refuses unattended and diagnosis-request execution')
     fields = {key: env('HERMES_SESSION_' + key, '') for key in
               ('PLATFORM', 'ID', 'USER_ID', 'CHAT_ID', 'THREAD_ID', 'MESSAGE_ID')}
-    if fields['PLATFORM'] != 'slack' or not all(fields[key] for key in ('ID', 'USER_ID', 'CHAT_ID', 'MESSAGE_ID')):
+    if fields['PLATFORM'] not in {'slack', 'hejo'} or not all(fields[key] for key in ('ID', 'USER_ID', 'CHAT_ID', 'MESSAGE_ID')):
         raise ValueError('Paseo requires a current Slack transport event')
     if context.get('session_id') and context['session_id'] != fields['ID']:
         raise ValueError('Paseo session mismatch')
-    if fields['USER_ID'] not in learning.owners(home):
+    from hermes_owner_chat import authenticated_owner
+    if not authenticated_owner(env, legacy_owner=lambda user: user in learning.owners(home)):
         raise ValueError('Paseo requires the configured Slack owner')
     learning.extension('learning_skills').human_context()
     source = learning.source(home, fields['ID'], allow_approval=True)

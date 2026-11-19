@@ -15,6 +15,7 @@ SCENES = ('평소', '준비중', '진행중')
 UNREADABLE = '판독불가'
 SITE_FOLDERS = ('My Sites', '뷰가드서버 장비', '로컬 장비', '즐겨찾기')
 MODEL_MAX_EDGE = 1600  # pixels; the model gets a shrunk copy so ten images stay under the payload limit
+MAX_CLOCK_DRIFT_SECONDS = 180
 MODEL_TIMEOUT = 120
 SIPS = '/usr/bin/sips'
 
@@ -72,25 +73,31 @@ def _site_name(value):
     return _squash(re.sub(r'\([^)]*\)|\[[^\]]*\]', '', str(value)))
 
 
-def stopped(osd_time, waiting, now):
-    """A readable clock (optional ISO date prefix, KST, circular at midnight) or an explicit waiting message proves a frozen video."""
-    if waiting is True:
-        return True
+def _clock_delta_seconds(osd_time, now):
+    """Distance from a readable OSD clock to now in KST, circular at midnight; None if unreadable."""
     if not isinstance(osd_time, str):
-        return False
+        return None
     found = re.fullmatch(r'(?:(\d{4}-\d{2}-\d{2}) )?((?:[01]\d|2[0-3]):[0-5]\d(?::[0-5]\d)?)', osd_time)
     if found is None:
-        return False
+        return None
     if found[1]:
         try:
             datetime.strptime(found[1], '%Y-%m-%d')
         except ValueError:
-            return False
+            return None
     local = now.astimezone(ZoneInfo('Asia/Seoul')) if now.tzinfo else now
     values = list(map(int, found[2].split(':')))
     seconds = values[0] * 3600 + values[1] * 60 + (values[2] if len(values) == 3 else 0)
     delta = abs(local.hour * 3600 + local.minute * 60 + local.second - seconds)
-    return min(delta, 86400 - delta) > 180
+    return min(delta, 86400 - delta)
+
+
+def stopped(osd_time, waiting, now):
+    """A waiting message or a readable clock more than three minutes away proves a frozen video."""
+    if waiting is True:
+        return True
+    delta = _clock_delta_seconds(osd_time, now)
+    return delta is not None and delta > MAX_CLOCK_DRIFT_SECONDS
 
 
 def identify(ask, capture, references, *, site_label, channel_label, now=None):
@@ -104,6 +111,8 @@ def identify(ask, capture, references, *, site_label, channel_label, now=None):
         return {'ok': False, 'reason': '모델 오류:' + type(error).__name__}
     if answer is None:
         return {'ok': False, 'reason': '모델 답 형식 오류'}
+    now = now or datetime.now(ZoneInfo('Asia/Seoul'))
+    clock_delta = _clock_delta_seconds(answer.get('osd_time'), now)
     channel = answer.get('channel')
     site = answer.get('site')
     if _site_name(site) in {_site_name(folder) for folder in SITE_FOLDERS}:
@@ -111,7 +120,7 @@ def identify(ask, capture, references, *, site_label, channel_label, now=None):
     detail = {key: answer[key] for key in ('adt_eye', 'osd_time', 'waiting', 'layout_tabs', 'empty_view', 'windows_desktop') if key in answer}
     if answer.get('adt_eye') is not True:
         reason = 'ADT-EYE 꺼짐' if answer.get('windows_desktop') is True else 'ADT-EYE 화면 아님'
-    elif stopped(answer.get('osd_time'), answer.get('waiting'), now or datetime.now(ZoneInfo('Asia/Seoul'))):
+    elif stopped(answer.get('osd_time'), answer.get('waiting'), now):
         reason = '영상 멈춤'
     elif type(answer.get('layout_tabs')) is int and answer['layout_tabs'] == 0:
         reason = '레이아웃 없음'
@@ -121,7 +130,7 @@ def identify(ask, capture, references, *, site_label, channel_label, now=None):
         reason = '채널 확인 불가'
     elif _squash(channel) != _squash(channel_label):
         reason = '다른 채널'
-    elif answer.get('live') is not True:
+    elif answer.get('live') is not True and (clock_delta is None or clock_delta > MAX_CLOCK_DRIFT_SECONDS):
         reason = 'LIVE 아님'
     elif site and _site_name(site) != _site_name(site_label):
         reason = '다른 사이트'

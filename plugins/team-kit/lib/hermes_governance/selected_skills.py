@@ -32,9 +32,10 @@ def owner_chat(td):
            ('HERMES_CRON_SESSION', 'HERMES_SINGLE_QUERY_SESSION', 'HERMES_KANBAN_TASK', 'HERMES_DIAGNOSIS_REQUEST')):
         return False
     from tools.skill_provenance import is_background_review
-    return (not is_background_review() and td.get_session_env('HERMES_SESSION_PLATFORM', '') == 'slack'
+    from hermes_owner_chat import authenticated_owner
+    return (not is_background_review() and td.get_session_env('HERMES_SESSION_PLATFORM', '') in {'slack', 'hejo'}
             and bool(td.get_session_env('HERMES_SESSION_CHAT_ID', ''))
-            and bool(td.get_session_env('HERMES_SESSION_USER_ID', '')))
+            and authenticated_owner(td.get_session_env, legacy_owner=lambda user: bool(user)))
 
 
 def offered(td):

@@ -1,5 +1,6 @@
 """Unchanged owner context policy."""
 from __future__ import annotations
+from contextlib import contextmanager
 
 # Owner-specific text is rendered from private policy; public source stays generic.
 from pathlib import Path as _OwnerPath
@@ -8,6 +9,7 @@ _owner_library = str((_OwnerPath(__file__).resolve().parent / '..').resolve())
 if _owner_library not in _owner_sys.path:
     _owner_sys.path.insert(0, _owner_library)
 from hermes_facility.owner_text import render as _owner_text
+from hermes_owner_chat import OWNER_CHAT_PLATFORMS
 
 from hermes_facility.loading import source_path
 import json, base64, fcntl, hashlib, logging, html, os, re, sqlite3, subprocess, tempfile, sys, threading, time, unicodedata
@@ -18,6 +20,39 @@ from types import SimpleNamespace
 from typing import Any
 from urllib.parse import quote, unquote, urlsplit, urlunsplit
 from zoneinfo import ZoneInfo
+
+
+@contextmanager
+def bound_hook_ids(session_id='', turn_id='', tool_call_id=''):
+    """Scope caller-provided hook IDs exactly to this preflight, including early returns."""
+    if not any((session_id, turn_id, tool_call_id)):
+        yield
+        return
+    try:
+        from tools.approval_context import set_current_observability_context, reset_current_observability_context
+    except ImportError:
+        yield
+        return
+    tokens = set_current_observability_context(session_id=session_id, turn_id=turn_id, tool_call_id=tool_call_id)
+    try:
+        yield
+    finally:
+        reset_current_observability_context(tokens)
+
+
+def current_session_id(services_or_env, explicit=''):
+    """Prefer this tool call's binding; the gateway may clear the per-turn environment ID."""
+    if str(explicit or '').strip():
+        return str(explicit).strip()
+    try:
+        from tools.approval_context import _approval_session_id
+        bound = _approval_session_id.get()
+    except (ImportError, AttributeError):
+        bound = ''
+    if str(bound or '').strip():
+        return str(bound).strip()
+    env = getattr(services_or_env, 'get_session_env', services_or_env)
+    return str(env('HERMES_SESSION_ID', '') or '').strip()
 
 
 def _personal_executor(services):
@@ -42,7 +77,7 @@ def _is_wiki(services, profile):
 def _pending_personal_route(services) -> dict[str, str] | None:
     platform = services.get_session_env("HERMES_SESSION_PLATFORM", "").strip().lower()
     chat_id = services.get_session_env("HERMES_SESSION_CHAT_ID", "").strip()
-    if platform not in {"slack", "photon", "bluebubbles"} or not chat_id:
+    if platform not in (OWNER_CHAT_PLATFORMS | {'bluebubbles'}) or not chat_id:
         return None
     return {
         "platform": platform,
@@ -79,14 +114,16 @@ def _current_inbound_route_reason(services) -> str:
             return str(row[0] or "")
     return ""
 
-def _notes_current_owner_text(services) -> str:
-    """Read the persisted owner message, bound to this exact inbound Slack event."""
+def _current_owner_source(services):
+    """Original authenticated request; selection and notes share this provenance check."""
     platform = services.get_session_env("HERMES_SESSION_PLATFORM", "").strip().lower()
-    session_id = services.get_session_env("HERMES_SESSION_ID", "").strip()
+    session_id = current_session_id(services)
     message_id = services.get_session_env("HERMES_SESSION_MESSAGE_ID", "").strip()
     chat_id = services.get_session_env("HERMES_SESSION_CHAT_ID", "").strip()
-    if platform != "slack" or not (session_id and message_id and chat_id):
-        return ""
+    if platform not in {'slack', 'hejo'}:return None, 'not_slack'
+    if not session_id:return None, 'no_session'
+    if not message_id:return None, 'no_message'
+    if not chat_id:return None, 'no_chat'
     try:
         # Reuse team-kit's owner verification and removal of appended context.
         import importlib.util
@@ -98,13 +135,42 @@ def _notes_current_owner_text(services) -> str:
         spec.loader.exec_module(learning)
         home = Path(get_hermes_home())
         src = learning.source(home, session_id, allow_approval=True)
-        if (str(src.get("platform_message_id") or "") != message_id
-                or str(src.get("chat_id") or "") != chat_id
-                or str(src.get("thread_id") or "") != services.get_session_env("HERMES_SESSION_THREAD_ID", "").strip()):
-            return ""
-        return str(src.get("text") or "")
-    except (OSError, ValueError, sqlite3.Error, ImportError, AttributeError):
-        return ""
+        for field, actual, expected in (
+                ('message_id',str(src.get('platform_message_id') or ''),message_id),
+                ('chat_id',str(src.get('chat_id') or ''),chat_id),
+                ('thread_id',str(src.get('thread_id') or ''),services.get_session_env('HERMES_SESSION_THREAD_ID','').strip())):
+            if actual != expected:return None, 'source_mismatch:'+field
+        return (learning, home, src), ''
+    except (OSError, ValueError, sqlite3.Error, ImportError, AttributeError) as exc:
+        return None, 'exception:'+type(exc).__name__
+
+def _notes_current_owner_text(services) -> str:
+    """Original request only; followups do not change the notes caller contract."""
+    source, _ = _current_owner_source(services)
+    return str(source[2].get('text') or '') if source else ''
+
+
+def _current_owner_choice_source(services):
+    """Newest valid same-owner followup, otherwise the bound original request."""
+    original, reason = _current_owner_source(services)
+    if not original:
+        return {'text': '', 'message_id': '', 'row_id': None, 'error':reason}
+    learning, home, src = original
+    if src.get('platform') == 'hejo':
+        return {'text': src['text'], 'message_id': src['platform_message_id'], 'row_id': None}
+    try:
+        with sqlite3.connect((home/'state.db').as_uri()+'?mode=ro', uri=True, timeout=2) as db:
+            columns = {r[1] for r in db.execute('PRAGMA table_info(messages)')}
+            summary = 'COALESCE(m._compressed_summary,0)' if '_compressed_summary' in columns else '0'
+            followups = [(origin, body, row_id) for origin, body, row_id in learning.followup_rows(db, src, summary)
+                         if isinstance(origin.get('message_id'), str) and origin['message_id'].strip()]
+        if followups:
+            origin, body, row_id = followups[-1]
+            return {'text': body, 'message_id': str(origin.get('message_id') or ''), 'row_id': row_id}
+        return {'text': str(src.get('text') or ''), 'message_id': str(src.get('platform_message_id') or ''), 'row_id': src['message_id']}
+    except (OSError, sqlite3.Error, ValueError) as exc:
+        return {'text': '', 'message_id': '', 'row_id': None, 'error':'exception:'+type(exc).__name__}
+
 
 def _notes_create_folder(services, requested: str) -> str:
     """Allow Inbox capture or an explicit memo keyword in the current owner's message."""
@@ -217,7 +283,7 @@ def _lead_browse_context(services) -> str:
         return "kanban" if owned_kanban_task() else ""
     if str(services.get_session_env("HERMES_SINGLE_QUERY_SESSION", "")).strip().lower() in {"1", "true", "yes", "on"}:
         return ""
-    return "chat" if services.get_session_env("HERMES_SESSION_PLATFORM", "").strip().lower() in {"slack", "photon"} else "other"
+    return "chat" if services.get_session_env("HERMES_SESSION_PLATFORM", "").strip().lower() in OWNER_CHAT_PLATFORMS else "other"
 
 def _wiki_direct_llm_request(services, request: dict[str, Any]) -> dict[str, Any] | None:
     rewritten = services._append_request_policy(request, services._WIKI_DIRECT_POLICY) or dict(request)
@@ -234,7 +300,10 @@ def _lead_chat_policy(services) -> str:
         return services._LEAD_CHAT_POLICY
     start = services._LEAD_CHAT_POLICY.index("After answering, save only methods")
     end = services._LEAD_CHAT_POLICY.index("A short live lookup stays")
-    learning = services._LEAD_LEARNING_POLICY if str(services.get_session_env("HERMES_SESSION_PLATFORM", "")).lower() == "slack" else (
+    from hermes_owner_chat import current_owner_message
+    platform = str(services.get_session_env('HERMES_SESSION_PLATFORM', '')).lower()
+    verified_hejo = platform == 'hejo' and current_owner_message(services.get_session_env) is not None
+    learning = services._LEAD_LEARNING_POLICY if platform == 'slack' or verified_hejo else (
         "Read site-notes and task skills as needed. Managed skill learning runs only in the owner's Slack "
         "conversation, where changes enter the morning review. Do not write learned methods into memory "
         "or edit managed skills from this platform. A card's '사이트 요령:' is evidence to review in Slack. ")
@@ -312,9 +381,9 @@ def _personal_direct_llm_request(services, request: dict[str, Any], **context: A
                 logging.getLogger("team_delegation.personal").info(
                     "%s offered tools (%d), kanban: %s", services.LEAD_PROFILE, len(offered), ", ".join(offered))
             return {"request": rewritten, "source": "team-delegation", "reason": "lead card browsing"}
-    if services._is_wiki(profile) and platform in {"slack", "photon"}:
+    if services._is_wiki(profile) and platform in OWNER_CHAT_PLATFORMS:
         return services._wiki_direct_llm_request(request)
-    if not services._is_executor(profile) or platform not in {"slack", "photon"}:
+    if not services._is_executor(profile) or platform not in OWNER_CHAT_PLATFORMS:
         return None
     allowed_tools = {
         "calendar_direct_lookup",

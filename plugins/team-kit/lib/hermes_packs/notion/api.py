@@ -80,6 +80,16 @@ class UnknownChange(NotionError):
     unknown = True
 
 
+@contextmanager
+def before_mutation():
+    """Tag a refusal only inside a phase that cannot have written or saved pending state."""
+    try:
+        yield
+    except (NotionError, OSError, ValueError, TypeError, KeyError) as exc:
+        exc.mutation_calls = 0
+        raise
+
+
 _API = None
 _WORK_POLICY = None
 
@@ -652,6 +662,11 @@ def guard(config: Any, home: Path, *, tool_name: str, args: Any, chat: bool, ope
     if tool_name != "notion" or not enabled(config):
         return None
     call = args if isinstance(args, dict) else {}
+    try:
+        work_scope_guard(call)
+        if call.get('action') == 'api':work_block_scope(home,call,opener)
+    except (NotionError, sqlite3.Error, OSError, ValueError, TypeError, KeyError) as exc:
+        return {'action':'block','message':str(exc)}
     if call.get('action') in ('api', 'api_help'):
         return api_module().guard(api_context(), config, home, call, chat, files_config, opener, call_id)
     if call.get('action') == 'rollback' and config.get('full_api') is True:
@@ -696,35 +711,37 @@ def guard(config: Any, home: Path, *, tool_name: str, args: Any, chat: bool, ope
 
 
 def handle(config: Any, home: Path, args: dict[str, Any], opener: Any = None, files_config=None, chat=None, require_snapshot=False, **_: Any) -> str:
-    def error(message: str) -> str:
-        return json.dumps({"ok": False, "error": message}, ensure_ascii=False)
+    def error(message: str, mutation_calls=None) -> str:
+        result = {"ok": False, "error": message}
+        if mutation_calls == 0:result['mutation_calls'] = 0
+        return json.dumps(result, ensure_ascii=False)
 
     if not enabled(config):
-        return error("Notion is not enabled for this profile")
+        return error("Notion is not enabled for this profile", 0)
     try:
         work_scope_guard(args)
         work_block_scope(home,args,opener)
-    except (NotionError,sqlite3.Error,OSError) as exc:return error(str(exc))
+    except (NotionError,sqlite3.Error,OSError,ValueError,TypeError,KeyError) as exc:return error(str(exc), 0)
     if args.get('action') in ('api', 'api_help'):
         try:
             return json.dumps(api_module().handle(api_context(), config, home, args, files_config, opener, chat, require_snapshot), ensure_ascii=False)
-        except (NotionError, OSError, ValueError, TypeError, KeyError) as exc: return error(str(exc))
+        except (NotionError, OSError, ValueError, TypeError, KeyError) as exc: return error(str(exc), getattr(exc,'mutation_calls',None))
     if args.get("action") in WRITE and writable(config) == set():
-        return error("이 프로필은 Notion을 보기만 할 수 있다.")
+        return error("이 프로필은 Notion을 보기만 할 수 있다.", 0)
     if reason := problem(args, config, files_config):
-        return error(reason)
+        return error(reason, 0)
     action = args["action"]
     if action in WRITE:
         if require_snapshot and action != 'rollback' and not args.get('_approval_snapshot'):
-            return error('승인 시점의 값 확인 정보가 없습니다. 다시 읽고 승인받으세요.')
+            return error('승인 시점의 값 확인 정보가 없습니다. 다시 읽고 승인받으세요.', 0)
         if chat is False:
-            return error("Notion changes need the user's approval in chat.")
+            return error("Notion changes need the user's approval in chat.", 0)
         try:
             if action == 'rollback':
                 return json.dumps(rollback(config, home, args, opener, chat=chat, require_snapshot=require_snapshot), ensure_ascii=False)
             return json.dumps(change(config, home, args, files_config, opener), ensure_ascii=False)
         except (NotionError, OSError, ValueError, TypeError, KeyError) as exc:
-            return error(str(exc))
+            return error(str(exc), getattr(exc,'mutation_calls',None))
     try:
         if action in ("search", "databases"):
             body: dict[str, Any] = {"page_size": min(int(args.get("page_size") or 20), MAX_ROWS)}
@@ -1326,7 +1343,8 @@ def conversation():
             return None
         keys = {'platform': 'PLATFORM', 'scope_id': 'SCOPE_ID', 'chat_id': 'CHAT_ID', 'user_id': 'USER_ID', 'thread_id': 'THREAD_ID'}
         result = {k: env('HERMES_SESSION_' + v, '').strip() for k, v in keys.items()}
-        if result['platform'] != 'slack' or not result['chat_id'] or not result['user_id']: return None
+        from hermes_owner_chat import authenticated_owner
+        if result['platform'] not in {'slack', 'hejo'} or not result['chat_id'] or not authenticated_owner(env, legacy_owner=lambda user: bool(user)): return None
         return result
     except (ImportError, AttributeError): return None
 
@@ -1625,11 +1643,12 @@ def execute_change(config, home, op, plan, files_config, opener, persist=lambda 
 
 def change(config, home, args, files_config, opener):
     # A batch gets no mutation at all unless every operation passes its preflight.
-    approved = consume_snapshot(home, args)
-    plans = preflight(config, home, args, files_config, opener)
-    initial = snapshot_values(plans)
-    if approved is not None and initial != approved:
-        raise NotionError('승인 뒤 그 사이 Notion에서 바뀌었다. 다시 읽고 합친다.')
+    with before_mutation():
+        approved = consume_snapshot(home, args)
+        plans = preflight(config, home, args, files_config, opener)
+        initial = snapshot_values(plans)
+        if approved is not None and initial != approved:
+            raise NotionError('승인 뒤 그 사이 Notion에서 바뀌었다. 다시 읽고 합친다.')
     required = approval_required(config, args)
     owned = {}; owned_blocks = {}
     ops = args['operations'] if args['action'] == 'batch' else [args]
@@ -1638,7 +1657,7 @@ def change(config, home, args, files_config, opener):
         entry = {'conversation': who, 'created_at': time.time(), 'title': args.get('title') or ops[0]['action'],
                  'key': uuid.uuid4().hex, 'app_result': True, 'app_ready': False,
                  'consumed': False, 'operations': [], 'request': {k:copy.deepcopy(v) for k,v in args.items() if not k.startswith('_')}}
-        results = []; halted = False
+        results = []; halted = False; mutation_started = False
         for index, op in enumerate(ops, 1):
             if halted:
                 results.append({'index': index, 'status': 'skipped'}); continue
@@ -1658,6 +1677,7 @@ def change(config, home, args, files_config, opener):
                     key = 'block:' + edit['id']
                     if edit['snapshot'] != owned_blocks.get(key, initial.get(key)):
                         raise NotionError('승인 뒤 본문 블록이 바뀌었다. 다시 읽고 합친다.')
+                mutation_started = True  # Pending journal boundary: never claim zero writes after this point.
                 pending = {'action': 'unknown', 'page_id': plan['page_id'], 'original_action': op['action'], 'index': index,
                     'prepared':copy.deepcopy(plan),'inverse_template':{'create':'archive_created_id','append':'delete_created_block_ids','update':'restore_properties','edit':'restore_block_fields','trash':'untrash_page'}[op['action']]}
                 if who:
@@ -1729,28 +1749,31 @@ def change(config, home, args, files_config, opener):
         entry['app_ready']=bool(available and not halted and all(notion_undo.complete(r) for r in results))
         if who:save()
         result={**results[0],**meta} if args['action']!='batch' else {'ok':not halted,'title':args['title'],'operations':results,**meta}
+        if halted and not mutation_started:result['mutation_calls']=0
         return notion_undo.result(entry,result)
 
 
 def rollback(config, home, args, opener, *, chat=None, require_snapshot=False):
-    who = conversation()
-    if chat is False or who is None:
-        raise NotionError('되돌리기는 식별 가능한 같은 Slack 대화·스레드에서만 실행합니다.')
-    if config.get('rollback_enabled', True) is False: raise NotionError('Notion rollback is disabled.')
+    with before_mutation():
+        who = conversation()
+        if chat is False or who is None:
+            raise NotionError('되돌리기는 식별 가능한 같은 Slack 대화·스레드에서만 실행합니다.')
+        if config.get('rollback_enabled', True) is False: raise NotionError('Notion rollback is disabled.')
     from hermes_governance import notion_undo
     chosen=notion_undo.selected()
     legacy_receipt = None
     if config.get('full_api') is True:
         if api_module().is_api_rollback(api_context(), home):
             return api_module().rollback(api_context(), config, home, args, opener, require_snapshot)
-        if not chosen:legacy_receipt = api_module().consume(api_context(), home, args, require_snapshot)
+        if not chosen:
+            with before_mutation():legacy_receipt = api_module().consume(api_context(), home, args, require_snapshot)
     with journal(home) as (data, save):
         candidates = [e for e in data['entries'] if e['conversation'] == who and not e['consumed'] and (not chosen or e['key']==chosen)]
         if not candidates:
             save(); return {'ok': False, 'error': 'NO_RECENT_NOTION_ROLLBACK', 'mutation_calls': 0}
         entry = candidates[-1]
         if legacy_receipt is not None and legacy_receipt.get('legacy_rollback') != entry['key']:
-            raise NotionError('되돌릴 기록이 바뀌었습니다. 다시 확인하세요.')
+            with before_mutation():raise NotionError('되돌릴 기록이 바뀌었습니다. 다시 확인하세요.')
         if 'key' in args and args['key'] != entry['key']:
             return {'ok': False, 'error': 'ROLLBACK_KEY_NOT_LATEST', 'mutation_calls': 0}
         if time.time() - entry['created_at'] >= 1800 and 'key' not in args:
@@ -1832,7 +1855,7 @@ def rollback(config, home, args, opener, *, chat=None, require_snapshot=False):
                                 details.append({'block_id': ident, 'status': 'skipped', 'reason': '이미 없는 블록입니다.'})
                             else:
                                 if entry.get('app_result'):
-                                    if ident not in op.get('app_after',{}) or notion_undo.tree(api_context(),home,ident,opener)!=op['app_after'][ident]:
+                                    if ident not in op.get('app_after',{}) or api_module().stable(notion_undo.tree(api_context(),home,ident,opener))!=api_module().stable(op['app_after'][ident]):
                                         raise NotionError('그 사이 추가 본문이 바뀌어 삭제하지 않습니다.')
                                 mutation_calls += 1
                                 removed = request(home, 'DELETE', 'blocks/' + ident, opener=opener)
@@ -1850,7 +1873,7 @@ def rollback(config, home, args, opener, *, chat=None, require_snapshot=False):
                         details.append({'status': 'skipped', 'reason': '이미 복원 상태입니다.'})
                     else:
                         if action=='create' and entry.get('app_result'):
-                            if 'app_after' not in op or notion_undo.page(api_context(),home,page_id,opener)!=op['app_after']:
+                            if 'app_after' not in op or api_module().stable(notion_undo.page(api_context(),home,page_id,opener))!=api_module().stable(op['app_after']):
                                 raise NotionError('그 사이 새 페이지가 바뀌어 삭제하지 않습니다.')
                         mutation_calls += 1
                         response = request(home, 'PATCH', 'pages/' + page_id, {'archived': desired}, opener=opener)

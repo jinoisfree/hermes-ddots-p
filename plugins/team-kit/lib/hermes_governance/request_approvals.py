@@ -1,5 +1,6 @@
 """One human approval for an exact, bounded list of writes in one authenticated owner request."""
 from __future__ import annotations
+from hermes_owner_chat import OWNER_CHAT_PLATFORMS
 from copy import deepcopy
 import hashlib
 import json
@@ -34,7 +35,7 @@ def scope(td, context):
     turn = str(context.get('turn_id') or _approval_turn_id.get() or '')
     if not session or not turn or td.personal_scopes.background(td):
         return None
-    if (td.get_session_env('HERMES_SESSION_PLATFORM', '') not in {'slack', 'photon'}
+    if (td.get_session_env('HERMES_SESSION_PLATFORM', '') not in OWNER_CHAT_PLATFORMS
             or not td.get_session_env('HERMES_SESSION_USER_ID', '')
             or not td.get_session_env('HERMES_SESSION_CHAT_ID', '')):
         return None

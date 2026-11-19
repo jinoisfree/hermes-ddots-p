@@ -1,11 +1,13 @@
-"""Bind owner report controls to one Slack adapter through the platform factory."""
+"""Bind shared report controls through Slack and hejo platform factories."""
 from __future__ import annotations
 
+from collections import OrderedDict
 from contextvars import ContextVar
 from functools import wraps
 import inspect
+import asyncio
+from uuid import uuid4
 import logging
-import re
 import sys
 
 from . import reply_buttons as rb
@@ -17,16 +19,45 @@ logger = logging.getLogger(__name__)
 # top level or in a thread: every piece then goes through the normal marker, policy and colour path as a
 # post of its own, so its buttons belong to that piece alone. Sends that cannot be several messages keep
 # one post and only lose the line (see ``splittable``).
-SPLIT_MARKER = '[[글 나누기]]'
-_SPLIT_LINE = re.compile(r'^[ \t]*' + re.escape(SPLIT_MARKER) + r'[ \t]*$\n?', re.M)
+SPLIT_MARKER = rb.SPLIT_MARKER
+_SPLIT_LINE = rb.SPLIT_LINE
 
 
 def _without_split_lines(content):
-    return _SPLIT_LINE.sub('', content) if isinstance(content, str) and SPLIT_MARKER in content else content
+    return rb.without_split_lines(content)
 
 
 def _pieces(content):
     return [piece.strip() for piece in _SPLIT_LINE.split(content) if piece.strip()]
+
+
+async def _post_pieces(post, pieces):
+    """One post per piece (top level or in the thread), in order. A piece that fails does not stop the others (each is its
+    own item); a failure after something was posted is reported as a partial delivery so the caller
+    never re-sends the whole text."""
+    from gateway.platforms.base import SendResult
+    results = []
+    for piece in pieces:
+        try:
+            results.append(await post(piece))
+        except Exception as exc:
+            logger.error('reply split: piece %d of %d failed: %s', len(results) + 1, len(pieces), exc)
+            results.append(SendResult(success=False, error=str(exc)))
+    done = [r for r in results if r.success]
+    failed = [r for r in results if not r.success]
+    ids = tuple(r.message_id for r in done if r.message_id)
+    if not failed:
+        return SendResult(success=True, message_id=ids[-1] if ids else None, raw_response=done[-1].raw_response,
+                          continuation_message_ids=ids[:-1])
+    if not done:
+        return failed[0]
+    logger.error('reply split: %d of %d posts delivered, then failed: %s', len(done), len(pieces), failed[0].error)
+    return SendResult(success=False, message_id=ids[-1] if ids else None,
+                      error=f'{len(done)}/{len(pieces)} posts delivered: {failed[0].error}',
+                      raw_response={'partial_overflow': True, 'delivered_chunks': len(done),
+                                    'total_chunks': len(pieces)},
+                      continuation_message_ids=ids[:-1])
+
 
 
 def register(ctx):
@@ -39,6 +70,12 @@ def register(ctx):
 
     reply_buttons_factory.__qualname__ = 'hermes_reply.reply_buttons_factory.slack'
     ctx.register_platform_handler('slack', reply_buttons_factory)
+
+    def hejo_factory(native, adapter):
+        install_hejo(adapter)
+
+    hejo_factory.__qualname__ = 'hermes_reply.reply_buttons_factory.hejo'
+    ctx.register_platform_handler('hejo', hejo_factory)
 
 
 def _plain(content):
@@ -114,11 +151,7 @@ def install(adapter, native=None):
         'send', 'edit_message', '_post_chunks', '_call_with_block_fallback',
         '_commit_stream', '_maybe_blocks', '_peer_bot_drop')}
 
-    def controls(content):
-        content = _without_split_lines(content)
-        text, checks = rb.extract_checklist(content)
-        text, buttons = rb.extract(text)
-        return text, checks or buttons, bool(checks)
+    controls = rb.controls
 
     def track(frame, ts):
         if not ts or not frame['thread']:
@@ -137,30 +170,7 @@ def install(adapter, native=None):
             send_meta.reset(token)
 
     async def post_pieces(chat_id, pieces, reply_to, metadata):
-        """One post per piece (top level or in the thread), in order. A piece that fails does not stop the others (each is its
-        own item); a failure after something was posted is reported as a partial delivery so the caller
-        never re-sends the whole text."""
-        results = []
-        for piece in pieces:
-            try:
-                results.append(await post(chat_id, piece, reply_to, metadata))
-            except Exception as exc:
-                logger.error('reply split: piece %d of %d failed: %s', len(results) + 1, len(pieces), exc)
-                results.append(SendResult(success=False, error=str(exc)))
-        done = [r for r in results if r.success]
-        failed = [r for r in results if not r.success]
-        ids = tuple(r.message_id for r in done if r.message_id)
-        if not failed:
-            return SendResult(success=True, message_id=ids[-1] if ids else None, raw_response=done[-1].raw_response,
-                              continuation_message_ids=ids[:-1])
-        if not done:
-            return failed[0]
-        logger.error('reply split: %d of %d posts delivered, then failed: %s', len(done), len(pieces), failed[0].error)
-        return SendResult(success=False, message_id=ids[-1] if ids else None,
-                          error=f'{len(done)}/{len(pieces)} posts delivered: {failed[0].error}',
-                          raw_response={'partial_overflow': True, 'delivered_chunks': len(done),
-                                        'total_chunks': len(pieces)},
-                          continuation_message_ids=ids[:-1])
+        return await _post_pieces(lambda piece: post(chat_id, piece, reply_to, metadata), pieces)
 
     def splittable(chat_id, metadata):
         """Split a reply into posts only where each piece can be its own message: not an interim or
@@ -310,4 +320,214 @@ def install(adapter, native=None):
     adapter._hermes_reply_installed = True
     if native is not None:
         rb.register(adapter, native)
+    return True
+
+
+_HEJO_TURN = ContextVar('hejo_report_turn', default=None)
+
+
+def current_hejo_turn():
+    return _HEJO_TURN.get()
+
+
+class _HejoReplyTracking:
+    """Bounded, adapter-local hints; the gate remains the source of persisted state."""
+    LIMIT = 2048
+
+    def __init__(self):
+        self.working = {}
+        self.streams = set()
+        self.checklists = {}
+        self.message_threads = OrderedDict()
+
+    def forget(self, message_id):
+        self.streams.discard(message_id)
+        self.checklists.pop(message_id, None)
+        key = self.message_threads.pop(message_id, None)
+        if key in self.working:
+            self.working[key].discard(message_id)
+            if not self.working[key]:
+                del self.working[key]
+
+    def remember(self, message_id, key):
+        self.forget(message_id)
+        self.message_threads[message_id] = key
+        while len(self.message_threads) > self.LIMIT:
+            self.forget(next(iter(self.message_threads)))
+
+    def discard_thread(self, key):
+        for message_id, thread in tuple(self.message_threads.items()):
+            if thread == key:
+                self.forget(message_id)
+        self.working.pop(key, None)
+
+
+def install_hejo(adapter):
+    """Use only public adapter methods; no listener, journal or gate imports here."""
+    # The public forwarder property identifies adapters that delegate to the primary.
+    # Only the primary interprets markers and owns click/finalization bookkeeping.
+    if getattr(adapter, 'forwarder', False) is True:
+        return True
+    if getattr(adapter, '_hermes_hejo_reply_installed', False) is True:
+        return True
+    contracts = {'send': ('chat_id', 'content', 'reply_to', 'metadata'),
+                 'edit_message': ('chat_id', 'message_id', 'content', 'finalize', 'metadata')}
+    if not all(callable(getattr(adapter, name, None)) and
+               set(parameters).issubset(inspect.signature(getattr(adapter, name)).parameters)
+               for name, parameters in contracts.items()) or not all(
+                   callable(getattr(adapter, name, None)) for name in
+                   ('set_reply_state', 'register_click_handler', 'handle_message')):
+        logger.warning('hejo reply buttons: adapter contract changed; choices will be sent as text')
+        _install_plain(adapter)
+        return False
+    original_send, original_edit, original_handle = adapter.send, adapter.edit_message, adapter.handle_message
+    tracking = _HejoReplyTracking()
+
+    def thread_key(chat_id, reference, metadata):
+        md = metadata or {}
+        employee = md.get('hermes_profile') or chat_id
+        thread = md.get('thread_id') or tracking.message_threads.get(reference, (None, reference))[1]
+        return employee, thread
+
+    def prepare(content, metadata):
+        text, labels, checklist = rb.controls(content)
+        md = dict(metadata or {})
+        if labels:
+            if checklist:
+                md.pop('hejo_buttons', None)
+                md['hejo_checklist'] = dict(items=list(labels), selected=[],
+                                            can_skip=not bool(getattr(labels, 'submits', None)))
+            else:
+                md['hejo_buttons'] = [dict(label=label, style='default') for label in labels]
+            md['hejo_reply_state'] = 'asked'
+        return text, labels, md
+
+    async def close_answered(key, metadata):
+        if metadata.get('_interim_send') or metadata.get('expect_edits'):
+            return
+        try:
+            for msg_id in tuple(tracking.working.get(key, ())):
+                await adapter.set_reply_state(msg_id, 'closed')
+        finally:
+            tracking.discard_thread(key)
+
+    @wraps(original_send)
+    async def post(chat_id, content, reply_to=None, metadata=None):
+        text, labels, md = prepare(content, metadata)
+        key = thread_key(chat_id, reply_to, md)
+        if not md.get('thread_id'):
+            md['thread_id'] = key[1] or str(uuid4())
+            key = thread_key(chat_id, reply_to, md)
+        try:
+            result = await original_send(chat_id, text, reply_to=reply_to, metadata=md)
+            if not result.success:
+                tracking.discard_thread(key)
+                return result
+            if result.message_id and key[1]:
+                tracking.remember(result.message_id, key)
+                if md.get('expect_edits'):
+                    tracking.streams.add(result.message_id)
+                if labels and md.get('hejo_checklist'):
+                    tracking.checklists[result.message_id] = md['hejo_checklist']
+            if not labels:
+                await close_answered(key, md)
+            return result
+        except Exception:
+            tracking.discard_thread(key)
+            raise
+
+    @wraps(original_send)
+    async def send(chat_id, content, reply_to=None, metadata=None):
+        if isinstance(content, str) and SPLIT_MARKER in content:
+            pieces = _pieces(content)
+            md = dict(metadata or {})
+            key = thread_key(chat_id, reply_to, md)
+            opened = any(mid in tracking.streams for mid, thread in tracking.message_threads.items() if thread == key)
+            if len(pieces) > 1 and not (md.get('_interim_send') or md.get('expect_edits') or opened):
+                # All pieces belong to one conversation, including a send without a reply anchor.
+                if not md.get('thread_id'):
+                    md['thread_id'] = key[1] or str(uuid4())
+                return await _post_pieces(lambda piece: post(chat_id, piece, reply_to, md), pieces)
+            content = _without_split_lines(content)
+        return await post(chat_id, content, reply_to, metadata)
+
+    @wraps(original_edit)
+    async def edit_message(chat_id, message_id, content, *, finalize=False, metadata=None):
+        text, labels, md = prepare(content, metadata)
+        key = thread_key(chat_id, message_id, md)
+        repaint = md.pop('_hermes_report_status', False)
+        if finalize and not labels and not repaint:
+            md.setdefault('hejo_buttons', [])
+        try:
+            result = await original_edit(chat_id, message_id, text, finalize=finalize, metadata=md)
+            if not result.success:
+                tracking.discard_thread(key)
+                tracking.forget(message_id)
+                return result
+            if not finalize:
+                tracking.remember(message_id, key)
+                tracking.streams.add(message_id)
+            else:
+                tracking.streams.discard(message_id)
+            if labels:
+                await adapter.set_reply_state(message_id, 'asked')
+                tracking.remember(message_id, key)
+                if md.get('hejo_checklist'):
+                    tracking.checklists[message_id] = md['hejo_checklist']
+            elif finalize and not repaint:
+                await close_answered(key, md)
+            if not finalize:
+                tracking.streams.add(message_id)
+            return result
+        except Exception:
+            tracking.discard_thread(key)
+            tracking.forget(message_id)
+            raise
+
+    async def clicked(click):
+        key = (click['employee'], click['thread'])
+        try:
+            # Persist first: a failure must not dispatch the owner's turn as accepted.
+            await adapter.set_reply_state(click['msg_id'], 'answered')
+        except Exception:
+            tracking.discard_thread(key)
+            tracking.forget(click['msg_id'])
+            raise
+        tracking.remember(click['msg_id'], key)
+        tracking.working.setdefault(key, set()).add(click['msg_id'])
+        return False
+
+    @wraps(original_handle)
+    async def handle_message(event):
+        button = (event.raw_message or {}).get('_hermes_button')
+        if button and button.get('message_text') and button.get('message_id'):
+            context = rb.clicked_context({**button, 'message_ts': button['message_id']},
+                                         identity_label='hejo id')
+            event.channel_context = context + (event.channel_context or '')
+        binding = (adapter, event, asyncio.get_running_loop())
+        token = _HEJO_TURN.set(binding)
+        try:
+            result = await original_handle(event)
+            # The base adapter has admitted this authenticated turn before any state changes.
+            if getattr(event, '_gateway_accepted', False) and event.user_id == 'owner':
+                key = (event.source.profile or event.source.chat_id, event.source.thread_id)
+                for mid, checklist in tuple(tracking.checklists.items()):
+                    if tracking.message_threads.get(mid) != key:
+                        continue
+                    selected = event.text.removeprefix('선택: ').split(', ')
+                    valid = (event.text == '건너뛰기' and checklist['can_skip'] or
+                             event.text == '전체' and '전체' in checklist['items'] or
+                             event.text.startswith('선택: ') and selected and
+                             all(label in checklist['items'] for label in selected))
+                    if valid:
+                        tracking.working.setdefault(key, set()).add(mid)
+                        await adapter.set_reply_state(mid, 'answered')
+                        tracking.checklists.pop(mid, None)
+            return result
+        finally:
+            _HEJO_TURN.reset(token)
+
+    adapter.send, adapter.edit_message, adapter.handle_message = send, edit_message, handle_message
+    adapter.register_click_handler('reply', clicked)
+    adapter._hermes_hejo_reply_installed = True
     return True

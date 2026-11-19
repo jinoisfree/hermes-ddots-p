@@ -50,6 +50,17 @@ def _pre_owner(home, learning, session_id, sender_id, user_message):
     This is context authorization only, never fabricated learning evidence.
     Tool handlers still verify the persisted current owner message independently.
     """
+    from gateway.session_context import get_session_env as env
+    if env('HERMES_SESSION_PLATFORM', '') == 'hejo':
+        from hermes_owner_chat import current_owner_message_in_session
+        # hejo context waits for the same persisted ingress proof used by its tools.
+        if sender_id != 'owner' or current_owner_message_in_session(home, session_id, env) is None:
+            return False
+        try:
+            learning.extension('learning_skills').human_context()
+        except ValueError:
+            return False
+        return True
     if not sender_id or sender_id not in learning.owners(home) or not isinstance(user_message, str):
         return False
     learning.extension("learning_skills").human_context()

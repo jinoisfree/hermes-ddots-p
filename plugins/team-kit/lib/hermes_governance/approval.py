@@ -8,6 +8,7 @@ _owner_library = str((_OwnerPath(__file__).resolve().parent / '..').resolve())
 if _owner_library not in _owner_sys.path:
     _owner_sys.path.insert(0, _owner_library)
 from hermes_facility.owner_text import render as _owner_text
+from hermes_owner_chat import OWNER_CHAT_PLATFORMS
 
 from hermes_facility.loading import source_path
 import json, base64, fcntl, hashlib, logging, html, os, re, sqlite3, subprocess, tempfile, sys, threading, time, unicodedata
@@ -246,7 +247,7 @@ def _tool_execution_guard(services, tool_name: str, args: dict[str, Any], next_c
             services.video_job.grant(services.host, call_args, args, context)
         except Exception:
             return services._error("샌드박스 또는 영상 제작 승인 검증에 실패해 실행을 거부한다.")
-    chat = platform in {"slack", "photon"}
+    chat = platform in OWNER_CHAT_PLATFORMS
     browse_context = services._lead_browse_context()
     if services.team.has_role(profile, 'personal') and tool_name == "skill_manage":
         if problem := services._lead_skill_write_gate(args, **context):
@@ -513,7 +514,7 @@ def _personal_mutation_approval_single(services,
         or os.environ.get("HERMES_PROFILE") or services._home_profile()
         or "default"
     ).strip()
-    chat = services.get_session_env("HERMES_SESSION_PLATFORM", "").strip().lower() in {"slack", "photon"}
+    chat = services.get_session_env("HERMES_SESSION_PLATFORM", "").strip().lower() in OWNER_CHAT_PLATFORMS
     card_run = bool(os.environ.get("HERMES_KANBAN_TASK"))
     browse_context = services._lead_browse_context()
     if services._team_kit_review_skill_write(str(tool_name or "")):
@@ -574,7 +575,7 @@ def _personal_mutation_approval_single(services,
     if problem := services._personal_role_problem(str(tool_name), args if isinstance(args, dict) else {}):
         return {"action": "block", "message": problem}
     if (services.team.has_role(profile, 'personal') and tool_name in {'write_file', 'patch'}
-            and services.get_session_env('HERMES_SESSION_PLATFORM', '').strip().lower() == 'slack'):
+            and services.get_session_env('HERMES_SESSION_PLATFORM', '').strip().lower() in {'slack', 'hejo'}):
         return services._lead_workspace_write_approval(tool_name, args, tool_call_id=tool_call_id)
     if tool_name == 'contacts_direct_mutation':
         payload, error = services._contacts_arguments(args, mutation=True)
@@ -595,7 +596,7 @@ def _personal_mutation_approval_single(services,
         if 'capture' in args or 'scope_change' in args:
             try:
                 if not services._task_capture_owner_chat():raise ValueError('WORK_CAPTURE_OWNER_CHAT_REQUIRED')
-                if 'capture' in args:services.work_capture.authorized(services.host)
+                if 'capture' in args:services.work_capture.authorized(services.host,choice_ref=(args['capture'] or {}).get('choice_ref'))
                 return None
             except ValueError as exc:return {'action':'block','message':str(exc)}
         approved_args = services._normalize_personal_bundle_args(args)
@@ -701,12 +702,14 @@ def _lead_workspace_write_approval(services, tool_name, args, *, tool_call_id=''
     target = services._inside(args.get('path'), [workspace])
     requested = Path(str(args.get('path') or '')).expanduser()
     if target is not None:
-        try:
-            owner = services.video_job._owner(workspace.parent)
-        except Exception:
-            owner = None
-        if (not services.selected_skills.owner_chat(td) or not owner
-                or services.get_session_env('HERMES_SESSION_USER_ID', '') != owner):
+        from hermes_owner_chat import authenticated_owner
+        def legacy_owner(user):
+            try:
+                return user == services.video_job._owner(workspace.parent)
+            except Exception:
+                return False
+        if (not services.selected_skills.owner_chat(td) or not authenticated_owner(
+                services.get_session_env, legacy_owner=legacy_owner)):
             return {'action': 'block', 'message': 'workspace 파일 쓰기의 Slack 소유자를 확인하지 못했다.'}
         return None
     # Canonicalize only the profile-home alias (/Users may point into /Volumes).
@@ -785,7 +788,7 @@ def _run_disclaimed(services, command: list[str], timeout: float) -> SimpleNames
 
 def _owner_chat_create(services) -> bool:
     """A create the owner asked for in chat runs without approval (2026-10-25 사용자 결정)."""
-    return (services.get_session_env("HERMES_SESSION_PLATFORM", "").strip().lower() in {"slack", "photon"}
+    return (services.get_session_env("HERMES_SESSION_PLATFORM", "").strip().lower() in OWNER_CHAT_PLATFORMS
             and not services.personal_scopes.background(services.host))
 
 def _owner_chat_no_approval(services, tool_name: str, action: str, args: dict[str, Any]) -> bool:

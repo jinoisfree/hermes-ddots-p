@@ -7,6 +7,7 @@ _owner_library = str((_OwnerPath(__file__).resolve().parent / '..').resolve())
 if _owner_library not in _owner_sys.path:
     _owner_sys.path.insert(0, _owner_library)
 from hermes_facility.owner_text import render as _owner_text
+from hermes_owner_chat import OWNER_CHAT_PLATFORMS
 
 from contextvars import ContextVar
 from functools import wraps
@@ -141,7 +142,7 @@ def role_problem(td, name, args):
                 return 'PERSONAL_SCOPE_BACKGROUND_REFUSED: 예약·배경에서 허용되지 않은 메일 호출이다.'
             return None
     if name in SCOPED_TOOLS:
-        if (background(td) or td.get_session_env('HERMES_SESSION_PLATFORM', '') not in {'slack', 'photon'}
+        if (background(td) or td.get_session_env('HERMES_SESSION_PLATFORM', '') not in OWNER_CHAT_PLATFORMS
                 or not td.get_session_env('HERMES_SESSION_CHAT_ID', '')
                 or not td.get_session_env('HERMES_SESSION_USER_ID', '')):
             return 'PERSONAL_SCOPE_OWNER_CHAT_REQUIRED: 원본 쓰기는 인증된 소유자 대화에서만 가능하다.'

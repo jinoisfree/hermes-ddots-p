@@ -180,6 +180,22 @@ def extract_checklist(content: str) -> Tuple[str, List[str]]:
     return content[:match.start()].rstrip() + (match.group("footer") or ""), labels
 
 
+# Shared marker handling: Slack rendering and hejo metadata consume the same result.
+SPLIT_MARKER = '[[글 나누기]]'
+SPLIT_LINE = re.compile(r'^[ \t]*' + re.escape(SPLIT_MARKER) + r'[ \t]*$\n?', re.M)
+
+
+def without_split_lines(content):
+    return SPLIT_LINE.sub('', content) if isinstance(content, str) and SPLIT_MARKER in content else content
+
+
+def controls(content):
+    content = without_split_lines(content)
+    text, checks = extract_checklist(content)
+    text, buttons = extract(text)
+    return text, checks or buttons, bool(checks)
+
+
 def checklist_block(labels: List[str], selected: Optional[set] = None) -> dict:
     selected = selected or set()
     return {"type": "actions", "block_id": CHECKLIST_BLOCK_ID, "elements": [
@@ -393,7 +409,7 @@ _CLICKED_HEAD = 2500
 _CLICKED_TAIL = 1500
 
 
-def clicked_context(button) -> str:
+def clicked_context(button, *, identity_label='Slack ts') -> str:
     """The turn's leading context for a click: which message the owner pressed, so the agent handles that
     item only. Same ``[Thread context …]`` shape the gateway uses for thread history, so every reader of
     a turn's first lines (mail legend, current-message split on ``[New message]``) treats it the same way.
@@ -404,7 +420,7 @@ def clicked_context(button) -> str:
         return ""
     if len(text) > _CLICKED_HEAD + _CLICKED_TAIL:
         text = text[:_CLICKED_HEAD].rstrip() + "\n…(중략)…\n" + text[-_CLICKED_TAIL:].lstrip()
-    return ("[Thread context — the message the owner just pressed a button on (Slack ts " + str(ts) + "). "
+    return ("[Thread context — the message the owner just pressed a button on (" + identity_label + " " + str(ts) + "). "
             "The click answers only this message's item; other messages in the thread are other items:]\n"
             "[pressed message] " + text + "\n[End of thread context]\n\n")
 

@@ -7,6 +7,7 @@ _owner_library = str((_OwnerPath(__file__).resolve().parent / '..').resolve())
 if _owner_library not in _owner_sys.path:
     _owner_sys.path.insert(0, _owner_library)
 from hermes_facility.owner_text import render as _owner_text
+from hermes_owner_chat import OWNER_CHAT_PLATFORMS
 
 from copy import deepcopy
 import os
@@ -98,7 +99,7 @@ def problem(td, name, args):
             return _owner_text('CONTACTS_PROFILE_REFUSED: 연락처는 <<work_name>> 전용 도구다.')
         background = any(td.get_session_env(flag, '') or os.environ.get(flag) for flag in
                          ('HERMES_CRON_SESSION', 'HERMES_SINGLE_QUERY_SESSION', 'HERMES_KANBAN_TASK'))
-        if (background or td.get_session_env('HERMES_SESSION_PLATFORM', '') not in {'slack', 'photon'}
+        if (background or td.get_session_env('HERMES_SESSION_PLATFORM', '') not in OWNER_CHAT_PLATFORMS
                 or not td.get_session_env('HERMES_SESSION_CHAT_ID', '')
                 or not td.get_session_env('HERMES_SESSION_USER_ID', '')):
             return 'CONTACTS_OWNER_CHAT_REQUIRED: 연락처 조회·쓰기는 인증된 소유자 대화에서만 실행한다. 예약·배경은 거부한다.'
@@ -149,7 +150,7 @@ def problem(td, name, args):
     if team.has_role(current, 'work') and (name in PERSONAL_WRITES or (name == 'gmail_direct' and not cron_read)):
         background = any(td.get_session_env(flag, '') or os.environ.get(flag) for flag in
                          ('HERMES_CRON_SESSION', 'HERMES_SINGLE_QUERY_SESSION', 'HERMES_KANBAN_TASK'))
-        if (background or td.get_session_env('HERMES_SESSION_PLATFORM', '') not in {'slack', 'photon'}
+        if (background or td.get_session_env('HERMES_SESSION_PLATFORM', '') not in OWNER_CHAT_PLATFORMS
                 or not td.get_session_env('HERMES_SESSION_CHAT_ID', '')
                 or not td.get_session_env('HERMES_SESSION_USER_ID', '')):
             return _owner_text('<<work_name>>의 개인업무 도구는 인증된 소유자 대화에서만 실행한다. 예약·배경 실행은 거부한다.')

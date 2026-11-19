@@ -201,7 +201,27 @@ def persist(home, data):
     save(path(home), data)
 
 
+def hejo_source(home, session_id, *, allow_approval=False):
+    from gateway.session_context import get_session_env as env
+    from hermes_owner_chat import current_owner_message_in_session
+    extension('learning_skills').human_context()
+    proof = current_owner_message_in_session(home, session_id, env)
+    if proof is None:
+        raise ValueError('Current owner message index is unavailable.')
+    message, row_id = proof
+    text = message['text'].strip()
+    if not allow_approval and BARE.fullmatch(text):
+        raise ValueError('A bare approval or refusal does not teach a working rule.')
+    # The public original and persisted session-row identity are proved together.
+    return {'text': text, 'user_id': 'owner', 'chat_id': message['chat_id'], 'chat_type': 'dm',
+            'thread_id': message['thread_id'], 'at': message['ts'], 'message_id': row_id,
+            'platform_message_id': message['msg_id'], 'session_id': session_id, 'platform': 'hejo', 'followups': [], 'media': []}
+
+
 def source(home, session_id, *, allow_approval=False):
+    from gateway.session_context import get_session_env as env
+    if env('HERMES_SESSION_PLATFORM', '') == 'hejo':
+        return hejo_source(home, session_id, allow_approval=allow_approval)
     with sqlite3.connect(f"file:{Path(home) / 'state.db'}?mode=ro", uri=True, timeout=2) as db:
         # Compaction rows are host reference material, even when they carry a copied
         # platform_message_id. Recover only the SAME live transport request.
@@ -243,16 +263,19 @@ def source(home, session_id, *, allow_approval=False):
         return src
 
 
-def _followups(db, src, summary):
-    """Quote evidence only; a steer or redirected message never replaces the bound transport request."""
+def followup_rows(db, src, summary):
+    """Same-owner redirects/steers after this request, with their transport and row identity."""
+    from gateway.session_context import get_session_env as env
+    if src.get('platform') == 'hejo' or env('HERMES_SESSION_PLATFORM', '') == 'hejo':
+        return []  # Unbound steer/redirect text is never new hejo authorization.
     quoted, quoted_args = quoted_row_sql()
     rows = db.execute(
-        "SELECT m.content FROM messages m WHERE m.session_id=? AND m.role='user' AND m.id>? "
+        "SELECT m.content,m.id FROM messages m WHERE m.session_id=? AND m.role='user' AND m.id>? "
         f"AND {summary}=0 AND TRIM(COALESCE(m.platform_message_id,''))='' AND {quoted} ORDER BY m.id",
         (src['session_id'], src['message_id'], *quoted_args),
     )
     result = []
-    for (content,) in rows:
+    for content, row_id in rows:
         parsed = _quoted_body(content)
         if not parsed:
             continue
@@ -263,8 +286,13 @@ def _followups(db, src, summary):
                 or (origin.get('thread_id') or '') != (src['thread_id'] or '')):
             continue
         if body:
-            result.append(body)
+            result.append((origin, body, row_id))
     return result
+
+
+def _followups(db, src, summary):
+    """Learning keeps the original request; followups supply quote evidence only."""
+    return [body for _, body, _ in followup_rows(db, src, summary)]
 
 
 def _quoted_body(content):
@@ -315,6 +343,10 @@ def _strip_media_notes(text):
 
 
 def _source_row(row, allowed_users, session_id, *, allow_approval=False):
+    from gateway.session_context import get_session_env as env
+    if env('HERMES_SESSION_PLATFORM', '') == 'hejo':
+        from hermes_constants import get_hermes_home
+        return hejo_source(get_hermes_home(), session_id, allow_approval=allow_approval)
     if not row or row[0] != "slack":
         raise ValueError("Learning requires a current owner Slack message.")
     if str(row[5]).lstrip().startswith('[CONTEXT COMPACTION'):
@@ -353,6 +385,11 @@ def quote_source(home, session_id, quote):
     """Newest exact teaching quote from a real owner message in this session only."""
     if not isinstance(quote, str) or not quote.strip() or len(quote) > 2000:
         raise ValueError("user_said must be an exact owner quote (1–2000 characters).")
+    from gateway.session_context import get_session_env as env
+    if env('HERMES_SESSION_PLATFORM', '') == 'hejo':
+        src = hejo_source(home, session_id)
+        validate_quote(src, quote)
+        return src
     allowed_users = owners(home)
     with sqlite3.connect(f"file:{Path(home) / 'state.db'}?mode=ro", uri=True, timeout=2) as db:
         rows = db.execute(
@@ -400,6 +437,12 @@ def rule_lines(data):
 
 
 def note(home, info):
+    if str(info.get('platform', '')).lower() == 'hejo':
+        from gateway.session_context import get_session_env as env
+        from hermes_owner_chat import current_owner_message
+        if current_owner_message(env) is None:
+            return ''
+        return extension('learning_live').note(home) if extension('learning_skills').enabled(home) else NOTE
     if str(info.get("platform", "")).lower() == "slack" and extension("learning_skills").enabled(home):
         live = extension("learning_live")
         return live.note(home)
@@ -499,10 +542,25 @@ MEMORY_STEER_MESSAGE = (
     "이미 team_learn으로 저장했으면 아무것도 하지 않는다. 사용자에 대한 사실·합의나 스스로 알아낸 요령이면 "
     "같은 인자로 memory를 다시 호출하면 저장된다."
 )
+# team_learn refuses every background run, so the review fork must not be sent there.
+MEMORY_STEER_BACKGROUND_MESSAGE = (
+    "아직 저장하지 않았다. 배경 돌아보기에서는 team_learn을 쓸 수 없으므로 사용자가 가르친 일하는 방법·순서·기준·선호는 "
+    "이번에 저장하지 않고 넘어간다. 사용자에 대한 사실·합의나 스스로 알아낸 요령이면 "
+    "같은 인자로 memory를 다시 호출하면 저장된다."
+)
 
 
-def memory_steer(seen, session_id, args, now):
-    """Pure decision: return (new bounded history, optional block); never change input."""
+def _background_review():
+    try:
+        from tools.skill_provenance import is_background_review
+        return is_background_review()
+    except Exception:
+        return False
+
+
+def memory_steer(seen, session_id, args, now, background=None):
+    """Return (new bounded history, optional block); never change input.
+    background=None reads the core write origin to pick the review-fork wording."""
     recent = {key: at for key, at in seen.items() if 0 <= now - at < MEMORY_STEER_TTL}
     recent = dict(sorted(recent.items(), key=lambda pair: pair[1])[-MEMORY_STEER_LIMIT:])
     if not session_id or not isinstance(args, dict) or args.get("target", "memory") not in (None, "memory"):
@@ -517,4 +575,7 @@ def memory_steer(seen, session_id, args, now):
         return recent, None
     recent[key] = now
     recent = dict(sorted(recent.items(), key=lambda pair: pair[1])[-MEMORY_STEER_LIMIT:])
-    return recent, {"action": "block", "message": MEMORY_STEER_MESSAGE}
+    if background is None:
+        background = _background_review()
+    return recent, {"action": "block",
+                    "message": MEMORY_STEER_BACKGROUND_MESSAGE if background else MEMORY_STEER_MESSAGE}

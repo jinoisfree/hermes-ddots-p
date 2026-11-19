@@ -84,6 +84,21 @@ def request_record(r):
 
 def owner_record(home, turn_id, turn, answer, session_id):
     # Only a verified owner DM can supply this turn. Do not infer a subject from the answer.
+    from gateway.session_context import get_session_env as env
+    if env('HERMES_SESSION_PLATFORM', '') == 'hejo':
+        from hermes_owner_chat import current_owner_message_in_session
+        proof = current_owner_message_in_session(home, session_id, env)
+        if proof is None:
+            return
+        message, _ = proof
+        text = message['text']
+        profiles = team.mentioned(text)
+        identifier = hashlib.sha256((str(home)+':'+session_id+':'+str(turn_id)).encode()).hexdigest()
+        record = build(identifier=identifier, source='owner_dm', answer=answer, session_id=session_id,
+                       subject_profile=profiles[0] if len(profiles)==1 else '', user_message=text, evidence=text)
+        record.update(platform='hejo', chat_id=message['chat_id'], thread_id=message['thread_id'], msg_id=message['msg_id'])
+        append(record)
+        return
     path = Path(home) / 'state.db'
     with sqlite3.connect(path.as_uri()+'?mode=ro', uri=True, timeout=2) as db:
         db.execute('PRAGMA query_only=ON')

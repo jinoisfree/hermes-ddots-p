@@ -114,12 +114,12 @@ def _relive(home, data, policy, site, screen, ask, say, path, now, capture, iden
 
     def fail(why):
         record['last_result'] = why
-        _alert(data, say, 'relive', f"*🟡 낙화 CCTV 9번 라이브를 다시 틀지 못했어요*\n  • {why}\n"
-                                   "  • ADT-EYE에서 9번을 직접 눌러 주세요. 오늘은 더 알리지 않아요.")
+        _alert(data, say, 'relive', f"*🟡 낙화 CCTV {site['channel_index']}번 라이브를 다시 틀지 못했어요*\n  • {why}\n"
+                                   f"  • ADT-EYE에서 {site['channel_index']}번을 직접 눌러 주세요. 오늘은 더 알리지 않아요.")
         return capture, identified
 
     if policy.get('relive', 'auto') != 'auto':
-        return fail((f"9번 영상이 {identified.get('osd_time') or '읽을 수 없는 시각'}에서 멈췄어요. " if reason == '영상 멈춤' else reason + '. ')
+        return fail((f"{site['channel_index']}번 영상이 {identified.get('osd_time') or '읽을 수 없는 시각'}에서 멈췄어요. " if reason == '영상 멈춤' else reason + '. ')
                     + '라이브 다시 틀기가 꺼져 있어요.')
     if record['count'] >= policy.get('relive_daily_limit', 10):
         return fail('라이브 다시 틀기 하루 한도에 도달했어요.')

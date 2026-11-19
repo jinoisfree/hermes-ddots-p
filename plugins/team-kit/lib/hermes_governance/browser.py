@@ -1,5 +1,7 @@
 """Unchanged browser policy."""
 from __future__ import annotations
+from hermes_owner_chat import OWNER_CHAT_PLATFORMS
+from hermes_governance.owner_context import current_session_id
 import json, base64, fcntl, hashlib, logging, html, os, re, sqlite3, subprocess, tempfile, sys, threading, time, unicodedata
 from html.parser import HTMLParser
 from datetime import date as date_type, datetime as datetime_type, timedelta
@@ -170,7 +172,7 @@ def _conversation_scopes(services, session_id: str = "") -> list[str]:
     names = [
         str(session_id or "").strip(),
         services.get_session_env("HERMES_SESSION_KEY", "").strip(),
-        services.get_session_env("HERMES_SESSION_ID", "").strip(),
+        current_session_id(services),
         os.environ.get("HERMES_KANBAN_TASK", "").strip(),
         f"{chat_id}:{services.get_session_env('HERMES_SESSION_THREAD_ID', '').strip()}" if chat_id else "",
     ]
@@ -522,7 +524,7 @@ def _mark_unverified_links(services, response_text: Any = "", platform: Any = ""
     so neither a preview nor a tap carries whatever was written into it."""
     profile = (services.get_session_env("HERMES_SESSION_PROFILE", "") or os.environ.get("HERMES_PROFILE") or services._home_profile() or "").strip()
     surface = str(platform or services.get_session_env("HERMES_SESSION_PLATFORM", "")).strip().lower()
-    if not services.team.has_role(profile, 'personal') or surface not in {"slack", "photon"} or not isinstance(response_text, str):
+    if not services.team.has_role(profile, 'personal') or surface not in OWNER_CHAT_PLATFORMS or not isinstance(response_text, str):
         return None
     shown = services._shown_addresses(str(session_id or ""))
 

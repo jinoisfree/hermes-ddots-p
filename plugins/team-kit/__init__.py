@@ -15,6 +15,7 @@ _owner_library = str((_OwnerPath(__file__).resolve().parent / 'lib').resolve())
 if _owner_library not in _owner_sys.path:
     _owner_sys.path.insert(0, _owner_library)
 from hermes_facility.owner_text import render as _owner_text
+from hermes_governance.owner_context import bound_hook_ids
 
 
 import copy
@@ -43,8 +44,10 @@ logger = logging.getLogger(__name__)
 if str(Path(__file__).with_name('lib')) not in _sys.path:
     _sys.path.append(str(Path(__file__).with_name('lib')))
 
+from hermes_owner_chat import OWNER_CHAT_PLATFORMS
+
 # Human chat channels only. Tool, cron and kanban sessions hold customer DMs and unattended runs.
-CHAT_SOURCES = ("slack", "photon")
+CHAT_SOURCES = tuple(sorted(OWNER_CHAT_PLATFORMS))
 CHANNEL_LABEL = {"slack": "Slack", "photon": "iMessage"}
 DEFAULTS = {"enabled": True, "hours": 48, "max_messages": 6, "max_chars": 1200, "exclude_tools": []}
 LINE_CHARS = 200
@@ -484,202 +487,203 @@ def _policy_pre_tool_call(tool_name: str = "", args: Any = None, **_: Any) -> di
 
 
 def _pre_tool_call(tool_name: str = "", args: Any = None, session_id: str = "", **context: Any):
-    global _MEMORY_STEER_SEEN, _SECRET_GUARD
-    # Snapshot the original approval digest before a middle guard rewrites args.
-    project_args = copy.deepcopy(args) if isinstance(args, dict) and args.get("approved") is True else args
-    if tool_name in {"read_file", "search_files", "terminal", "execute_code"}:
-        try:
-            import importlib.util
-            from hermes_constants import get_hermes_home
-            from gateway.session_context import get_session_env
-            if _SECRET_GUARD is None:
-                spec = importlib.util.spec_from_file_location("team_kit_secret_guard", Path(__file__).with_name("secret_guard.py"))
-                module = importlib.util.module_from_spec(spec)
-                spec.loader.exec_module(module)
-                _SECRET_GUARD = module
-            configured = _PLUGIN_CONTEXT.get_config("secret_guard", {}) if _PLUGIN_CONTEXT else {}
-            result = _SECRET_GUARD.guard(Path(get_hermes_home()), tool_name=tool_name, args=args,
-                                         configured=configured,
-                                         cwd=context.get("cwd") or get_session_env("HERMES_CWD", "") or None)
-            if result:
-                return result
-        except Exception as exc:
-            logger.warning("team-kit secret guard failed: %s", type(exc).__name__)
-            return {"action": "block", "message": "비밀 파일은 직접 읽지 않는다. 그 파일을 쓰는 전용 도구를 쓴다. 다시 시도해도 같다."}
-    approval = None
-    if _PROJECT_ERROR:
-        return {"action": "block", "message": "프로젝트 도구를 초기화하지 못했다. 설정과 설치 상태를 확인한다."}
-    if _PROJECTS is not None:
-        from hermes_constants import get_hermes_home
-        try:
-            result = _PROJECTS.guard(Path(get_hermes_home()), _PROJECT_LEARNING,
-                                     tool_name=tool_name, args=args, session_id=session_id, claim_approval=False, **context)
-            if result:
-                if result.get("action") != "approve":
-                    return result
-                approval = result
-        except Exception:
-            return {"action": "block", "message": "프로젝트 범위를 확인하지 못했다. 실행을 중단한다."}
-    def _finish_with_project_claim(result):
-        # Rejected calls never spend an approval. Allowed early returns, including
-        # rewritten tool args, must pass the same one-shot claim as the normal tail.
-        if result is not None and result.get("action") not in {"approve", "modify"}:
-            return result
-        if _PROJECTS is not None and isinstance(project_args, dict) and project_args.get("approved") is True:
-            from hermes_constants import get_hermes_home
-            try:
-                claimed = _PROJECTS.guard(Path(get_hermes_home()), _PROJECT_LEARNING,
-                    tool_name=tool_name, args=project_args, session_id=session_id, **context)
-                if claimed:
-                    if claimed.get("action") not in {"approve", "modify"}:
-                        return claimed
-                    if result is None:
-                        result = claimed
-            except Exception:
-                return {"action": "block", "message": "프로젝트 범위를 확인하지 못했다. 실행을 중단한다."}
-        if result is not None and isinstance(args, dict):
-            from hermes_constants import get_hermes_home
-            from importlib.util import spec_from_file_location, module_from_spec
-            spec = spec_from_file_location('team_kit_request_plan', Path(__file__).with_name('request_plan.py'))
-            plans = module_from_spec(spec); spec.loader.exec_module(plans)
-            return plans.gate(Path(get_hermes_home()), tool_name, args, result, dict(context, session_id=session_id))
-        return result
-
-    if str(tool_name) == "skill_manage" and _LEARNING is not None:
-        from tools.skill_provenance import is_background_review
-        if is_background_review():
-            # The core review fork writes skills on its own; learning_self checks and journals it
-            # instead of the chat policy, which keeps skill_manage closed to the conversation.
-            from hermes_constants import get_hermes_home
-            try:
-                home = Path(get_hermes_home())
-                result = _LEARNING.extension("learning_self").guard(home, _LEARNING, args=args, session_id=session_id, **context)
-                if result is None or result.get("action") == "modify":
-                    private = _LEARNING.extension("location_context").guard(
-                        home, tool_name=tool_name, args=(result or {}).get("args", args), session_id=session_id, **context)
-                    if private:
-                        return _finish_with_project_claim(private)
-                return _finish_with_project_claim(result)
-            except Exception as exc:
-                logger.warning("team-kit background skill guard failed: %s", type(exc).__name__)
-                return {"action": "block", "message": "배경 스킬 학습을 확인하지 못했다. 이번에는 스킬을 바꾸지 않는다."}
-    policy_result = _policy_pre_tool_call(tool_name=tool_name, args=args, **context)
-    if policy_result is not None and policy_result.get("action") == "block":
-        return policy_result
-    if str(tool_name) == "cronjob_manage":
-        guard_config = _PLUGIN_CONTEXT.get_config("cron_guard", {}) if _PLUGIN_CONTEXT else {}
-        if isinstance(guard_config, dict) and guard_config.get("enabled") is True:
+    with bound_hook_ids(session_id,context.get('turn_id',''),context.get('tool_call_id','')):
+        global _MEMORY_STEER_SEEN, _SECRET_GUARD
+        # Snapshot the original approval digest before a middle guard rewrites args.
+        project_args = copy.deepcopy(args) if isinstance(args, dict) and args.get("approved") is True else args
+        if tool_name in {"read_file", "search_files", "terminal", "execute_code"}:
             try:
                 import importlib.util
-                from gateway.session_context import get_session_env
                 from hermes_constants import get_hermes_home
-                spec = importlib.util.spec_from_file_location("team_kit_cron_guard", Path(__file__).with_name("cron_guard.py"))
-                guard = importlib.util.module_from_spec(spec)
-                spec.loader.exec_module(guard)
-                home = Path(get_hermes_home())
-                reason = guard.check(guard_config, home, args, kind=_run_kind(), profile=home.name,
-                                     platform=str(get_session_env("HERMES_SESSION_PLATFORM", "")).strip().lower())
-            except Exception as exc:  # an unchecked schedule must not be created
-                logger.warning("team-kit cron guard failed: %s", type(exc).__name__)
-                reason = "예약 관리 호출을 확인하지 못했다. 다시 시도한다."
-            if reason:
-                return {"action": "block", "message": reason}
-    if _FILES is not None and _FILES.manages(_files_config(), str(tool_name)):
-        try:
-            file_result = _FILES.guard(_files_config(), tool_name=str(tool_name), args=args, chat=_run_kind() == "chat")
-        except Exception as exc:  # an unchecked path must not reach the file tools
-            logger.warning("team-kit file guard failed: %s", type(exc).__name__)
-            file_result = ({"action": "block", "message": "파일 경로를 확인하지 못했다. 다시 시도한다."}
-                           if str(tool_name) in _FILES.TOOLS else None)
-        if file_result is not None:
-            if file_result.get("action") != "approve":
-                return _finish_with_project_claim(file_result)
-            approval = file_result
-    if _NOTION is not None and str(tool_name) == "notion":
-        try:
+                from gateway.session_context import get_session_env
+                if _SECRET_GUARD is None:
+                    spec = importlib.util.spec_from_file_location("team_kit_secret_guard", Path(__file__).with_name("secret_guard.py"))
+                    module = importlib.util.module_from_spec(spec)
+                    spec.loader.exec_module(module)
+                    _SECRET_GUARD = module
+                configured = _PLUGIN_CONTEXT.get_config("secret_guard", {}) if _PLUGIN_CONTEXT else {}
+                result = _SECRET_GUARD.guard(Path(get_hermes_home()), tool_name=tool_name, args=args,
+                                             configured=configured,
+                                             cwd=context.get("cwd") or get_session_env("HERMES_CWD", "") or None)
+                if result:
+                    return result
+            except Exception as exc:
+                logger.warning("team-kit secret guard failed: %s", type(exc).__name__)
+                return {"action": "block", "message": "비밀 파일은 직접 읽지 않는다. 그 파일을 쓰는 전용 도구를 쓴다. 다시 시도해도 같다."}
+        approval = None
+        if _PROJECT_ERROR:
+            return {"action": "block", "message": "프로젝트 도구를 초기화하지 못했다. 설정과 설치 상태를 확인한다."}
+        if _PROJECTS is not None:
             from hermes_constants import get_hermes_home
-            notion_result = _NOTION.guard(_notion_config(), Path(get_hermes_home()), tool_name="notion", args=args,
-                                 chat=_run_kind() == "chat", files_config=_files_config(), call_id=context.get("tool_call_id", ""))
-            if notion_result is not None:
-                if notion_result.get("action") != "approve":
-                    return _finish_with_project_claim(notion_result)
-                approval = notion_result
-        except Exception as exc:  # an unchecked change must not reach Notion
-            logger.warning("team-kit notion guard failed: %s", type(exc).__name__)
-            return {"action": "block", "message": "Notion 호출을 확인하지 못했다. 다시 시도한다."}
-    configured = _PLUGIN_CONTEXT.get_config("learning", {}) if _PLUGIN_CONTEXT else {}
-    if (_LEARNING is not None and isinstance(configured, dict)
-            and isinstance(configured.get("recall"), dict)
-            and configured["recall"].get("enabled") is True and _run_kind() == "chat"):
-        try:
-            from hermes_constants import get_hermes_home
-            home = Path(get_hermes_home())
-            required = _LEARNING.extension("memory_live").guard(
-                home, _LEARNING, tool_name=tool_name, args=args, session_id=session_id, **context)
-            if required:
-                if required.get("action") != "approve":
-                    return _finish_with_project_claim(required)
-                approval = required
-            if tool_name == "memory":
-                recall = _LEARNING.extension("memory_recall")
+            try:
+                result = _PROJECTS.guard(Path(get_hermes_home()), _PROJECT_LEARNING,
+                                         tool_name=tool_name, args=args, session_id=session_id, claim_approval=False, **context)
+                if result:
+                    if result.get("action") != "approve":
+                        return result
+                    approval = result
+            except Exception:
+                return {"action": "block", "message": "프로젝트 범위를 확인하지 못했다. 실행을 중단한다."}
+        def _finish_with_project_claim(result):
+            # Rejected calls never spend an approval. Allowed early returns, including
+            # rewritten tool args, must pass the same one-shot claim as the normal tail.
+            if result is not None and result.get("action") not in {"approve", "modify"}:
+                return result
+            if _PROJECTS is not None and isinstance(project_args, dict) and project_args.get("approved") is True:
+                from hermes_constants import get_hermes_home
                 try:
-                    recall.owner(home, session_id, _LEARNING)
-                except ValueError:
-                    pass
-                else:
-                    recall.snapshot(home, _LEARNING)
-        except Exception as exc:
-            logger.warning("team-kit memory prerequisite failed: %s", type(exc).__name__)
-            return {"action": "block", "message": "현재 기억·업무 스킬을 확인하지 못했다. 원본 상태를 확인한 뒤 재시도한다."}
-    if _LEARNING is not None:
-        guard_name = "location"
-        try:
-            from hermes_constants import get_hermes_home
-            private_location = _LEARNING.extension("location_context").guard(
-                Path(get_hermes_home()), tool_name=tool_name, args=args, session_id=session_id, **context)
-            if private_location:
-                if private_location.get("action") != "approve":
-                    return _finish_with_project_claim(private_location)
-                approval = private_location
-            guard_name = "diagnosis"
-            diagnosis = _LEARNING.extension("diagnosis_runtime").guard(
-                Path(get_hermes_home()), _LEARNING, tool_name=tool_name, args=args, session_id=session_id, **context)
-            if diagnosis:
-                if diagnosis.get("action") != "approve":
-                    return _finish_with_project_claim(diagnosis)
-                approval = diagnosis
-            guard_name = "work"
-            work = _LEARNING.extension("work_runtime").guard(
-                Path(get_hermes_home()), _LEARNING, tool_name=tool_name, args=args, session_id=session_id, **context)
-            if work:
-                if work.get("action") != "approve":
-                    return _finish_with_project_claim(work)
-                approval = work
-        except Exception as exc:
-            logger.warning("team-kit %s guard failed: %s: %s", guard_name, type(exc).__name__, str(exc))
-            return {"action":"block", "message":"작업 인계·원문 범위를 확인하지 못했다. 실제 사용자 요청과 저장 상태를 확인한다."}
-    decision = approval if approval is not None else policy_result
-    finished = _finish_with_project_claim(decision)
-    if decision is not None or finished is not None:
-        return finished
-    try:
+                    claimed = _PROJECTS.guard(Path(get_hermes_home()), _PROJECT_LEARNING,
+                        tool_name=tool_name, args=project_args, session_id=session_id, **context)
+                    if claimed:
+                        if claimed.get("action") not in {"approve", "modify"}:
+                            return claimed
+                        if result is None:
+                            result = claimed
+                except Exception:
+                    return {"action": "block", "message": "프로젝트 범위를 확인하지 못했다. 실행을 중단한다."}
+            if result is not None and isinstance(args, dict):
+                from hermes_constants import get_hermes_home
+                from importlib.util import spec_from_file_location, module_from_spec
+                spec = spec_from_file_location('team_kit_request_plan', Path(__file__).with_name('request_plan.py'))
+                plans = module_from_spec(spec); spec.loader.exec_module(plans)
+                return plans.gate(Path(get_hermes_home()), tool_name, args, result, dict(context, session_id=session_id))
+            return result
+
+        if str(tool_name) == "skill_manage" and _LEARNING is not None:
+            from tools.skill_provenance import is_background_review
+            if is_background_review():
+                # The core review fork writes skills on its own; learning_self checks and journals it
+                # instead of the chat policy, which keeps skill_manage closed to the conversation.
+                from hermes_constants import get_hermes_home
+                try:
+                    home = Path(get_hermes_home())
+                    result = _LEARNING.extension("learning_self").guard(home, _LEARNING, args=args, session_id=session_id, **context)
+                    if result is None or result.get("action") == "modify":
+                        private = _LEARNING.extension("location_context").guard(
+                            home, tool_name=tool_name, args=(result or {}).get("args", args), session_id=session_id, **context)
+                        if private:
+                            return _finish_with_project_claim(private)
+                    return _finish_with_project_claim(result)
+                except Exception as exc:
+                    logger.warning("team-kit background skill guard failed: %s", type(exc).__name__)
+                    return {"action": "block", "message": "배경 스킬 학습을 확인하지 못했다. 이번에는 스킬을 바꾸지 않는다."}
+        policy_result = _policy_pre_tool_call(tool_name=tool_name, args=args, **context)
+        if policy_result is not None and policy_result.get("action") == "block":
+            return policy_result
+        if str(tool_name) == "cronjob_manage":
+            guard_config = _PLUGIN_CONTEXT.get_config("cron_guard", {}) if _PLUGIN_CONTEXT else {}
+            if isinstance(guard_config, dict) and guard_config.get("enabled") is True:
+                try:
+                    import importlib.util
+                    from gateway.session_context import get_session_env
+                    from hermes_constants import get_hermes_home
+                    spec = importlib.util.spec_from_file_location("team_kit_cron_guard", Path(__file__).with_name("cron_guard.py"))
+                    guard = importlib.util.module_from_spec(spec)
+                    spec.loader.exec_module(guard)
+                    home = Path(get_hermes_home())
+                    reason = guard.check(guard_config, home, args, kind=_run_kind(), profile=home.name,
+                                         platform=str(get_session_env("HERMES_SESSION_PLATFORM", "")).strip().lower())
+                except Exception as exc:  # an unchecked schedule must not be created
+                    logger.warning("team-kit cron guard failed: %s", type(exc).__name__)
+                    reason = "예약 관리 호출을 확인하지 못했다. 다시 시도한다."
+                if reason:
+                    return {"action": "block", "message": reason}
+        if _FILES is not None and _FILES.manages(_files_config(), str(tool_name)):
+            try:
+                file_result = _FILES.guard(_files_config(), tool_name=str(tool_name), args=args, chat=_run_kind() == "chat")
+            except Exception as exc:  # an unchecked path must not reach the file tools
+                logger.warning("team-kit file guard failed: %s", type(exc).__name__)
+                file_result = ({"action": "block", "message": "파일 경로를 확인하지 못했다. 다시 시도한다."}
+                               if str(tool_name) in _FILES.TOOLS else None)
+            if file_result is not None:
+                if file_result.get("action") != "approve":
+                    return _finish_with_project_claim(file_result)
+                approval = file_result
+        if _NOTION is not None and str(tool_name) == "notion":
+            try:
+                from hermes_constants import get_hermes_home
+                notion_result = _NOTION.guard(_notion_config(), Path(get_hermes_home()), tool_name="notion", args=args,
+                                     chat=_run_kind() == "chat", files_config=_files_config(), call_id=context.get("tool_call_id", ""))
+                if notion_result is not None:
+                    if notion_result.get("action") != "approve":
+                        return _finish_with_project_claim(notion_result)
+                    approval = notion_result
+            except Exception as exc:  # an unchecked change must not reach Notion
+                logger.warning("team-kit notion guard failed: %s", type(exc).__name__)
+                return {"action": "block", "message": "Notion 호출을 확인하지 못했다. 다시 시도한다."}
         configured = _PLUGIN_CONTEXT.get_config("learning", {}) if _PLUGIN_CONTEXT else {}
-        if (tool_name != "memory" or not isinstance(configured, dict)
-                or configured.get("enabled") is not True or _LEARNING is None or _run_kind() != "chat"):
+        if (_LEARNING is not None and isinstance(configured, dict)
+                and isinstance(configured.get("recall"), dict)
+                and configured["recall"].get("enabled") is True and _run_kind() == "chat"):
+            try:
+                from hermes_constants import get_hermes_home
+                home = Path(get_hermes_home())
+                required = _LEARNING.extension("memory_live").guard(
+                    home, _LEARNING, tool_name=tool_name, args=args, session_id=session_id, **context)
+                if required:
+                    if required.get("action") != "approve":
+                        return _finish_with_project_claim(required)
+                    approval = required
+                if tool_name == "memory":
+                    recall = _LEARNING.extension("memory_recall")
+                    try:
+                        recall.owner(home, session_id, _LEARNING)
+                    except ValueError:
+                        pass
+                    else:
+                        recall.snapshot(home, _LEARNING)
+            except Exception as exc:
+                logger.warning("team-kit memory prerequisite failed: %s", type(exc).__name__)
+                return {"action": "block", "message": "현재 기억·업무 스킬을 확인하지 못했다. 원본 상태를 확인한 뒤 재시도한다."}
+        if _LEARNING is not None:
+            guard_name = "location"
+            try:
+                from hermes_constants import get_hermes_home
+                private_location = _LEARNING.extension("location_context").guard(
+                    Path(get_hermes_home()), tool_name=tool_name, args=args, session_id=session_id, **context)
+                if private_location:
+                    if private_location.get("action") != "approve":
+                        return _finish_with_project_claim(private_location)
+                    approval = private_location
+                guard_name = "diagnosis"
+                diagnosis = _LEARNING.extension("diagnosis_runtime").guard(
+                    Path(get_hermes_home()), _LEARNING, tool_name=tool_name, args=args, session_id=session_id, **context)
+                if diagnosis:
+                    if diagnosis.get("action") != "approve":
+                        return _finish_with_project_claim(diagnosis)
+                    approval = diagnosis
+                guard_name = "work"
+                work = _LEARNING.extension("work_runtime").guard(
+                    Path(get_hermes_home()), _LEARNING, tool_name=tool_name, args=args, session_id=session_id, **context)
+                if work:
+                    if work.get("action") != "approve":
+                        return _finish_with_project_claim(work)
+                    approval = work
+            except Exception as exc:
+                logger.warning("team-kit %s guard failed: %s: %s", guard_name, type(exc).__name__, str(exc))
+                return {"action":"block", "message":"작업 인계·원문 범위를 확인하지 못했다. 실제 사용자 요청과 저장 상태를 확인한다."}
+        decision = approval if approval is not None else policy_result
+        finished = _finish_with_project_claim(decision)
+        if decision is not None or finished is not None:
+            return finished
+        try:
+            configured = _PLUGIN_CONTEXT.get_config("learning", {}) if _PLUGIN_CONTEXT else {}
+            if (tool_name != "memory" or not isinstance(configured, dict)
+                    or configured.get("enabled") is not True or _LEARNING is None or _run_kind() != "chat"):
+                return None
+            from gateway.session_context import get_session_env
+            if str(get_session_env("HERMES_SESSION_PLATFORM", "")).strip().lower() != "slack":
+                return None
+            from hermes_constants import get_hermes_home
+            scoped_session = (str(get_hermes_home()), session_id) if session_id else ""
+            with _MEMORY_STEER_LOCK:
+                _MEMORY_STEER_SEEN, result = _LEARNING.memory_steer(
+                    _MEMORY_STEER_SEEN, scoped_session, args, time.time())
+            if result:
+                logger.info("team-kit memory steering: session_id=%s", session_id)
+            return result
+        except Exception:
             return None
-        from gateway.session_context import get_session_env
-        if str(get_session_env("HERMES_SESSION_PLATFORM", "")).strip().lower() != "slack":
-            return None
-        from hermes_constants import get_hermes_home
-        scoped_session = (str(get_hermes_home()), session_id) if session_id else ""
-        with _MEMORY_STEER_LOCK:
-            _MEMORY_STEER_SEEN, result = _LEARNING.memory_steer(
-                _MEMORY_STEER_SEEN, scoped_session, args, time.time())
-        if result:
-            logger.info("team-kit memory steering: session_id=%s", session_id)
-        return result
-    except Exception:
-        return None
 
 
 BROWSER_LAUNCHER = Path.home() / ".hermes" / "bin" / "hermes-browser"
@@ -1487,10 +1491,11 @@ def _register_opinion(ctx):
 
 
 def _notion_approval_arguments(tool_name='', args=None, **context):
-    if (_NOTION is None or tool_name != 'notion' or not isinstance(args, dict)
-            or not _NOTION.enabled(_notion_config())):
-        return None
-    from hermes_constants import get_hermes_home
-    home = Path(get_hermes_home())
-    if not _NOTION.needs_snapshot(_notion_config(), home, args): return None
-    return _NOTION.approval_arguments(home, args, context.get('tool_call_id', ''))
+    with bound_hook_ids(context.get('session_id',''),context.get('turn_id',''),context.get('tool_call_id','')):
+        if (_NOTION is None or tool_name != 'notion' or not isinstance(args, dict)
+                or not _NOTION.enabled(_notion_config())):
+            return None
+        from hermes_constants import get_hermes_home
+        home = Path(get_hermes_home())
+        if not _NOTION.needs_snapshot(_notion_config(), home, args): return None
+        return _NOTION.approval_arguments(home, args, context.get('tool_call_id', ''))

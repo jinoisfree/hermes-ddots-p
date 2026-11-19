@@ -123,9 +123,70 @@ SCHEMA = {'name': 'report_status', 'description': NOTE, 'parameters': {'type': '
     'required': ['state']}}
 
 
+async def mark_hejo(adapter, source, state):
+    if state not in STATES:
+        raise ValueError('state는 pending|partial|done|declined|failed 중 하나야.')
+    chat, thread, profile = source.chat_id, source.thread_id, source.profile
+    if source.user_id != 'owner':
+        raise ValueError('소유자 대화에서만 보고 상태를 바꿀 수 있어.')
+    if not thread:
+        raise ValueError('보고 스레드 안에서만 쓸 수 있어.')
+    message = await adapter.first_thread_message(chat, thread, metadata={'hermes_profile': profile})
+    if not message:
+        raise ValueError('보고 메시지를 찾지 못했어.')
+    mark, _, _, final = STATES[state]
+    text = message['text']
+    heading = re.match(r'^[ \t]*(?:#{1,6}[ \t]+)?\*{0,2}', text)[0]
+    rest = text[len(heading):]
+    match = _MARK.match(rest)
+    text = heading + mark + ' ' + (rest[match.end():] if match else rest)
+    result = await adapter.edit_message(chat, message['msg_id'], text, finalize=True,
+        metadata={'hermes_profile': profile, '_hermes_report_status': True, **({'hejo_buttons': []} if final else {})})
+    if not result.success:
+        raise ValueError('보고 상태를 바꾸지 못했어.')
+    await adapter.set_reply_state(message['msg_id'],
+        'closed' if final else 'answered' if state == 'partial' else 'asked')
+
+
+def _hejo_status(home, args, session_id):
+    import asyncio
+    from gateway.session_context import get_session_env
+    from hermes_reply.plugin import current_hejo_turn
+    binding = current_hejo_turn()
+    if not binding:
+        raise ValueError('현재 hejo 대화 연결을 확인하지 못했어.')
+    adapter, event, loop = binding
+    source = event.source
+    # A queued request can inherit the adapter binding. The official current turn
+    # must still name the same owner, profile and conversation; never route by tool arguments.
+    expected = {'PLATFORM': 'hejo', 'CHAT_ID': source.chat_id, 'THREAD_ID': source.thread_id,
+                'USER_ID': source.user_id, 'PROFILE': source.profile}
+    from hermes_owner_chat import current_owner_message_in_session
+    if (event.internal or get_session_env('HERMES_CRON_SESSION', '') == '1' or any(str(get_session_env('HERMES_SESSION_'+key, '') or '') != str(value or '')
+                              for key, value in expected.items()) or
+            current_owner_message_in_session(home, session_id, get_session_env) is None):
+        raise ValueError('현재 hejo 요청과 보고 대화가 일치하지 않아.')
+    try:
+        active_loop = asyncio.get_running_loop()
+    except RuntimeError:
+        active_loop = None
+    if active_loop is loop or loop.is_closed():
+        raise ValueError('보고 상태 실행 연결을 확인하지 못했어.')
+    future = asyncio.run_coroutine_threadsafe(mark_hejo(adapter, source, args.get('state', '')), loop)
+    try:
+        future.result(timeout=10)
+    except TimeoutError:
+        future.cancel()
+        raise ValueError('보고 상태 확인 시간이 지났어.') from None
+
+
 def handle(home, args, base, session_id='', **_):
     """Tool: repaint the root of the current owner Slack thread, only if this bot posted it."""
     try:
+        from gateway.session_context import get_session_env
+        if get_session_env('HERMES_SESSION_PLATFORM', '') == 'hejo':
+            _hejo_status(home, args, session_id)
+            return json.dumps({'ok': True, 'status_updated': True, 'state': args.get('state')}, ensure_ascii=False)
         src = base.learning.source(home, session_id, allow_approval=True)
         channel, thread = src.get('chat_id', ''), src.get('thread_id', '')
         if src.get('user_id') != base.owner(home):

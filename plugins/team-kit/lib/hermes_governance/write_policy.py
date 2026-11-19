@@ -3,6 +3,7 @@
 Operations are declared by contracts or by the owning pack. Caller arguments
 such as approved=True never confer authority. Unclassified actions are external.
 """
+from hermes_owner_chat import OWNER_CHAT_PLATFORMS
 from hermes_governance.contracts import build_APP_OPERATIONS
 from pathlib import Path
 
@@ -64,7 +65,10 @@ def owner_chat(home, env):
     from hermes_facility.config_assembly import CONFIG, yaml_load
     if background(env): return False
     platform, user = env('HERMES_SESSION_PLATFORM', '').lower(), env('HERMES_SESSION_USER_ID', '')
-    if platform not in ('slack', 'photon') or not user or not env('HERMES_SESSION_CHAT_ID', ''): return False
+    if platform not in OWNER_CHAT_PLATFORMS or not user or not env('HERMES_SESSION_CHAT_ID', ''): return False
+    # hejo authenticates paired devices and emits only the owner identity (D50-01).
+    # Forwarder profile homes intentionally have no independent channel allow-list.
+    if platform == 'hejo': return user == 'owner'
     config_path = Path(home) / 'config.yaml'
     if not config_path.is_file(): return False
     config = yaml_load(config_path.read_bytes(), CONFIG)

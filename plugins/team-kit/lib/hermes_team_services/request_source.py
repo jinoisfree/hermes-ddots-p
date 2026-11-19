@@ -25,6 +25,9 @@ def current(home, learning):
 
 
 def verified(home, learning, row, session_id):
+    from gateway.session_context import get_session_env as env
+    if env('HERMES_SESSION_PLATFORM', '') == 'hejo':
+        return learning.hejo_source(home, session_id)
     record = current(home, learning)
     if not record:
         return None
@@ -39,5 +42,12 @@ def verified(home, learning, row, session_id):
 
 
 def text(home, learning, fallback):
+    from gateway.session_context import get_session_env as env
+    if env('HERMES_SESSION_PLATFORM', '') == 'hejo':
+        from hermes_owner_chat import current_owner_message
+        message = current_owner_message(env)
+        if message is None:
+            raise ValueError('Current owner original message is unavailable.')
+        return message['text']
     record = current(home, learning)
     return record['text'] if record else learning.extension('work_runtime').clean_request(fallback)

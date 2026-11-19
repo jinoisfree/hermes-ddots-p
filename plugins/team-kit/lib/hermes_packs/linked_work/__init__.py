@@ -1,5 +1,6 @@
 """Linked work execution with injected account, scope and approval services."""
 from __future__ import annotations
+from hermes_governance.owner_context import current_session_id
 import uuid
 import json, base64, fcntl, hashlib, logging, html, os, re, sqlite3, subprocess, tempfile, sys, threading, time, unicodedata
 from html.parser import HTMLParser
@@ -181,7 +182,7 @@ def _bundle_key(services, payload_digest: str) -> str:
         "message_id": services.get_session_env("HERMES_SESSION_MESSAGE_ID", "").strip(),
     }
     if not identity["message_id"]:
-        identity["message_id"] = services.get_session_env("HERMES_SESSION_ID", "").strip()
+        identity["message_id"] = current_session_id(services)
     canonical = json.dumps(identity, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(f"{canonical}\x1f{payload_digest}".encode("utf-8")).hexdigest()
 
@@ -380,7 +381,7 @@ def _personal_rollback_conversation(services) -> dict[str, str]:
         "user_id": services.get_session_env("HERMES_SESSION_USER_ID", "").strip(),
         "session_id": (
             "" if services.get_session_env("HERMES_SESSION_CHAT_ID", "").strip()
-            else services.get_session_env("HERMES_SESSION_ID", "").strip()
+            else current_session_id(services)
         ),
     }
 
@@ -606,6 +607,10 @@ def _link_bundle_sources(services,
     )
 
 def _task_capture_owner_chat(services):
+    if services.get_session_env('HERMES_SESSION_PLATFORM', '') == 'hejo':
+        from hermes_owner_chat import current_owner_message
+        return (services.team.has_role(services._common_work_profile(), 'work')
+                and current_owner_message(services.get_session_env) is not None)
     flags = ('HERMES_CRON_SESSION', 'HERMES_SINGLE_QUERY_SESSION', 'HERMES_KANBAN_TASK')
     return (services.team.has_role(services._common_work_profile(), 'work')
             and services.get_session_env('HERMES_SESSION_PLATFORM', '') in {'slack', 'photon'}
@@ -900,7 +905,11 @@ def _common_work_get(services, args: dict[str, Any], **_: Any) -> str:
                 domain=requested_domain, source_id=str(args["source_id"])
             )
         else:
-            return services._common_work_error("common_id or domain plus source_id is required")
+            return services._common_work_error(
+                "common_id or domain plus source_id is required; this tool reads one work and does not list works. "
+                "Retry with a common_id you already have (scheduled-job candidates, a linked item's common_work, "
+                "or an earlier result), or with domain and source_id."
+            )
     except (services.CommonWorkError, sqlite3.Error) as exc:
         return services._common_work_error(str(exc))
     return json.dumps({"ok": True, "item": item}, ensure_ascii=False)
@@ -1071,7 +1080,7 @@ def _mail_work(services, args, **_):
             return json.dumps(services.mail_work.link(services._common_work_store(), args), ensure_ascii=False)
         if action == 'guide':
             return json.dumps(services.mail_work.guide(services._common_work_store(), args,
-                                              session_id=services.get_session_env('HERMES_SESSION_ID', '')), ensure_ascii=False)
+                                              session_id=current_session_id(services)), ensure_ascii=False)
         if action == 'guide_clear':
             return json.dumps(services.mail_work.guide_clear(services._common_work_store(), args), ensure_ascii=False)
         return services._error('action must be match, link, guide or guide_clear')

@@ -13,6 +13,7 @@ _owner_library = str((_OwnerPath(__file__).resolve().parent / '../..').resolve()
 if _owner_library not in _owner_sys.path:
     _owner_sys.path.insert(0, _owner_library)
 from hermes_facility.owner_text import render as _owner_text
+from hermes_owner_chat import OWNER_CHAT_PLATFORMS
 
 
 import hashlib
@@ -323,7 +324,7 @@ def role_problem(td, action: str) -> str | None:
     env = lambda key: td.get_session_env(key, '') or td.os.environ.get(key, '')
     if any(env(flag) for flag in ('HERMES_CRON_SESSION', 'HERMES_SINGLE_QUERY_SESSION', 'HERMES_KANBAN_TASK')):
         return 'MAIL_WORK_BACKGROUND_REFUSED: 예약·배경에서는 match만 한다.'
-    if (env('HERMES_SESSION_PLATFORM') not in {'slack', 'photon'} or not env('HERMES_SESSION_USER_ID')
+    if (env('HERMES_SESSION_PLATFORM') not in OWNER_CHAT_PLATFORMS or not env('HERMES_SESSION_USER_ID')
             or not env('HERMES_SESSION_CHAT_ID')):
         return 'MAIL_WORK_OWNER_CHAT_REQUIRED: link·guide는 인증된 소유자 대화에서만 한다.'
     return None

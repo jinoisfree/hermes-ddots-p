@@ -430,10 +430,10 @@ def rollback_plan(n, home, args, opener):
         if not entry.get('undo_ready') or not entry.get('inverse') or entry.get('limitations'):
             raise n.NotionError('최근 API 변경의 완전한 자동 복원을 보장할 수 없습니다. report와 저장된 원본을 확인하세요.')
         from hermes_governance import notion_undo
-        if entry.get('created_page') is not None and notion_undo.page(n,home,entry['result']['id'],opener,version=n.UPLOAD_VERSION)!=entry['created_page']:
+        if entry.get('created_page') is not None and stable(notion_undo.page(n,home,entry['result']['id'],opener,version=n.UPLOAD_VERSION))!=stable(entry['created_page']):
             raise n.NotionError('그 사이 새 Notion 페이지가 바뀌어 삭제하지 않습니다.')
         for identifier,saved in entry.get('created_blocks',{}).items():
-            if notion_undo.tree(n,home,identifier,opener,version=n.UPLOAD_VERSION)!=saved:raise n.NotionError('그 사이 추가 본문이 바뀌어 삭제하지 않습니다.')
+            if stable(notion_undo.tree(n,home,identifier,opener,version=n.UPLOAD_VERSION))!=stable(saved):raise n.NotionError('그 사이 추가 본문이 바뀌어 삭제하지 않습니다.')
         after = {}
         for path in entry['after']:
             value = read(n, home, path, opener)
@@ -533,23 +533,25 @@ def verified(plan, result, after):
 
 
 def handle(n, config, home, args, files_config, opener, chat, require_snapshot):
-    if config.get('full_api') is not True: raise n.NotionError('이 프로필은 확장 Notion API가 꺼져 있습니다.')
-    if args['action'] == 'api_help': return help_result(args)
-    if not is_write(args):
-        method, path, body = route(n, args)
-        return {'ok': True, 'operation': args['operation'], 'data': request(n, home, method, path, body, opener)}
-    if chat is False: raise n.NotionError('예약·배경 실행에서는 Notion을 변경하지 않습니다.')
-    approved = consume(n, home, args, require_snapshot)
-    plan = api_plan(n, config, home, args, files_config, opener)
-    if approved is not None and approved != plan: raise n.NotionError('실행 전 Notion 원본 또는 파일이 바뀌었습니다. 다시 읽고 합치세요.')
-    who = n.conversation()
+    with n.before_mutation():
+        if config.get('full_api') is not True: raise n.NotionError('이 프로필은 확장 Notion API가 꺼져 있습니다.')
+        if args['action'] == 'api_help': return help_result(args)
+        if not is_write(args):
+            method, path, body = route(n, args)
+            return {'ok': True, 'operation': args['operation'], 'data': request(n, home, method, path, body, opener)}
+        if chat is False: raise n.NotionError('예약·배경 실행에서는 Notion을 변경하지 않습니다.')
+        approved = consume(n, home, args, require_snapshot)
+        plan = api_plan(n, config, home, args, files_config, opener)
+        if approved is not None and stable(approved) != stable(plan): raise n.NotionError('실행 전 Notion 원본 또는 파일이 바뀌었습니다. 다시 읽고 합치세요.')
+        who = n.conversation()
     with n.journal(home) as (data, save):
         entry = {'kind': 'api', 'conversation': who, 'created_at': time.time(), 'title': args['operation'],
                  'key': uuid.uuid4().hex, 'consumed': False, 'status': 'pending', 'operations': [],
                  'request': {k: v for k, v in args.items() if not k.startswith('_')},
                  'before': plan['before'], 'inverse': plan['inverse'], 'inverse_template':plan.get('inverse_template'), 'after': {}, 'limitations': plan['limitations']}
-        rechecked = api_plan(n, config, home, args, files_config, opener)
-        if rechecked != plan: raise n.NotionError('변경 직전 Notion 원본이 바뀌었습니다. 다시 읽고 합치세요.')
+        with n.before_mutation():
+            rechecked = api_plan(n, config, home, args, files_config, opener)
+            if stable(rechecked) != stable(plan): raise n.NotionError('변경 직전 Notion 원본이 바뀌었습니다. 다시 읽고 합치세요.')
         data['entries'].append(entry); save()  # A crash/timeout must leave a durable pending record, never a retryable success.
         try:
             body, content_type = plan['body'], None
@@ -586,15 +588,17 @@ def handle(n, config, home, args, files_config, opener, chat, require_snapshot):
 
 
 def rollback(n, config, home, args, opener, require_snapshot):
-    if n.writable(config) is not None or config.get('rollback_enabled', True) is False: raise n.NotionError('Notion 복원 범위 설정을 확인하세요.')
-    from hermes_governance.notion_undo import selected
-    approved = None if selected() else consume(n, home, args, require_snapshot)
-    plan = rollback_plan(n, home, args, opener)
-    if plan is None: raise n.NotionError('NO_RECENT_NOTION_API_ROLLBACK')
-    if approved is not None and approved != plan: raise n.NotionError('되돌릴 기록 또는 현재 값이 바뀌었습니다.')
+    with n.before_mutation():
+        if n.writable(config) is not None or config.get('rollback_enabled', True) is False: raise n.NotionError('Notion 복원 범위 설정을 확인하세요.')
+        from hermes_governance.notion_undo import selected
+        approved = None if selected() else consume(n, home, args, require_snapshot)
+        plan = rollback_plan(n, home, args, opener)
+        if plan is None: raise n.NotionError('NO_RECENT_NOTION_API_ROLLBACK')
+        if approved is not None and stable(approved) != stable(plan): raise n.NotionError('되돌릴 기록 또는 현재 값이 바뀌었습니다.')
     with n.journal(home) as (data, save):
-        entry = latest(data, n.conversation())
-        if entry['key'] != plan['rollback']: raise n.NotionError('ROLLBACK_KEY_NOT_LATEST')
+        with n.before_mutation():
+            entry = latest(data, n.conversation())
+            if entry['key'] != plan['rollback']: raise n.NotionError('ROLLBACK_KEY_NOT_LATEST')
         results = []
         for s in entry['inverse']:
             if s['state'] == 'done': continue

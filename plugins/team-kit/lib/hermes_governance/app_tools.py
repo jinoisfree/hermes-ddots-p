@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 from hermes_governance import write_policy
+from hermes_governance.owner_context import bound_hook_ids
 
 _NATIVE = ContextVar('app_tool_native_dispatch', default=None)
 _SOURCE = ContextVar('app_tool_source', default=None)
@@ -56,10 +57,11 @@ def native(tool, args):
 def register(ctx, home, name, schema, handler, approval=None):
     ctx.register_tool(name=name, toolset='team-kit', schema=schema, handler=lambda args, **kw: handler(home, args, **kw))
     def gate(tool_name='', args=None, **context):
-        if tool_name != name: return None
-        if approval is not None: return approval(home, args or {})
-        return write_policy.gate(name, args or {}, owner=write_policy.owner_chat(home, env),
-                                 unattended=write_policy.background(env))
+        with bound_hook_ids(context.get('session_id',''),context.get('turn_id',''),context.get('tool_call_id','')):
+            if tool_name != name: return None
+            if approval is not None: return approval(home, args or {})
+            return write_policy.gate(name, args or {}, owner=write_policy.owner_chat(home, env),
+                                     unattended=write_policy.background(env))
     def execution(tool_name, args, next_call, **context):
         if tool_name != name: return next_call(args)
         kind = write_policy.classify(name, args)

@@ -1,5 +1,6 @@
 """Mail execution with injected account, scope and approval services."""
 from __future__ import annotations
+from hermes_owner_chat import OWNER_CHAT_PLATFORMS
 import json
 import hashlib
 import os
@@ -537,7 +538,7 @@ def _gmail_direct(services, args: dict[str, Any], runner: Any = None, mail_runne
         return services._error("MAIL_APP_ACCOUNT_READ_ONLY: other accounts allow lookup/read/thread/download only")
     if other or action == "accounts":
         if not services._company_mail_cron_read(action, account) and (
-            services.get_session_env("HERMES_SESSION_PLATFORM", "").strip().lower() not in {"slack", "photon"}
+            services.get_session_env("HERMES_SESSION_PLATFORM", "").strip().lower() not in OWNER_CHAT_PLATFORMS
             or not services.get_session_env("HERMES_SESSION_CHAT_ID", "").strip()
             or services.personal_scopes.background(services.host)):
             return services._error("MAIL_APP_OWNER_CHAT_REQUIRED")
@@ -555,7 +556,7 @@ def _gmail_direct(services, args: dict[str, Any], runner: Any = None, mail_runne
         # Enforce this even when personal_scopes is not configured; never use Mail app fallback.
         if services.personal_scopes.background(services.host):
             return services._error("PERSONAL_SCOPE_BACKGROUND_REFUSED: 예약·배경에서 라벨·필터 호출은 허용되지 않는다.", mutation_calls=0)
-        if (services.get_session_env("HERMES_SESSION_PLATFORM", "") not in {"slack", "photon"}
+        if (services.get_session_env("HERMES_SESSION_PLATFORM", "") not in OWNER_CHAT_PLATFORMS
                 or not services.get_session_env("HERMES_SESSION_CHAT_ID", "")
                 or not services.get_session_env("HERMES_SESSION_USER_ID", "")):
             return services._error("PERSONAL_SCOPE_OWNER_CHAT_REQUIRED: 라벨·필터는 인증된 소유자 대화에서만 가능하다.", mutation_calls=0)

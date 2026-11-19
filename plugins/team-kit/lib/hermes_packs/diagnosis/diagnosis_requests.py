@@ -8,6 +8,7 @@ _owner_library = str((_OwnerPath(__file__).resolve().parent / '../..').resolve()
 if _owner_library not in _owner_sys.path:
     _owner_sys.path.insert(0, _owner_library)
 from hermes_facility.owner_text import render as _owner_text
+from hermes_owner_chat import OWNER_CHAT_PLATFORMS
 
 from hermes_facility.loading import source_path
 import argparse
@@ -270,7 +271,7 @@ def limit_values(fields):
 
 
 def limit_origin(platform, chat_id, thread_ts, owner):
-    if (platform not in ('slack', 'photon') or
+    if (platform not in OWNER_CHAT_PLATFORMS or
             any(not isinstance(v, str) or not v.strip() or len(v) > 200 or any(c in v for c in '\r\n') for v in (chat_id, owner)) or
             not isinstance(thread_ts, str) or len(thread_ts) > 200):
         raise ValueError('Invalid limit record origin')
