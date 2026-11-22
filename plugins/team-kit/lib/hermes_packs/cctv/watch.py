@@ -20,6 +20,7 @@ PROPOSED = ('준비중', '진행중')
 # How far each situation name is along: a proposal never replaces a later situation, nor a variant of its own.
 PROGRESS = {'준비중': 1, '진행중': 2, '축소진행': 2}
 ADT_EYE_LOST = 'ADT-EYE 화면 아님'
+SHARING_LOST = '맥 화면 공유 끊김'
 RELIVE_REASONS = ('LIVE 아님', '영상 멈춤', '다른 채널', '레이아웃 없음', '빈 화면', 'ADT-EYE 꺼짐')
 LAYOUT_WAIT = 1
 MENU_WAIT = 1
@@ -115,7 +116,7 @@ def _relive(home, data, policy, site, screen, ask, say, path, now, capture, iden
     def fail(why):
         record['last_result'] = why
         _alert(data, say, 'relive', f"*🟡 낙화 CCTV {site['channel_index']}번 라이브를 다시 틀지 못했어요*\n  • {why}\n"
-                                   f"  • ADT-EYE에서 {site['channel_index']}번을 직접 눌러 주세요. 오늘은 더 알리지 않아요.")
+                                   "  • 오늘은 더 알리지 않아요.")
         return capture, identified
 
     if policy.get('relive', 'auto') != 'auto':
@@ -200,7 +201,7 @@ def _relive(home, data, policy, site, screen, ask, say, path, now, capture, iden
         capture = screen.capture(window, path.with_name(path.stem + '-menu.png'))
         found = locate('live')
         if not found['ok']:
-            menu_open = False  # Escape itself is never retried, even if it fails.
+            menu_open = False  # 실패한 Escape는 다시 보내지 않는다(가려져 보내지지 않은 경우만 Session.input이 1회 재시도).
             screen.input(window, 'escape')
             return fail(found['reason'])
         menu_open = False
@@ -236,11 +237,17 @@ def _relive(home, data, policy, site, screen, ask, say, path, now, capture, iden
 def _focus_alert(data, say, error):
     data['last_error'] = {'reason': str(error)}
     _alert(data, say, 'focus', "*🟡 낙화 CCTV 원격 화면 확인 필요*\n"
-           "  • 원격 화면을 앞으로 가져오거나 캡처하지 못했어요. 다른 화면 공간에 있으면 Windows App의 세션 창을 한 번 앞으로 가져와 주세요.\n"
+           f"  • 원격 화면을 앞으로 가져오거나 캡처하지 못했어요: {error}\n"
            "  • 오늘은 더 알리지 않아요.")
 
 def _look(home, data, policy, site, screen, ask, say, path, now, save):
     """Capture and identify only. The scheduled caller owns reconnect proposals."""
+    if not screen.rendering():
+        data['last_error'] = {'reason': SHARING_LOST, 'at': now.isoformat(timespec='seconds')}
+        _alert(data, say, 'screen_sharing', "*🟡 낙화 CCTV 화면이 멈췄어요*\n"
+               "  • 맥 관리자 계정이 화면 앞에 있지 않고 화면 공유도 끊겨 화면이 갱신되지 않아요. "
+               "맥에 관리자 계정으로 로그인해 두거나 화면 공유로 접속해 주세요.")
+        return None, None
     references = reference.photos(home, '기준구도', PHOTOS_PER_LABEL)
     try:
         window, capture = _grab(policy, site, screen, path)
@@ -345,6 +352,10 @@ def tick(home, *, policy, site, now, time_range, situation, screen, ask, proposa
                     capture, proposals, say)
             elif result['identified']:
                 _close_reconnect_asks(proposals, now)
+            if result['reason'] == SHARING_LOST:
+                data['last_run'] = {'slot': slot, 'identified': False,
+                                    'scene': result['scene'], 'reason': SHARING_LOST}
+                return 'no_view'
             if capture is None:
                 return 'no_view'
             outcome = {key: result[key] for key in ('scene', 'reason', 'crop', 'region') if key in result}
@@ -374,7 +385,7 @@ def run(*, time_range, situation, now=None):
     from functools import partial
     from hermes_constants import get_hermes_home
     from hermes_governance import proposal_decisions
-    from hermes_team_services import load
+    from hermes_team_services import load, delivery as D
     from pathlib import Path
     from types import SimpleNamespace
     from . import screen as screen_module, settings
@@ -388,6 +399,8 @@ def run(*, time_range, situation, now=None):
     slack = partial(reports.slack, home)
 
     def say(text):
+        if D.platform(home) == 'hejo':
+            return D.post(home, site['customer_room'], **D.presentation({'text': text}))
         slack('chat.postMessage', {'channel': site['customer_room'], 'text': text, 'unfurl_links': False})
 
     def device_screen():

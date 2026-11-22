@@ -56,7 +56,11 @@ def policy(root=None):
 
 def site():
     """Windows App device, site and channel labels, and the room proposals go to, from the owner vault."""
-    values = {key.split('.')[-1]: owner_vault.text(key) for key in VAULT_TEXTS}
+    from hermes_constants import get_hermes_home
+    from hermes_team_services import delivery as D
+    values = {key.split('.')[-1]: (D.target(get_hermes_home(), 'customer_room',
+              slack=lambda: owner_vault.text(key)) if key == 'channels.customer_room'
+              else owner_vault.text(key)) for key in VAULT_TEXTS}
     missing = [key for key in VAULT_TEXTS if not values[key.split('.')[-1]]]
     if missing:
         raise SettingsError('CCTV_VAULT_MISSING:' + ','.join(missing))

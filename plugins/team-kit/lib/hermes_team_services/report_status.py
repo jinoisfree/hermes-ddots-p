@@ -195,7 +195,11 @@ def handle(home, args, base, session_id='', **_):
             raise ValueError('보고 스레드 안에서만 쓸 수 있어.')
         if not (src.get('chat_type') == 'dm' or channel in REPORT_CHANNELS):
             raise ValueError(_owner_text('<<report_room>>·<<learning_room>>·<<customers_name>>방·소유자 DM의 보고 스레드에서만 쓸 수 있어.'))
-        slack = lambda method, body: base.slack(home, method, body)
+        from hermes_team_services import delivery
+        if delivery.platform(home) == 'hejo':
+            slack = lambda method, body: base.retained_slack(home, method, body, route='slack_session')
+        else:
+            slack = lambda method, body: base.slack(home, method, body)
         bot = slack('auth.test', {}).get('user_id')
         mark(slack, channel, thread, args.get('state', ''), args.get('note', ''), bot_user=bot)
         return json.dumps({'ok': True, 'status_updated': True, 'state': args.get('state')}, ensure_ascii=False)

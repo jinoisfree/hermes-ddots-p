@@ -1,4 +1,4 @@
-"""Hourly source-based news delivery for sns-manager. State contains IDs, never articles."""
+"""Hourly source-based news delivery for sns-manager. State contains IDs and pending native notification receipts; source articles are not retained."""
 from __future__ import annotations
 
 # Owner-specific text is rendered from private policy; public source stays generic.
@@ -25,6 +25,8 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
+from hermes_team_services import delivery as D
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 import importlib.util as _ilu, pathlib as _pl, sys as _sys
@@ -122,6 +124,8 @@ def fetch(source, opener=None):
 
 
 def fetch_x(home, source, clock=time.time, module=None):
+    from hermes_facility.connections import home_service_enabled
+    if not home_service_enabled(home,'x'):return []
     account = source.get('account')
     if not isinstance(account, str) or not re.fullmatch(r'[A-Za-z0-9_]{1,15}', account):
         raise WatchError('invalid_x_account')
@@ -287,6 +291,8 @@ def with_blocks(body, update=False):
 
 
 def slack(home, method, body, opener=urllib.request.urlopen):
+    if D.platform(home) == 'hejo':
+        raise WatchError('slack_write_disabled')
     if method in {'chat.postMessage', 'chat.update'}:
         body = with_blocks(body, update=method == 'chat.update')
     token = env_value(home, 'SLACK_BOT_TOKEN')
@@ -312,6 +318,10 @@ def report_room(home):
 
 
 def sender(home):
+    if D.platform(home) == 'hejo':
+        destination = D.target(home, 'reports', slack=lambda: report_room(home), fallback=True)
+        # Health/login alerts already reserve their occurrence before calling this.
+        return lambda text: D.post(home, destination, **D.presentation({'text': text}))['msg_id']
     owner = env_value(home, 'SLACK_ALLOWED_USERS').split(',')
     if len(owner) != 1 or not re.fullmatch(r'U[A-Z0-9]+', owner[0].strip()):
         raise WatchError('single_owner_required')
@@ -375,7 +385,8 @@ def schedule_status(config, now, no_post=False):
     return None
 
 
-def process(config, state, *, reader, translator, send, persist, now, no_post=False, replay=None, since_hours=None):
+def process(config, state, *, reader, translator, send, persist, now, no_post=False, replay=None, since_hours=None, home=None):
+    native = home is not None and D.platform(home) == "hejo"
     state = copy.deepcopy(state)
     report = {'at_kst': datetime.fromtimestamp(now, KST).isoformat(), 'checked': 0, 'baseline': 0, 'sent': 0, 'failed': 0, 'skipped': 0}
     if not isinstance(config, dict) or config.get('enabled') is not True or not config.get('sources'):
@@ -390,8 +401,33 @@ def process(config, state, *, reader, translator, send, persist, now, no_post=Fa
         append_bounded(record['seen'], item['id'])
         record['attempts'].pop(item['id'], None)
         if notified: append_bounded(state['notified_links'], normalize_link(item.get('external_url')))
+    def deliver_native():
+        notice = state['inflight']
+        try:
+            receipt = D.post(home, notice['target'], client_id=notice['client_id'],
+                             state=notice['delivery'], save=commit, **notice['body'])
+            report['sent'] += 1
+        except D.Refused as exc:
+            if not exc.permanent:
+                raise
+            state['delivery_error'] = exc.error
+            report['failed'] += 1
+        for row in notice['records']:
+            mark(state['sources'][row['source']], row, True)
+        state.pop('inflight')
+        commit()
+
     def deliver(text, records):
-        # Persist intent separately; an interrupted write is never replayed on restart.
+        if native:
+            state['inflight'] = {'platform': 'hejo', 'client_id': 'news:' + uuid.uuid4().hex,
+                'target': D.target(home, 'reports', slack=lambda: report_room(home), fallback=True),
+                'body': D.presentation({'text': text}), 'delivery': {},
+                'records': [{'source': key, 'id': item['id'], 'external_url': item.get('external_url', '')}
+                            for key, item in records]}
+            commit()
+            deliver_native()
+            return
+        # Slack's uncertain sends remain at-most-once.
         state['inflight'] = [{'source': key, 'id': item['id'], 'external_url': item.get('external_url', '')}
                              for key, item in records]
         commit()
@@ -407,6 +443,15 @@ def process(config, state, *, reader, translator, send, persist, now, no_post=Fa
         for key, item in records: mark(state['sources'][key], item, True)
         state.pop('inflight', None)
         commit()
+    pending = state.get('inflight')
+    if isinstance(pending, dict) and pending.get('platform') == 'hejo':
+        if not native or no_post:
+            # Rollback/preview must not consume or repost a native occurrence.
+            return dict(report, skipped=1, reason='native_delivery_pending')
+        try:
+            deliver_native()
+        except (OSError, D.Refused):
+            return dict(report, failed=1, error='delivery_pending')
     for attempt in state.pop('inflight', []):
         mark(state['sources'][attempt['source']], attempt, True)
         print('news-watch interrupted_send_not_repeated', flush=True)
@@ -530,6 +575,12 @@ def process(config, state, *, reader, translator, send, persist, now, no_post=Fa
         deliveries.append((text, [(key, item) for key, _, item, _ in extra]))
     for text, records in deliveries:
         try: deliver(text, records)
+        except (OSError, D.Refused) as exc:
+            if not native:
+                raise
+            # Keep this frozen occurrence; another batch cannot replace its intent.
+            report['failed'] += 1
+            return report
         except WatchError: failed_keys.update(key for key, _ in records)
     for key, record in state['sources'].items():
         if record.get('last_check') != now or key in quiet_keys: continue
@@ -574,7 +625,7 @@ def run(home, *, no_post=False, replay=None, since_hours=None, account=None, rea
         state = json.loads(path.read_text()) if path.exists() else {}
         return process(config, state, reader=reader or (lambda s: fetch_x(home, s) if s.get('type') == 'x' else fetch(s)), translator=translator or (lambda items: translate(home, items)),
                        send=send or sender(home), persist=lambda data: save(path, data), now=now,
-                       no_post=no_post, replay=replay, since_hours=since_hours)
+                       no_post=no_post, replay=replay, since_hours=since_hours, home=home)
 
 
 def main(argv=None):

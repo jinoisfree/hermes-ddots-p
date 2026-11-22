@@ -26,6 +26,7 @@ import os
 from pathlib import Path
 import re
 import secrets
+import uuid
 import signal
 import subprocess
 import sys
@@ -34,6 +35,7 @@ from urllib.request import Request, urlopen
 import importlib.util as _ilu, pathlib as _pl, sys as _sys
 from hermes_facility import team_registry as team
 from hermes_facility import owner_vault as vault
+from hermes_team_services import delivery as D
 
 logger = logging.getLogger(__name__)
 KST = ZoneInfo('Asia/Seoul')
@@ -71,7 +73,10 @@ WORK_ID = team.first_with('work') or 'work'
 CUSTOMERS_ID = team.first_with('customers') or 'customers'
 
 
-def request_channels(profile):
+def request_channels(profile, platform='slack'):
+    if platform == 'hejo':
+        role = 'customer_room' if team.has_role(profile, 'customers') else 'work_room'
+        return {D.target(team.home_of_role('doctor', ROOT), role, slack=None)}
     cfg = settings(profile).get('projects', {})
     hub = {cfg.get('channel_id')} if cfg.get('enabled') is True and cfg.get('channel_id') else set()
     room = REQUESTERS[profile]['channel']
@@ -143,11 +148,24 @@ def read(identifier):
     who = REQUESTERS.get(r.get('requester_profile'))
     if r.get('source') == 'program' and not team.has_role(r.get('requester_profile'), PROGRAM_KINDS.get(r.get('kind'))):
         raise ValueError('Invalid request provenance')
-    if (r.get('id') != identifier or who is None or r.get('channel') not in request_channels(r['requester_profile']) or
-            not (re.fullmatch(r'\d{10}\.\d{6}', str(r.get('thread_ts', ''))) or (r.get('source') == 'program' and r.get('kind') in THREADLESS and not r.get('thread_ts'))) or r.get('category') not in CATEGORIES):
+    native = r.get('platform', 'slack') == 'hejo'
+    thread = str(r.get('thread_ts', ''))
+    if native:
+        try:
+            valid_thread = str(uuid.UUID(thread)) == thread
+        except ValueError:
+            valid_thread = False
+        channels = request_channels(r['requester_profile'], 'hejo') if who else set()
+    else:
+        valid_thread = bool(re.fullmatch(r'\d{10}\.\d{6}', thread))
+        channels = request_channels(r['requester_profile']) if who else set()
+    if (r.get('id') != identifier or who is None or r.get('channel') not in channels
+            or (native and r.get('owner') != 'owner')
+            or not (valid_thread or (r.get('source') == 'program' and r.get('kind') in THREADLESS and not thread))
+            or r.get('category') not in CATEGORIES):
         raise ValueError('Invalid request provenance')
     if r.get('source') == 'program':
-        program_values({k:r[k] for k in PROGRAM_FIELDS if k in r})
+        program_values({k:r[k] for k in PROGRAM_FIELDS if k in r}, platform='hejo' if native else 'slack')
         if r.get('category') != 'unexpected_tool_error': raise ValueError('Invalid program category')
     return r
 
@@ -225,7 +243,7 @@ def valid_run():
     return True
 
 
-def authorize_request():
+def authorize_request(session_id=""):
     from gateway.session_context import get_session_env as env
     from tools.skill_provenance import is_background_review
     profile = env('HERMES_SESSION_PROFILE', '') or os.environ.get('HERMES_PROFILE')
@@ -233,6 +251,17 @@ def authorize_request():
         raise ValueError('This profile may not request diagnosis')
     if settings(profile).get('diagnosis_request', {}).get('enabled') is not True:
         raise ValueError('Diagnosis requests are disabled')
+    if env('HERMES_SESSION_PLATFORM', '') == 'hejo':
+        from hermes_owner_chat import current_owner_message_in_session
+        from hermes_team_services import delivery
+        home = ROOT / 'profiles' / profile
+        if delivery.platform(home) != 'hejo':
+            raise ValueError('hejo diagnosis delivery is disabled')
+        proof = current_owner_message_in_session(home, session_id, env)
+        allowed = request_channels(profile, 'hejo')
+        if proof is None or env('HERMES_SESSION_CHAT_ID', '') not in allowed:
+            raise ValueError("An authenticated owner message in the requester's hejo room is required")
+        return profile, 'owner', env('HERMES_SESSION_THREAD_ID', ''), env('HERMES_SESSION_MESSAGE_ID', '')
     if (env('HERMES_SESSION_PLATFORM', '') != 'slack' or env('HERMES_SESSION_CHAT_ID', '') not in request_channels(profile) or
             not re.fullmatch(r'\d{10}\.\d{6}', env('HERMES_SESSION_THREAD_ID', '')) or not env('HERMES_SESSION_MESSAGE_ID', '')):
         raise ValueError("An owner message inside a thread of the requester's own room is required")
@@ -327,9 +356,9 @@ def launch(identifier):
                          stdin=subprocess.DEVNULL, stdout=f, stderr=f, start_new_session=True)
 
 
-def handle(args, **_):
+def handle(args, session_id="", **_):
     try:
-        profile, owner, thread, message = authorize_request()
+        profile, owner, thread, message = authorize_request(session_id)
         from gateway.session_context import get_session_env
         channel = get_session_env('HERMES_SESSION_CHAT_ID', '')
         if not isinstance(args, dict) or set(args) != {'category', 'expected', 'actual'} or args['category'] not in CATEGORIES:
@@ -346,6 +375,8 @@ def handle(args, **_):
                 raise ValueError('Daily diagnosis limit: five')
             r = {'id': secrets.token_hex(16), 'requester_profile': profile, 'owner': owner,
                  'channel': channel, 'thread_ts': thread, 'message_ts': message, **args, 'created_at': now, 'status': 'pending'}
+            if get_session_env('HERMES_SESSION_PLATFORM', '') == 'hejo':
+                r['platform'] = 'hejo'
             deferred = night_batch()
             if deferred:
                 r['deferred'] = 'night'
@@ -371,14 +402,25 @@ THREADLESS = {'watch_failing', 'work_watch_warning'}
 OWNER_NEEDED = '소유자 확인 필요'
 
 
-def program_values(args):
+def program_values(args, *, platform="slack"):
     if not isinstance(args,dict) or set(args)-PROGRAM_FIELDS or not {'kind','error_type','failures','since'} <= set(args):
         raise ValueError('Only fixed program fields are accepted')
     if args['kind'] not in PROGRAM_KINDS: raise ValueError('Invalid kind')
     if (args['kind']=='work_watch_warning') != ('common_id' in args): raise ValueError('common_id is only for work_watch_warning')
     if 'common_id' in args and (not isinstance(args['common_id'],str) or not re.fullmatch(r'cw_[0-9a-f]{32}',args['common_id'])): raise ValueError('Invalid common id')
     if args['kind']=='work_watch_warning' and (args.get('thread_ts') or 'username' in args): raise ValueError('Watcher warnings carry only the work id and reason')
-    if 'thread_ts' in args and (not isinstance(args['thread_ts'],str) or (args['thread_ts'] and not re.fullmatch(r'\d{10}\.\d{6}',args['thread_ts']))): raise ValueError('Invalid thread timestamp')
+    if 'thread_ts' in args:
+        value = args['thread_ts']
+        if not isinstance(value, str): raise ValueError('Invalid thread timestamp')
+        if value:
+            if platform == 'hejo':
+                try:
+                    valid = str(uuid.UUID(value)) == value
+                except ValueError:
+                    valid = False
+            else:
+                valid = bool(re.fullmatch(r'\d{10}\.\d{6}', value))
+            if not valid: raise ValueError('Invalid thread timestamp')
     if args['kind']=='auto_draft_failed' and not args.get('thread_ts'): raise ValueError('Draft failure requires a thread')
     if 'username' in args and (not isinstance(args['username'],str) or (args['username'] and not re.fullmatch(r'[A-Za-z0-9_.]{1,30}',args['username']))): raise ValueError('Invalid username')
     if not isinstance(args['error_type'],str) or not re.fullmatch(r'[A-Za-z0-9_]{1,64}',args['error_type']): raise ValueError('Invalid error type')
@@ -599,9 +641,70 @@ def with_blocks(body, update=False):
         return body
 
 
+def post_hejo(r, answer, home):
+    """Deliver a claimed diagnosis once. Execution's pending-only rule stays authoritative."""
+    origin = r.get('platform', 'slack')
+    if origin == 'hejo':
+        if r.get('owner') != 'owner':
+            raise ValueError('Request sender is not the hejo owner')
+    else:
+        # An old pending Slack request can still finish after the switch, but its old
+        # thread is never passed to hejo. Check its existing configured identity.
+        import hermes_yaml as yaml
+        cfg = yaml.safe_load((home / 'config.yaml').read_text())
+        if not r.get('owner') or r['owner'] not in cfg.get('platforms', {}).get('slack', {}).get('api_human_users', []):
+            raise ValueError('Request sender is not a configured owner')
+    short, full, skipped = answer_parts(r, answer)
+    threadless = r.get('source') == 'program' and r.get('kind') in THREADLESS and not r.get('thread_ts')
+    text = (short + '\n\n' + full).strip() if threadless else full
+    if r.get('coaching'):
+        text += '\n\n```\n' + r['coaching'] + '\n```'
+    if origin != 'hejo':
+        skipped = 'request_platform_changed'
+    elif threadless:
+        skipped = 'program_without_thread'
+    elif not r.get('thread_ts'):
+        skipped = 'request_thread_missing'
+    else:
+        role = 'customer_room' if team.has_role(r['requester_profile'], 'customers') else 'work_room'
+        room = D.target(home, role, slack=None)
+        if r['channel'] != room:
+            skipped = 'not_requester_room'
+    r['delivery_platform'] = 'hejo'
+    if skipped:
+        r.update(thread_skipped=skipped, thread_status='skipped')
+        save(r)
+    else:
+        r.update(status='thread_posting', thread_status='posting')
+        save(r)
+        try:
+            receipt = D.post(home, r['channel'], thread=r['thread_ts'],
+                             **D.presentation({'text':short}))
+            r.update(thread_posted_ts=receipt['msg_id'], thread_status='posted')
+        except Exception as exc:
+            r.update(thread_status='failed', thread_error=type(exc).__name__)
+        save(r)
+    r.update(status='dm_posting', dm_status='posting',
+             dm_channel=D.target(home, 'reports', slack=None, fallback=True))
+    save(r)
+    try:
+        receipt = D.post(home, r['dm_channel'], **D.presentation({'text':text}))
+        r.update(dm_status='posted', report_thread=receipt['thread'], report_head_id=receipt['head_id'])
+        save(r)
+        return receipt['msg_id']
+    except Exception as exc:
+        r.update(dm_status='failed', dm_error=type(exc).__name__)
+        save(r)
+        raise
+
+
 def post(r, answer):
     if r.get('source') == 'limit_report':
         raise ValueError('Limit records never post to Slack')
+    home = team.home_of_role('doctor', ROOT)
+    if D.platform(home) == 'hejo':
+        return post_hejo(r, answer, home)
+    D.require_slack(home)
     from dotenv import dotenv_values
     token = dotenv_values(team.home_of_role('doctor', ROOT) / '.env').get('SLACK_BOT_TOKEN')
     if not token:
@@ -706,7 +809,11 @@ def queue_fix(r):
         home = team.home_of_role('doctor', ROOT)
         status = autofix.enqueue_incident(home, r, r['fix_key'], str(path(r['id'])))
         if status in FIX_NOTES:
-            autofix.say(home, {'channel': r['dm_channel'], 'thread_ts': r['posted_ts']}, FIX_NOTES[status].format(key=r['fix_key']))
+            text = FIX_NOTES[status].format(key=r['fix_key'])
+            if r.get('delivery_platform') == 'hejo':
+                D.post(home, r['dm_channel'], thread=r['report_thread'], **D.presentation({'text':text}))
+            else:
+                autofix.say(home, {'channel': r['dm_channel'], 'thread_ts': r['posted_ts']}, text)
         return status
     except Exception as exc:
         print('autofix queue skipped:', type(exc).__name__, flush=True)

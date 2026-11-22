@@ -16,6 +16,8 @@ import logging
 import os
 from pathlib import Path
 import time
+import uuid
+from hermes_team_services import delivery as D
 
 from hermes_packs.linked_work import slack_report
 from hermes_packs.linked_work import work_content as content
@@ -98,29 +100,46 @@ def ask(home, items, *, send=None):
             continue  # resolved before the warning reached the owner
         with locked(home) as (state, save):
             row = state['asks'].get(cid)
-            if row and row['status'] in {'waiting', 'chosen'}:
+            if row and row['status'] in {'waiting', 'chosen'} and not row.get('delivery_pending'):
                 continue
-            state['asks'][cid] = {'common_id': cid, 'title': title, 'kinds': conflict['kinds'], 'channel': channel,
-                                  'message_ts': None, 'status': 'waiting', 'at': time.time()}
-            save()  # Never resend blindly after an ambiguous Slack timeout.
+            native = D.platform(home) == 'hejo'
+            retry = row and row.get('platform') == 'hejo' and (row['status'] == 'failed' or row.get('delivery_pending'))
+            if retry and (not native or row.get('delivery_rejected')):
+                continue
+            if not retry:
+                row = state['asks'][cid] = {'common_id': cid, 'title': title, 'kinds': conflict['kinds'],
+                        'channel': channel, 'message_ts': None, 'status': 'waiting', 'at': time.time()}
+                if native:
+                    row.update(platform='hejo', client_id='conflict:' + uuid.uuid4().hex, delivery={},
+                               text=question(title, conflict['kinds']), delivery_pending=True)
+            save()  # Native retries keep the original question, destination and occurrence.
             try:
-                state['asks'][cid]['message_ts'] = send(channel, question(title, conflict['kinds']))
+                if native:
+                    receipt = send(row['channel'], row['text'], client_id=row['client_id'],
+                                   state=row['delivery'], save=save)
+                    row.update(message_ts=receipt['msg_id'], head_id=receipt['head_id'],
+                               thread=receipt['thread'], status='waiting', delivery_pending=False)
+                else:
+                    row['message_ts'] = send(channel, question(title, conflict['kinds']))
             except Exception as exc:
                 logging.getLogger(__name__).warning('conflict_ask_failed:%s', type(exc).__name__)
-                state['asks'][cid]['status'] = 'failed'
+                row['status'] = 'failed'
+                if native and isinstance(exc, D.Refused) and exc.permanent:
+                    row.update(delivery_rejected=True, delivery_error=exc.error, delivery_pending=False)
                 missed.append((cid, title))
             save()
     return missed
 
 
-def handle(home, channel, thread, text, button=None):
+def handle(home, channel, thread, text, button=None, *, platform='slack'):
     """Owner answer in a conflict question thread. Returns (state, reply) or None if not ours."""
     with locked(home) as (state, save):
-        asks = [a for a in state['asks'].values() if a['channel'] == channel and a['message_ts'] == thread]
+        asks = [a for a in state['asks'].values() if a['channel'] == channel and a.get('platform', 'slack') == platform
+                and (a.get('thread') if platform == 'hejo' else a['message_ts']) == thread]
         if len(asks) != 1:
             return None
         row = asks[0]
-        if button and (button.get('label') != text or button.get('message_ts') != thread):
+        if button and (button.get('label') != text or button.get('message_ts') != row['message_ts']):
             return None
         if text == '의견':
             return ('', '')  # the owner writes the instruction next; nothing runs, nothing is posted
@@ -154,10 +173,17 @@ def close(home, cid, resolved, *, send=None):
         row = state['asks'].get(cid)
         if not row or row['status'] not in {'waiting', 'chosen'} or not row.get('message_ts'):
             return
+        if row.get('platform', 'slack') != D.platform(home):
+            return
         outcome = {'applied': f'`{row.get("choice")}`으로 나머지 원본을 맞췄어요.',
                    'kept': '각 원본을 그대로 두고 지금 내용을 새 기준으로 삼았어요.',
                    'cleared': '원본이 다시 맞춰져 충돌이 풀렸어요. 따로 바꾸지 않았어요.'}[resolved['status']]
-        send(row['channel'], f'*🟢 {row["title"]} — {HEAD}*\n{outcome}', message_ts=row['message_ts'])
+        text = f'*🟢 {row["title"]} — {HEAD}*\n{outcome}'
+        if row.get('platform') == 'hejo':
+            receipt = send(row['channel'], text, message_ts=row['message_ts'], state=row['delivery'], save=save)
+            row.update(message_ts=receipt['msg_id'], head_id=receipt['head_id'])
+        else:
+            send(row['channel'], text, message_ts=row['message_ts'])
         row['status'] = 'closed'; save()
 
 
@@ -165,18 +191,24 @@ async def dispatch(home, event=None, **_):
     if not enabled(home) or not (Path(home) / 'state/conflict-decisions.json').is_file():
         return None
     source = getattr(event, 'source', None)
-    if getattr(getattr(source, 'platform', None), 'value', '') != 'slack':
+    from hermes_team_services import delivery as D
+    platform = getattr(getattr(source, 'platform', None), 'value', '')
+    if platform not in {'slack', 'hejo'} or platform != D.platform(home) or getattr(event, 'internal', False):
         return None
-    if getattr(source, 'user_id', '') != slack_report._sender().owner(home):
+    owner = 'owner' if platform == 'hejo' else slack_report._sender().owner(home)
+    if getattr(source, 'user_id', '') != owner:
         return None
     from hermes_constants import get_hermes_home
     if Path(get_hermes_home()).resolve() != Path(home).resolve():
         return None
+    button = (getattr(event, 'raw_message', None) or {}).get('_hermes_button')
+    if button and platform == 'hejo':
+        button = {**button, 'message_ts': D.clicked_message_id(event)}
     def process():
         channel, thread = getattr(source, 'chat_id', ''), getattr(source, 'thread_id', '')
         try:
             result = handle(home, channel, thread, str(getattr(event, 'text', '') or '').strip(),
-                            (getattr(event, 'raw_message', None) or {}).get('_hermes_button'))
+                            button, platform=platform)
         except Exception as exc:
             logging.getLogger(__name__).warning('conflict_choice_failed:%s', type(exc).__name__)
             result = ('failed', '처리가 중단됐어요. 버튼을 다시 눌러 주세요.')

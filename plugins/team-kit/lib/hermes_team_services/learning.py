@@ -162,11 +162,17 @@ def owner_report_room(home):
 
 def report_target(home, slack, owner):
     """Where learning reports go: the learning report room, else the owner's DM."""
-    return report_channel(home) or slack(home, "conversations.open", {"users": owner})["channel"]["id"]
+    from hermes_team_services import delivery
+    return delivery.target(home, "learning_reports", fallback=True,
+        slack=lambda: report_channel(home) or slack(home, "conversations.open", {"users": owner})["channel"]["id"])
 
 
 def owner_report_place(home, src):
     """Learning report threads live in the owner's DM or the learning report room."""
+    if src.get("platform") == "hejo":
+        from hermes_team_services import delivery
+        return src.get("chat_id") in {delivery.employee(home),
+            delivery.target(home, "learning_reports", fallback=True, slack=None)}
     return src.get("chat_type") == "dm" or (
         src.get("chat_type") == "group" and src.get("chat_id") == report_channel(home))
 

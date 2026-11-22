@@ -281,7 +281,7 @@ def render(text, *, plain=False, sectioned=None):
         # Sections keep to the owner's four colours, so an information mark (🔵) leaves them grey.
         fallback = (mark if mark != 'info' else None) or titled or 'plain'
         if sectioned and body and (header or any(section['heading'] for section in sections)):
-            # One bar for the whole post (owner, 2026-10-19): Slack and ddots draw two lines beside every
+            # One bar for the whole post (owner, 2026-10-19): Slack and the owner app draw two lines beside every
             # section once a post has several attachments. The most urgent section heading picks its colour.
             found = {section_status(section['heading']) for section in sections} | {fallback}
             colour = next(name for name in ('fail', 'warn', 'check', 'ok', 'plain') if name in found)

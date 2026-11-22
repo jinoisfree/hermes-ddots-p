@@ -7,7 +7,7 @@ import sys as _owner_sys
 _owner_library = str((_OwnerPath(__file__).resolve().parent / '..').resolve())
 if _owner_library not in _owner_sys.path:
     _owner_sys.path.insert(0, _owner_library)
-from hermes_facility.owner_text import render as _owner_text
+from hermes_facility.owner_text import render as _owner_text, repository as _repository
 from hermes_schedule.policy import clock
 
 
@@ -35,7 +35,7 @@ _spec.loader.exec_module(base)
 learning, layout, KST = base.learning, base.layout, base.KST
 PLATFORM = "slack"
 ESSENTIAL = {"hermes-agent"}
-SETTING_REPO = Path(os.environ.get("HERMES_SETTING_REPO", str(Path.home() / _owner_text("<<workspace_folder>>/Hermes-ddots")))).expanduser()
+SETTING_REPO = Path(os.environ.get("HERMES_SETTING_REPO", str(_repository()))).expanduser()
 TEXT_LIMIT = DIFF_LIMIT = 6000
 
 
@@ -393,6 +393,15 @@ def section(home, now, *, taught=(), summarizer=None):
 
 def deliver(home, state, key):
     report = state["reports"][key]
+    save = lambda: learning.save(path(home), state)
+    name = base.prepare_delivery(home, report, save)
+    if report.get("delivery_error"):
+        return
+    if name == "hejo":
+        base.deliver_local_parts(home, report, key, "team_skills_", save)
+        report["complete"] = True
+        save()
+        return
     if not report.get("channel"):
         report["owner"] = base.owner(home)
         report["bot"] = base.slack(home, "auth.test", {})["user_id"]
@@ -413,6 +422,7 @@ def deliver(home, state, key):
                 body["thread_ts"] = report["thread_ts"]
             ts = str(base.slack(home, "chat.postMessage", body)["ts"])
         part["ts"] = ts
+        part["platform"] = "slack"
         if index == 0:
             report["thread_ts"] = ts
         learning.save(path(home), state)

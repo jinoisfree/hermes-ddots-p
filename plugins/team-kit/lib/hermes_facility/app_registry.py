@@ -1,5 +1,6 @@
 """Employee app grants: owner/team.yaml is authoritative; legacy inference never writes."""
 from pathlib import Path
+from hermes_facility import read_cache
 from hermes_packs.mac_apps.catalog import load_catalog
 
 
@@ -22,10 +23,12 @@ def read_team(root):
     from ruamel.yaml import YAML
     path = Path(root) / 'owner/team.yaml'
     if not path.exists(): return {'version': 1, 'agents': {}}
-    value = YAML(typ='safe').load(path.read_text(encoding='utf-8'))
-    if not isinstance(value, dict) or not isinstance(value.get('agents'), dict):
-        raise ValueError('TEAM_INVALID')
-    return value
+    def parse(text):
+        value = YAML(typ='safe').load(text)
+        if not isinstance(value, dict) or not isinstance(value.get('agents'), dict):
+            raise ValueError('TEAM_INVALID')
+        return value
+    return read_cache.parsed('team', path.read_text(encoding='utf-8'), parse)
 
 
 def legacy_apps(config, roles=()):
@@ -102,8 +105,9 @@ def role_hint(root,profile):
 def values(root, profile):
     from hermes_facility.config_assembly import yaml_load
     path = Path(root) / 'owner/vault.yaml'
-    vault = yaml_load(path.read_bytes()) if path.exists() else {}
-    return vault.get('apps', {}).get(profile, {})
+    vault = read_cache.parsed('owner-yaml', path.read_bytes(), yaml_load, share=True) if path.exists() else {}
+    from copy import deepcopy
+    return deepcopy(vault.get('apps', {}).get(profile, {}))
 
 
 def capabilities(bundles=(),config=None,selected_values=None):
@@ -146,6 +150,7 @@ def tool_granted(home, name, config=None):
 def file_settings(config,bundles,selected_values,table):
     from copy import deepcopy
     files=deepcopy(config.get('plugins',{}).get('entries',{}).get('team-kit',{}).get('settings',{}).get('files',{}))
+    files.pop('folder_links',None)  # Links come only from the Synology lookup, never a hand-written table.
     apps=[b for b in bundles if table.get(b,{}).get('service') in ('synology','local_files')]
     files['enabled']=bool(apps);files['folders']=[]
     if apps:files.update(extra_only=False,convert=True)
@@ -206,7 +211,8 @@ class AppContext:
         if not explicit(root, profile): return self._context.get_config(key, default)
         from hermes_facility.config_assembly import CONFIG, yaml_load
         path = self._home / 'config.yaml'
-        config = yaml_load(path.read_bytes(), CONFIG) if path.exists() else {}
+        # Read only below (derived_settings copies what it keeps), so the remembered parse is shared.
+        config = read_cache.parsed('config-yaml', path.read_bytes(), lambda data: yaml_load(data, CONFIG), share=True) if path.exists() else {}
         derived = derived_settings(config, grants(root, profile, config), values(root, profile))
         plugin = getattr(self._context, 'plugin_name', '') or getattr(getattr(self._context,'manifest',None),'name','')
         # Each host only requests the settings it owns; overlapping keys are absent here.

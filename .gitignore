@@ -10,8 +10,3 @@ knowledge/
 logs/
 __pycache__/
 .DS_Store
-
-/ddots/.build/
-/ddots/dist/
-/ddots/.venv/
-*.py[cod]

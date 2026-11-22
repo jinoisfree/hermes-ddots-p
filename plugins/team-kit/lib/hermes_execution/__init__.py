@@ -2460,6 +2460,10 @@ def register(ctx) -> None:
         )
 
     def register_tool(**kwargs: Any) -> Any:
+        name=kwargs.get('name','')
+        if ctx.get_config('gmail',{}).get('enabled') is False and (
+                name in {'gmail_direct','google_reauth'} or name.startswith(('google_calendar_','calendar_direct_'))):
+            return None
         if kwargs.get('name') == 'gmail_direct':
             kwargs['schema'] = full_mail_tools.profile_schema(sys.modules[__name__], kwargs['schema'],
                                                             str(getattr(ctx, 'profile_name', '') or ''))

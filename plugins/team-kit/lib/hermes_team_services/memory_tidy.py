@@ -278,8 +278,8 @@ def deliver(text):
     R = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(R)
     home = team.home_of_role('doctor', root())
-    channel = R.learning.report_channel(home) or R.slack(
-        home, "conversations.open", {"users": R.owner(home)})["channel"]["id"]
+    channel = R.delivery.target(home, "learning_reports", slack=lambda: R.learning.report_channel(home) or R.slack(
+        home, "conversations.open", {"users": R.owner(home)})["channel"]["id"])
     spec = importlib.util.spec_from_file_location("memory_tidy_queue", Path(__file__).with_name("morning_queue.py"))
     Q = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(Q)

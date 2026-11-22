@@ -45,6 +45,8 @@ if str(_AtomicPath(__file__).resolve().parents[1]) not in _atomic_sys.path:
 from hermes_facility import atomic as _atomic
 
 
+from hermes_team_services import delivery
+
 def load(name,path):
     spec=importlib.util.spec_from_file_location('private_digest_'+name,path)
     value=importlib.util.module_from_spec(spec);spec.loader.exec_module(value);return value
@@ -132,7 +134,7 @@ def run(root,home,*,reader=None,sender=None,now=None):
     now=now or datetime.now(KST)
     # 09:00 workday, 11:00 rest-day (gated by personal_mail_summary_restday.py) and 18:00.
     if now.hour not in {9,11,18}:raise ValueError('PERSONAL_MAIL_SCHEDULE_REQUIRED')
-    target=load('learning',Path(__file__).with_name('learning.py')).owner_report_room(home) or cfg['dm_chat_id']
+    target=delivery.target(home, 'reports', slack=lambda: load('learning',Path(__file__).with_name('learning.py')).owner_report_room(home) or cfg['dm_chat_id'])
     if not account or not target:raise ValueError('PERSONAL_MAIL_OWNER_VAULT_UNSET: 금고의 accounts.personal.gmail·dms.personal이 필요하다')
     rows=(reader or (lambda:fetch(root,home)))()
     folder=home/'state';folder.mkdir(exist_ok=True);path=folder/'personal-mail-summary.json'
@@ -151,6 +153,7 @@ def run(root,home,*,reader=None,sender=None,now=None):
         humans=sorted([r for r in unseen if not r['automatic']],key=lambda r:(not r['deadline_candidate'],not r['reply_candidate']))[:20]
         selected=humans+[r for r in unseen if r['automatic']]
         data['runs'][slot]={'at':now.isoformat(),'status':'pending','job_id':cfg['job_id']}
+        if delivery.platform(home) == 'hejo':data['runs'][slot]['platform']='hejo'
         for row in selected:data['messages'][row['id']]={'at':now.isoformat(),'status':'pending'}
         save(path,data)  # at-most-once reservation before network, including process death
         text=render(selected,now,human_total=human_total,account=account)

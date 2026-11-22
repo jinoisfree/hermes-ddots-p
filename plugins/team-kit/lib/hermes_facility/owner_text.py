@@ -34,7 +34,6 @@ DEFAULTS = {'company_domain_label': 'example-company',
  'report_rooms_label': '학습·보고 채널',
  'retired_meeting_job_id': '없음',
  'retired_system_room': '이전 시스템 채널',
- 'settings_repository_name': 'hermes-config',
  'work_meeting_job_id': '미연결',
  'work_name': '업무비서',
  'work_profile': 'work-assistant',
@@ -68,8 +67,17 @@ def values():
     return value
 
 
+def repository():
+    """The operating repository: <home>/<workspace_folder>/<vault manuals.repository_name>. The name has one source;
+    a missing value is a VaultError, never an old name."""
+    from . import owner_vault
+    return Path.home() / values()['workspace_folder'] / str(owner_vault.require('manuals.repository_name'))
+
+
 def render(template):
     output = template
+    if '<<repository_name>>' in output:
+        output = output.replace('<<repository_name>>', repository().name)
     for key, value in values().items():
         output = output.replace('<<' + key + '>>', value)
     return output

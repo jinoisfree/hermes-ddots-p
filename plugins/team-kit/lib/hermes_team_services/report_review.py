@@ -41,6 +41,8 @@ GLOBAL = {'승인': 'keep', '거절': 'reject', '의견': 'choose', '확인': 'd
 
 def black_report(home):
     import importlib.util
+    from hermes_facility.connections import home_service_enabled
+    if not home_service_enabled(home,'instagram'):raise ValueError('DISABLED')
     file = Path(home) / 'plugins/instagram-dm/learning_report.py'
     spec = importlib.util.spec_from_file_location('combined_black_report', file)
     module = importlib.util.module_from_spec(spec)
@@ -51,18 +53,24 @@ def black_report(home):
 def stores(home, base):
     skill = base.skill_report()
     result = [(base.path(home), base.load), (skill.path(home), skill.load)]
-    if team.home_has_role(home, 'customers') and (Path(home) / 'plugins/instagram-dm/learning_report.py').is_file():
+    from hermes_facility.connections import home_service_enabled
+    if team.home_has_role(home, 'customers') and home_service_enabled(home,'instagram') and (Path(home) / 'plugins/instagram-dm/learning_report.py').is_file():
         black = black_report(home)
         result.insert(0, (black._path(), lambda unused: black._load()))
     return result
 
 
 def find(home, src, base):
-    if src.get('user_id') != base.owner(home) or not base.learning.owner_report_place(home, src):
+    from hermes_team_services import delivery
+    native = src.get('platform') == 'hejo'
+    if native and delivery.platform(home) != 'hejo':
+        raise ValueError('Report belongs to another platform.')
+    if src.get('user_id') != ('owner' if native else base.owner(home)) or not base.learning.owner_report_place(home, src):
         raise ValueError(_owner_text('소유자의 <<learning_room>> 보고 또는 DM 스레드에서만 검토할 수 있어.'))
     for store, loader in stores(home, base):
         for key, report in loader(home)['reports'].items():
-            if (report.get('review_version') == 2 and report.get('thread_ts') == src.get('thread_id')
+            if (report.get('platform', 'slack') == ('hejo' if native else 'slack')
+                    and report.get('review_version') == 2 and report.get('thread_ts') == src.get('thread_id')
                     and report.get('channel') == src.get('chat_id') and report.get('owner') == src.get('user_id')):
                 return store, loader, key, report
     raise ValueError('새 검토 버튼이 있는 원래 보고 스레드에서 사용해 줘.')
@@ -253,7 +261,7 @@ def decide(home, args, src, base):
             learning_args = dict(args)
             learning_args.pop('scope', None)
             result = base.learning.extension('learning_review').review(home, learning_args, src.get('session_id', ''), base.learning,
-                     SimpleNamespace(owner=base.owner, path=base.path, load=base.load,
+                     SimpleNamespace(owner=(lambda h: 'owner') if src.get('platform') == 'hejo' else base.owner, path=base.path, load=base.load,
                                      record_review=base.record_review, update_status=base.update_status), _source=src)
         results.append(result)
     if scope in {'all', 'skill'} and report.get('skills', {}).get('items'):
@@ -273,7 +281,8 @@ def handle(home, args, base, session_id='', **_):
 
 async def dispatch(home, base, event=None, **_):
     source = getattr(event, 'source', None)
-    if str(getattr(getattr(source, 'platform', None), 'value', '')) != 'slack':
+    platform = str(getattr(getattr(source, 'platform', None), 'value', ''))
+    if platform not in {'slack', 'hejo'} or getattr(event, 'internal', False):
         return None
     text = str(getattr(event, 'text', '') or '').strip()
     command = parse(text)
@@ -281,7 +290,7 @@ async def dispatch(home, base, event=None, **_):
         return None
     src = {'text': text, 'user_id': getattr(source, 'user_id', ''), 'chat_id': getattr(source, 'chat_id', ''),
            'chat_type': 'dm' if str(getattr(source, 'chat_id', '')).startswith('D') else 'group',
-           'thread_id': getattr(source, 'thread_id', ''), 'platform_message_id': getattr(event, 'message_id', ''), 'at': time.time()}
+           'platform': platform, 'thread_id': getattr(source, 'thread_id', ''), 'platform_message_id': getattr(event, 'message_id', ''), 'at': time.time()}
     try:
         store, loader, _, report = find(home, src, base)
     except (ValueError, OSError, KeyError):
@@ -289,10 +298,12 @@ async def dispatch(home, base, event=None, **_):
     # A synthetic click must originate in this report's own head or matching item part.
     button = (getattr(event, 'raw_message', None) or {}).get('_hermes_button')
     if button:
-        part = next((p for p in report['parts'] if p.get('ts') == button.get('message_ts')), None)
+        from hermes_team_services import delivery
+        clicked = delivery.clicked_message_id(event)
+        part = next((p for p in report['parts'] if p.get('ts') == clicked), None)
         kind = '학습' if command[0] == 'learning' else '스킬'
         if (not part or button.get('label') != text or
-                (command[0] == 'all' and button.get('message_ts') != report['thread_ts']
+                (command[0] == 'all' and clicked != (report['parts'][0].get('ts') if platform == 'hejo' else report['thread_ts'])
                  and part.get('review_kind') != '전체') or
                 (command[0] != 'all' and (part.get('review_kind') != kind or part.get('item') != command[1][0]))):
             return {'action': 'skip', 'reason': 'report button source mismatch'}

@@ -68,21 +68,22 @@ def answered_employee_message(env):
     """Bind a clicked employee post to the current, publicly verified owner ingress."""
     import asyncio
     owner = current_owner_message(env)
-    if not owner or not owner.get('answer_to'):
+    if not owner:
         return None
     from hermes_reply.plugin import current_hejo_turn
     adapter, event, loop = current_hejo_turn()
     profile = env('HERMES_SESSION_PROFILE', '')
-    query = getattr(adapter, 'employee_message', None)
+    query = getattr(adapter, 'employee_message' if owner.get('answer_to') else 'latest_employee_message', None)
     if not callable(query):
         return None
     future = None
     try:
         future = asyncio.run_coroutine_threadsafe(query(profile, owner['chat_id'],
-                                                       owner['thread_id'], owner['answer_to']), loop)
+                                                       owner['thread_id'], owner.get('answer_to') or owner['msg_id']), loop)
         result = future.result(timeout=5)
         if (not isinstance(result, dict) or result.get('employee') != profile
-                or result.get('msg_id') != owner['answer_to']
+                or not result.get('msg_id')
+                or (owner.get('answer_to') and result.get('msg_id') != owner['answer_to'])
                 or result.get('chat_id') != owner['chat_id'] or result.get('thread_id') != owner['thread_id']
                 or not isinstance(result.get('text'), str) or not result['text'].strip()):
             return None

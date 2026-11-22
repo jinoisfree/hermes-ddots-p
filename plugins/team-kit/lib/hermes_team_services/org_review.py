@@ -7,12 +7,14 @@ import sys as _owner_sys
 _owner_library = str((_OwnerPath(__file__).resolve().parent / '..').resolve())
 if _owner_library not in _owner_sys.path:
     _owner_sys.path.insert(0, _owner_library)
-from hermes_facility.owner_text import render as _owner_text
+from hermes_facility.owner_text import render as _owner_text, repository as _repository
 
 import argparse
 from collections import Counter
 from datetime import date, datetime, time as daytime, timedelta
 import hashlib
+import uuid
+from hermes_team_services import delivery as D
 import importlib.util
 import json
 import os
@@ -66,7 +68,7 @@ DIET_DEFAULTS = dict(enabled=False, soul_bytes_max=15000, max_items=3,
                                     'turn_efficiency_audit', 'approve_system_improvement', _owner_text('#<<retired_system_room>>')])
 # Log kinds that record normal behaviour, not a fault: listed, but never a proposal's reason or an error signal.
 NOT_A_FAULT = {'웹 검색 결과 없음', '게이트웨이 종료 신호 기록', '예약 지침의 보이지 않는 글자 제거',
-               '외부 플러그인 목록 자료 경고', '지난 승인 대기 무시'}
+               '외부 플러그인 목록 자료 경고', '지난 승인 대기 무시', '설정에서 끈 시스템 알림 생략'}
 COMMON_EVENT_TYPES = {'scope_changed', 'scope_backfilled', 'work_sync', 'auto_linked', 'note_source_replaced', 'created', 'linked', 'rollback_unlinked', 'knowledge_ref_linked',
                       'knowledge_ref_unlinked', 'completed', 'notion_completion_sync',
                       'calendar_source_migrated', 'owner_relinked', 'relinked', 'source_state_changed'}
@@ -93,7 +95,9 @@ def config(home=HOME):
     raw = yaml.safe_load((Path(home) / 'config.yaml').read_text()) or {}
     cfg = raw.get('plugins', {}).get('entries', {}).get('team-kit', {}).get('settings', {}).get('org_review', {})
     result = {**DEFAULTS, **cfg, 'thresholds': {**DEFAULTS['thresholds'], **cfg.get('thresholds', {})}}
-    if result['channel'] not in CHANNELS or type(result['max_items']) is not int or not 1 <= result['max_items'] <= 5:
+    if D.platform(home) == 'hejo':
+        result['channel'] = D.target(home, 'doctor', slack=None)
+    if (D.platform(home) == 'slack' and result['channel'] not in CHANNELS) or type(result['max_items']) is not int or not 1 <= result['max_items'] <= 5:
         raise ValueError('Invalid organization review settings')
     if any(type(v) not in (int, float) or v <= 0 for v in result['thresholds'].values()):
         raise ValueError('Invalid signal threshold')
@@ -270,7 +274,8 @@ def diet_metrics(root, sizes, previous, settings):
     return result
 
 
-REPOS = ((_owner_text('<<settings_repository_name>>'), Path.home() / _owner_text('<<workspace_folder>>/Hermes-ddots')), ('hermes-agent', ROOT / 'hermes-agent'))
+def _repos():
+    return ((_repository().name, _repository()), ('hermes-agent', ROOT / 'hermes-agent'))
 
 
 def profile_label(root, summary):
@@ -287,7 +292,7 @@ def recent_changes(start, now, repos=None):
     """Commit time, subject, message body and changed file paths (no diff lines): lets a proposal
     tell whether a later commit touched the code an error came from."""
     result = {}
-    for name, path in REPOS if repos is None else repos:
+    for name, path in _repos() if repos is None else repos:
         try:
             out = subprocess.run(['git', '-C', str(path), 'log', '--since=@' + str(int(start)), '--until=@' + str(int(now)),
                                   '--format=%x1e%ct%x1f%s%x1f%b%x1d', '--name-only', '-n', '40'],
@@ -699,7 +704,7 @@ def propose(evidence, *, home=HOME, cfg=None, state=None):
               '출력은 다른 설명이나 코드 펜스 없는 엄격한 JSON 하나: '
               '{"items":[{"n":1,"title":"제목","evidence":"근거","profiles":["' + DOCTOR_ID + _owner_text('"],'
               '"proposal":"제안","effect":"예상 효과","rollback":"되돌리기","instruction":"작업지시문"}]}\n'
-              '각 instruction은 Paseo ~/<<workspace_folder>>/Hermes-ddots에서 앞 대화나 다른 번호 없이 실행 가능한 지시다. 각 항목마다 목표, 근거, 대상 파일 후보, 완료 조건 표제를 반드시 쓰고 문서·테스트·재시작 절차를 생략하지 않는다. '
+              '각 instruction은 Paseo ~/<<workspace_folder>>/<<repository_name>>에서 앞 대화나 다른 번호 없이 실행 가능한 지시다. 각 항목마다 목표, 근거, 대상 파일 후보, 완료 조건 표제를 반드시 쓰고 문서·테스트·재시작 절차를 생략하지 않는다. '
               '목표, 근거, 대상 파일 후보(미확인이면 미확인 표시), 완료 조건, AGENTS.md 읽기, '
               '실행 원본 수정 후 ./sync, 관련 문서 갱신, 게이트웨이 Python 테스트, 재시작 규칙, 푸시 별도 승인 절차를 포함한다. '
               '이 실행에서는 허용된 읽기 도구만 호출하며 직접 수정·전송하지 않는다.\n최근 14일 거부: ') + json.dumps(refused, ensure_ascii=False) +
@@ -795,7 +800,40 @@ def report_parts(day, items, *, weekly=False, auto=False, notes='', paseo=False)
     return {'text': render(day, items, weekly=weekly, auto=auto, notes=notes, paseo=paseo)}, pages
 
 
+def send_hejo(home, state, report, part, key, thread):
+    if report.get('platform') != 'hejo':
+        report.update(platform='hejo', channel=D.target(home, 'doctor', slack=None), owner='owner')
+        report.pop('thread_ts', None)
+        for row in [report['root'], *report.get('details', []), *report.get('processed', {}).values(),
+                    *report.get('approvals', {}).values()]:
+            row.pop('ts', None)
+            row.pop('attempted_at', None)
+    if part.get('message_id') or part.get('delivery_error') or (thread and not report.get('thread')):
+        return
+    part.setdefault('client_id', 'org-review:' + hashlib.sha256(key.encode()).hexdigest()[:40] + ':' + uuid.uuid4().hex)
+    part.setdefault('delivery', {})
+    save = lambda: L.save(state_path(home), prune(state))
+    save()
+    try:
+        receipt = D.post(home, report['channel'], client_id=part['client_id'], state=part['delivery'], save=save,
+                         thread=report.get('thread') if thread else None, **D.presentation({'text': part['text']}))
+    except D.Refused as exc:
+        if not exc.permanent:
+            raise
+        part['delivery_error'] = exc.error
+        save()
+        return
+    part.update(message_id=receipt['msg_id'], head_id=receipt['head_id'])
+    if not thread:
+        report.update(thread=receipt['thread'], posted_at=time.time())
+    save()
+
+
 def send(home, state, report, part, key, *, thread=False):
+    if D.platform(home) == 'hejo':
+        return send_hejo(home, state, report, part, key, thread)
+    if report.get('platform') == 'hejo':
+        return
     if part.get('ts'):
         return
     marker = 'org_review_' + hashlib.sha256(key.encode()).hexdigest()[:40]
@@ -879,13 +917,14 @@ def generate(day, key, *, home, root, cfg, now=None, failed='proposal_failed'):
             state['reports'][key] = {'failed': failed, 'items': []}
             L.save(state_path(home), prune(state))
         raise
-    auth = R.slack(home, 'auth.test', {})
+    native = D.platform(home) == 'hejo'
+    auth = {'user_id': D.target(home, 'owner', slack=None)} if native else R.slack(home, 'auth.test', {})
     with L.locked(state_path(home)):
         state = load(home)
         root_part, detail_parts = report_parts(day, items, weekly='diet' in evidence, auto=review_auto(home),
                                                notes=optimization_notes(evidence), paseo=autofix_enabled(home))
         state['reports'][key] = {'items': items, 'channel': cfg['channel'], 'bot': auth['user_id'],
-                                 'owner': R.owner(home), 'root': root_part,
+                                 'owner': 'owner' if native else R.owner(home), 'root': root_part,
                                  'details': detail_parts, 'processed': {}, 'approvals': {}, 'complete': False}
         L.save(state_path(home), prune(state))
     if deferred:
@@ -963,7 +1002,9 @@ def approved_job(report, key, numbers):
     report['paseo_batches'] = batch
     items = [dict(report['items'][n - 1], n=i) for i, n in enumerate(fresh, 1)]
     return (key if batch == 1 else f'{key}#{batch}',
-            {'items': items, 'channel': report['channel'], 'thread_ts': report['thread_ts']},
+            {'items': items, 'channel': report['channel'], **({
+                'platform': 'hejo', 'thread': report['thread'], 'message_id': report['root']['message_id']}
+                if report.get('platform') == 'hejo' else {'thread_ts': report['thread_ts']})},
             {i: n for i, n in enumerate(fresh, 1)})
 
 
@@ -1001,6 +1042,12 @@ def parse(text, count):
 
 
 def messages(home, report):
+    if D.platform(home) == 'hejo':
+        if report.get('platform') != 'hejo' or not report.get('thread'):
+            return []
+        return D.read_thread(home, report['channel'], report['thread'])['messages']
+    if report.get('platform') == 'hejo':
+        return []
     body = {'channel': report['channel'], 'ts': report['thread_ts'], 'limit': 100}
     result = []
     while True:
@@ -1027,25 +1074,28 @@ def skip_report_thread(home, event=None, **_):
     """Let 진단담당 answer ordinary questions; poll alone handles the owner's report decisions."""
     try:
         source = getattr(event, 'source', None)
-        if source is None or str(getattr(getattr(source, 'platform', None), 'value', '')) != 'slack':
+        platform = str(getattr(getattr(source, 'platform', None), 'value', ''))
+        if platform not in {'slack', 'hejo'} or platform != D.platform(home) or getattr(event, 'internal', False):
             return None
+        native = platform == 'hejo'
+        owner = 'owner' if native else R.owner(home)
         cfg = config(home)
         thread = str(getattr(source, 'thread_id', '') or '')
         handled = autofix_thread_reply(home, event, source, thread)
         if handled:
             return handled
-        if not cfg['enabled'] or str(getattr(source, 'chat_id', '')) != cfg['channel']:
+        if not cfg['enabled'] or str(getattr(source, 'chat_id', '')) != (D.target(home, 'doctor', slack=None) if native else cfg['channel']):
             return None
-        report = next((r for r in load(home)['reports'].values() if thread and r.get('thread_ts') == thread), None)
+        report = next((r for r in load(home)['reports'].values() if thread and r.get('platform', 'slack') == platform and r.get('thread' if native else 'thread_ts') == thread), None)
         if report is not None:
-            if str(getattr(source, 'user_id', '')) != R.owner(home):
+            if str(getattr(source, 'user_id', '')) != owner:
                 return {'action': 'skip', 'reason': 'org_review_thread'}
             if classify_reply(str(getattr(event, 'text', '') or ''), len(report['items']),
                               autofix=autofix_enabled(home)) is None:
                 return None
             # A button click never becomes a Slack message, so ``poll`` would not see it: keep it for poll.
             button = (getattr(event, 'raw_message', None) or {}).get('_hermes_button')
-            if button and str(getattr(source, 'user_id', '')) == R.owner(home):
+            if button and not native and str(getattr(source, 'user_id', '')) == owner:
                 with L.locked(state_path(home)):
                     state = load(home)
                     report = next(r for r in state['reports'].values() if r.get('thread_ts') == thread)
@@ -1062,7 +1112,8 @@ def autofix_thread_reply(home, event, source, thread):
     """확인/롤백 (button or reply) by the owner in a 진단 결함 auto-fix report thread (2026-10-25)."""
     if not thread or not autofix_enabled(home):
         return None
-    if str(getattr(source, 'user_id', '')) != R.owner(home):
+    owner = 'owner' if D.platform(home) == 'hejo' else R.owner(home)
+    if str(getattr(source, 'user_id', '')) != owner:
         return None
     action = plain(str(getattr(event, 'text', '') or ''))
     fix = autofix()
@@ -1090,12 +1141,40 @@ def autofix_thread_reply(home, event, source, thread):
 def paint_decisions(home, state, key, report):
     """Red until answered, yellow while some items wait, green once every item is decided (owner, 2026-10-23)."""
     decided = {d['n'] for d in state['decisions'] if d.get('day') == key}
-    if not decided or not report.get('thread_ts'):
+    native = D.platform(home) == 'hejo'
+    if report.get('platform', 'slack') != ('hejo' if native else 'slack'):
+        return
+    if not decided or not report.get('thread' if native else 'thread_ts'):
         return
     paint = 'done' if len(decided) >= len(report['items']) else 'partial'
     if report.get('painted') == [paint, len(decided)]:
         return
     try:
+        if native:
+            pending = report.setdefault('paint_pending', {'status': paint, 'count': len(decided)})
+            save = lambda: L.save(state_path(home), prune(state))
+            save()
+            root = report['root']
+            controls = D.presentation({'text': root['text']})
+            controls['text'] += f"\n\n{pending['count']}/{len(report['items'])}건 결정"
+            controls['reply_state'] = 'closed' if pending['status'] == 'done' else 'answered'
+            if pending['status'] == 'done':
+                controls['buttons'] = []
+            try:
+                receipt = D.edit(home, report['channel'], state=root['delivery'], save=save, **controls)
+            except D.Refused as exc:
+                if not exc.permanent:
+                    raise
+                root['edit_error'] = exc.error
+                root['delivery'].pop('edit', None)
+            else:
+                root.update(message_id=receipt['msg_id'], head_id=receipt['head_id'])
+            report['painted'] = [pending['status'], pending['count']]
+            del report['paint_pending']
+            save()
+            if report['painted'] != [paint, len(decided)]:
+                paint_decisions(home, state, key, report)
+            return
         L.extension('report_status').mark(lambda method, body: R.slack(home, method, body), report['channel'],
                                            report['thread_ts'], paint, f'{len(decided)}/{len(report["items"])}건 결정')
         report['painted'] = [paint, len(decided)]
@@ -1116,9 +1195,11 @@ def poll(*, home=HOME, no_post=False):
     result, failures = [], []
     with L.locked(state_path(home)):
         state = load(home)
-        owner = R.owner(home)
+        owner = 'owner' if D.platform(home) == 'hejo' else R.owner(home)
         for key in list(state['reports']):
             report = state['reports'][key]
+            if report.get('platform', 'slack') != D.platform(home):
+                continue
             if (not report.get('items') or not report.get('complete') or report.get('thread_missing')
                     or report.get('posted_at', 0) < time.time() - 3 * 86400):
                 continue
@@ -1147,14 +1228,16 @@ class PollFailed(RuntimeError):
 
 
 def poll_report(home, state, key, report, owner, result, *, no_post=False):
-    clicks = [{'ts': ts, 'user': owner, 'text': click['text']}
+    native = report.get('platform') == 'hejo'
+    clicks = [] if native else [{'ts': ts, 'user': owner, 'text': click['text']}
               for ts, click in (report.get('button_replies') or {}).items()]
     for message in messages(home, report) + clicks:
-        ts = message['ts']
-        # The owner's own posts through a user-token app (DDots) carry that app's bot_id; only the
+        ts = str(message['seq']) if native else message['ts']
+        # The owner's own posts through a user-token app carry that app's bot_id; only the
         # owner's token can post as the owner, so user == owner is the check (as in the Slack adapter).
-        if (message.get('user') != owner or message.get('subtype') or
-                ts == report['thread_ts'] or ts in report['processed']):
+        is_owner = message.get('role') == 'owner' if native else message.get('user') == owner
+        if (not is_owner or message.get('subtype') or
+                (not native and ts == report['thread_ts']) or ts in report['processed']):
             continue
         reply_kind = classify_reply(message.get('text', ''), len(report['items']), autofix=autofix_enabled(home))
         if reply_kind is None:
@@ -1179,9 +1262,9 @@ def poll_report(home, state, key, report, owner, result, *, no_post=False):
         paseo = autofix_enabled(home) and not review_auto(home)
         for n, action in decisions.items():
             item = report['items'][n - 1]
-            state['decisions'].append({'day': key, 'n': n, 'action': action, 'at': float(ts), 'title': item['title']})
+            state['decisions'].append({'day': key, 'n': n, 'action': action, 'at': datetime.fromisoformat(message['ts']).timestamp() if native else float(ts), 'title': item['title']})
             if action == '승인' and str(n) not in report['approvals'] and not paseo:
-                report['approvals'][str(n)] = {'text': f"{n}번 승인 기록. 아래 지시문을 Paseo Hermes-ddots에 전달해 줘. 직접 수정하지 않았어.\n```\n{R.escape(item['instruction'])}\n```"}
+                report['approvals'][str(n)] = {'text': f"{n}번 승인 기록. 아래 지시문을 Paseo {_repository().name}에 전달해 줘. 직접 수정하지 않았어.\n```\n{R.escape(item['instruction'])}\n```"}
         # 2026-10-28 사용자 결정: 승인한 항목만 Paseo가 고친다(묻지 않는 자동 진행 아님).
         job = paseo and approved_job(report, key, [n for n, a in decisions.items() if a == '승인'])
         if job:
@@ -1199,7 +1282,7 @@ def poll_report(home, state, key, report, owner, result, *, no_post=False):
                 continue
             send(home, state, report, part, key + ':decision:' + ts, thread=True)
             if part.get('autofix_action'):
-                autofix().record_receipt(home, key, ts, part['ts'])
+                autofix().record_receipt(home, key, ts, part['message_id'], delivery_state=part['delivery']) if native else autofix().record_receipt(home, key, ts, part['ts'])
         for n, part in report['approvals'].items():
             send(home, state, report, part, key + ':instruction:' + n, thread=True)
 

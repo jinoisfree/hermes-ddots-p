@@ -16,7 +16,10 @@ function run(argv) {
   if (workspace.frontmostApplication.processIdentifier !== target.processIdentifier) throw new Error('WINDOWS_APP_NOT_FRONT');
   const all = ObjC.deepUnwrap(ObjC.castRefToObject($.CGWindowListCopyWindowInfo($.kCGWindowListOptionOnScreenOnly, $.kCGNullWindowID)));
   const front = all.find(w => w.kCGWindowLayer === 0);
-  if (!front || front.kCGWindowOwnerPID !== Number(target.processIdentifier)) throw new Error('SESSION_WINDOW_NOT_FRONT');
+  if (!front || front.kCGWindowOwnerPID !== Number(target.processIdentifier)) {
+    // Name the covering application so a failed input says what blocked it.
+    throw new Error('SESSION_WINDOW_NOT_FRONT:' + (front ? (front.kCGWindowOwnerName || '?') : '(none)'));
+  }
   // Windows App also owns a separate fullscreen toolbar; use the named session bounds, not that thin toolbar.
   const session = all.find(w => w.kCGWindowLayer === 0 && w.kCGWindowOwnerPID === Number(target.processIdentifier) &&
     (w.kCGWindowName || '').length > 0 && w.kCGWindowName !== 'Windows App');

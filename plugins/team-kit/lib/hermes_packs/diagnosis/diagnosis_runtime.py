@@ -177,7 +177,7 @@ def guard(home, learning, *, tool_name, args=None, turn_id='', **context):
         entries, error = normalize_tool_call_entries(args if isinstance(args, dict) else {})
         allowed = not error and bool(entries) and all(entry['name'] in reads for entry in entries)
     if not allowed:
-        return {'action': 'block', 'message': _owner_text('<<doctor_name>> 진단은 읽기 전용이다. 수정은 Paseo Hermes-ddots에서 한다.')}
+        return {'action': 'block', 'message': _owner_text('<<doctor_name>> 진단은 읽기 전용이다. 수정은 Paseo <<repository_name>>에서 한다.')}
     # Mark only a permitted concrete read dispatch, not tool discovery/description.
     # Core dispatches bridge children through this hook under their actual names.
     if tool_name.startswith('diagnosis_') or tool_name == 'session_search':

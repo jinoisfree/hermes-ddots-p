@@ -3,7 +3,7 @@
 Only metadata leaves this module: file paths and counts, tool and toolset names, skill names and
 dates. Never file contents, tool arguments or conversation text.
 
-- stale_work (매일, 보고만): uncommitted files left for hours in Hermes-ddots / hermes-agent and
+- stale_work (매일, 보고만): uncommitted files left for hours in the operating repository / hermes-agent and
   Paseo agents that have been "running" for hours. Someone else's half-done work is never handed
   to Paseo automatically.
 - tool_diet (일요일, 조직개편안 근거): per profile, toolsets whose schemas are large in the first
@@ -20,7 +20,7 @@ import sys as _owner_sys
 _owner_library = str((_OwnerPath(__file__).resolve().parent / '..').resolve())
 if _owner_library not in _owner_sys.path:
     _owner_sys.path.insert(0, _owner_library)
-from hermes_facility.owner_text import render as _owner_text
+from hermes_facility.owner_text import render as _owner_text, repository as _repository
 
 
 from datetime import datetime, timedelta, timezone
@@ -37,9 +37,9 @@ if team is None:
     _spec.loader.exec_module(team)
 
 ROOT = Path.home() / '.hermes'
-SETTING = Path.home() / _owner_text('<<workspace_folder>>/Hermes-ddots')
+SETTING = _repository()
 AGENT = ROOT / 'hermes-agent'
-REPOS = (('Hermes-ddots', SETTING), ('hermes-agent', AGENT))
+REPOS = ((SETTING.name, SETTING), ('hermes-agent', AGENT))
 PASEO = '/Applications/Paseo.app/Contents/Resources/bin/paseo'
 PROFILES = tuple(team.profiles_sorted())
 STALE_HOURS = 12
@@ -198,7 +198,7 @@ def recent_commits(days=7, repos=REPOS):
 CODE = ('.py', '.sh', '.ts', '.tsx', '.js', '.mjs', '.swift')
 # Plugin copies in profiles, skills and tests are not separate code to review.
 SKIP = ('hermes/profiles/', 'hermes/skills/', 'tests/', 'Tests/', 'test_')
-REVIEW_QUOTA = {'Hermes-ddots': 8, 'ddots': 5, 'hermes-agent': 5}
+REVIEW_QUOTA = {SETTING.name: 8, 'hermes-agent': 5}
 
 
 def changed_code(days=7, repos=REPOS):
@@ -216,8 +216,7 @@ def changed_code(days=7, repos=REPOS):
                 continue
             if any(part in path for part in SKIP) and not path.startswith('hermes/profiles/%s/scripts/' % team.first_with('doctor')):
                 continue
-            area = 'ddots' if path.startswith('ddots/') else name
-            groups.setdefault(area, []).append((int(added) + int(deleted), path))
+            groups.setdefault(name, []).append((int(added) + int(deleted), path))
     return {area: [f'{path} ({lines}줄)' for lines, path in sorted(rows, reverse=True)[:REVIEW_QUOTA.get(area, 5)]]
             for area, rows in groups.items()}
 
@@ -238,9 +237,9 @@ def code_review_item(n, days=7, repos=REPOS):
         'proposal': f'지난 {days}일 두 저장소의 커밋을 코드 리뷰해 확실한 버그·보안 문제·불필요한 코드만 고친다.',
         'effect': '자동 진행된 변경의 실수를 일주일 안에 잡는다.',
         'rollback': '이 리뷰의 표식 커밋을 롤백 버튼으로 되돌린다.',
-        'instruction': (_owner_text(f'목표: 지난 {days}일 Hermes-ddots(~/<<workspace_folder>>/Hermes-ddots)와 hermes-agent(~/.hermes/hermes-agent <<owner_label_lower>> 브랜치)의 '
+        'instruction': (_owner_text(f'목표: 지난 {days}일 <<repository_name>>(~/<<workspace_folder>>/<<repository_name>>)와 hermes-agent(~/.hermes/hermes-agent <<owner_label_lower>> 브랜치)의 '
                         f'커밋을 코드 리뷰한다. 근거: git log --since="{days} days ago" --no-merges 로 범위를 확인한다({summary}). '
-                        f'대상 파일(변경량 상위, 이 순서로 보고 시간이 남으면 나머지): {targets}. hermes/ 아래 경로는 실행 원본 ~/.hermes/ 기준으로 고치고, ddots/ 파일은 ddots/AGENTS.md 규칙을 따른다. '
+                        f'대상 파일(변경량 상위, 이 순서로 보고 시간이 남으면 나머지): {targets}. hermes/ 아래 경로는 실행 원본 ~/.hermes/ 기준으로 고친다. '
                         '한 번에 모든 변경을 보지 않는다. 결과 notes에 실제로 본 파일 수를 적는다. '
                         '살필 것: 정확성 버그(조건·경계·예외·경쟁 상태), 보안(비밀값·승인 경계·외부 쓰기), 테스트 누락, 불필요하게 복잡한 코드. '
                         '완료 조건: 재현이나 테스트로 확인된 문제만 고치고 각 수정에 테스트를 더한다. 확인되지 않은 의심과 스타일 지적은 고치지 않고 결과 notes에 적는다. '

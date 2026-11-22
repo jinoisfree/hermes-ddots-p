@@ -105,9 +105,26 @@ def locate(bundle, roots=None):
     return None
 
 
+def _stamp(paths):
+    """What `read_app` looks at, per bundle: the bundle folders, Info.plist, the Korean name file."""
+    from hermes_facility import read_cache
+    return read_cache.stat_stamp([part for path in paths for part in (
+        path, path / 'Contents', path / 'Contents' / 'Info.plist', path / 'Contents' / 'Resources',
+        path / 'Contents' / 'Resources' / LOCALIZATION / 'InfoPlist.strings', path / 'Wrapper')])
+
+
 def scan(roots=None):
+    """The installed apps. Reading every bundle is slow and the answer rarely changes, so it is reused
+    until some bundle (or the list of bundles) changes."""
+    from hermes_facility import read_cache
+    paths = list(app_paths(roots))
+    return read_cache.remembered(('apps', None if roots is None else tuple(map(str, roots))), _stamp(paths),
+                                 lambda: _scan(paths))
+
+
+def _scan(paths):
     seen = {}
-    for path in app_paths(roots):
+    for path in paths:
         try: app = read_app(path)
         except (OSError, ValueError): continue
         if app and app['bundle_id'] not in seen: seen[app['bundle_id']] = app
@@ -141,6 +158,10 @@ def installed_apps(root, roots=None, self_id=None):
             item=dict(app,state=state)
             progress = app_connect.pending_progress(root, home, profile, app['connection_key'])
             if progress: item['progress'] = progress
+            if is_connected:
+                selected=app_connect.legacy_values(config,[app['connection_key']]).get(app['connection_key'],{})
+                selected.update(app_registry.values(root,profile).get(app['connection_key'],{}))
+                item['settings']=app_connect.settings_for(item,selected,home)
             if service in ('synology','local_files'):
                 chosen=app_registry.grants(root,profile,config)|{app['connection_key']}
                 item['tools']=app_registry.capabilities(chosen,config,app_registry.values(root,profile))[app['connection_key']]['tools']

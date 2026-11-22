@@ -6,6 +6,8 @@ import json
 from pathlib import Path
 import re
 import time
+import uuid
+from hermes_team_services import delivery as D
 
 
 def module(name):
@@ -34,7 +36,9 @@ def config(home):
     settings = raw.get('plugins', {}).get('entries', {}).get('team-kit', {}).get('settings', {})
     enabled = settings.get('starter_plugins', {}).get('enabled') is True
     channel = settings.get('report_channel', '')
-    if enabled and not re.fullmatch(r'[CG][A-Z0-9]+', channel):
+    if enabled and D.platform(home) == 'hejo':
+        channel = D.target(home, 'reports', slack=lambda: channel)
+    elif enabled and not re.fullmatch(r'[CG][A-Z0-9]+', channel):
         raise ValueError('Missing report channel')
     return {'enabled': enabled, 'channel': channel}
 
@@ -58,7 +62,49 @@ def quiet():
     return module('morning_queue').quiet()
 
 
+def send_hejo(home, state, report, part, key, thread):
+    if quiet() and not part.get('delivery'):
+        return
+    if report.get('platform') != 'hejo':
+        # A Slack receipt cannot identify either a native message or its thread.
+        report.update(platform='hejo', channel=D.target(home, 'reports', slack=lambda: report['channel']), owner='owner')
+        for field in ('thread_ts', 'thread', 'painted'):
+            report.pop(field, None)
+        for row in [report['root'], *report.get('processed', {}).values(), *report.get('results', {}).values()]:
+            for field in ('ts', 'attempted_at'):
+                row.pop(field, None)
+        L.save(state_path(home), state)
+    if thread and not report.get('thread'):
+        root_key = next(k for k, r in state['reports'].items() if r is report)
+        send_hejo(home, state, report, report['root'], root_key, False)
+        if not report.get('thread'):
+            return
+    if part.get('message_id') or part.get('delivery_error'):
+        return
+    part.setdefault('client_id', 'starter-plugin:' + hashlib.sha256(key.encode()).hexdigest()[:40] + ':' + uuid.uuid4().hex)
+    part.setdefault('delivery', {})
+    save = lambda: L.save(state_path(home), state)
+    save()
+    try:
+        receipt = D.post(home, report['channel'], client_id=part['client_id'], state=part['delivery'], save=save,
+                         thread=report.get('thread') if thread else None, **D.presentation({'text': part['text']}))
+    except D.Refused as exc:
+        if not exc.permanent:
+            raise
+        part['delivery_error'] = exc.error
+        save()
+        return
+    part.update(message_id=receipt['msg_id'], head_id=receipt['head_id'])
+    if not thread:
+        report['thread'] = receipt['thread']
+    save()
+
+
 def send(home, state, report, part, key, thread=False):
+    if D.platform(home) == 'hejo':
+        return send_hejo(home, state, report, part, key, thread)
+    if report.get('platform') == 'hejo':
+        return  # Native ids are never used in Slack calls.
     if part.get('ts'): return
     if quiet() and not part.get('attempted_at'): return
     if thread and not report.get('thread_ts'): return
@@ -78,6 +124,38 @@ def send(home, state, report, part, key, thread=False):
 
 
 def paint(home, state, report, status, note):
+    if D.platform(home) == 'hejo':
+        if report.get('platform') != 'hejo' or not report.get('thread') or report.get('painted') == [status, note]:
+            return
+        requested = [status, note]
+        report.setdefault('paint_pending', requested)
+        status, note = report['paint_pending']
+        L.save(state_path(home), state)
+        root = report['root']
+        final = status in ('done', 'declined')
+        controls = D.presentation({'text': root['text']})
+        controls['text'] += '\n\n' + note
+        controls['reply_state'] = 'closed' if final else 'answered' if status == 'partial' else 'asked'
+        if final:
+            controls['buttons'] = []
+        save = lambda: L.save(state_path(home), state)
+        try:
+            receipt = D.edit(home, report['channel'], state=root['delivery'], save=save, **controls)
+        except D.Refused as exc:
+            if not exc.permanent:
+                raise
+            root['edit_error'] = exc.error
+            root['delivery'].pop('edit', None)
+        else:
+            root.update(message_id=receipt['msg_id'], head_id=receipt['head_id'])
+        report['painted'] = [status, note]
+        del report['paint_pending']
+        save()
+        if requested != [status, note]:
+            paint(home, state, report, *requested)
+        return
+    if report.get('platform') == 'hejo':
+        return
     if report.get('painted') == [status, note] or not report.get('thread_ts'): return
     L.extension('report_status').mark(lambda method, body: R.slack(home, method, body),
                                     report['channel'], report['thread_ts'], status, note)
@@ -88,7 +166,7 @@ def paint(home, state, report, status, note):
 def ask(home, pending):
     cfg = config(home)
     if not cfg['enabled']: return []
-    owner = R.owner(home)  # Fail closed if ownership is missing or ambiguous.
+    owner = 'owner' if D.platform(home) == 'hejo' else R.owner(home)  # Native ownership comes from the authenticated ingress.
     posted = []
     with L.locked(state_path(home)):
         state = load(home)
@@ -97,8 +175,10 @@ def ask(home, pending):
             if not re.fullmatch(r'[a-z][a-z0-9-]*', name): raise ValueError('Invalid plugin name')
             key = state['current'].get(name)
             previous = state['reports'].get(key, {})
+            if D.platform(home) == 'hejo' and previous.get('finished'):
+                continue
             if previous and not (previous.get('decision') == 'later' and previous.get('decided_date', today()) < today()):
-                if not previous.get('thread_ts'):
+                if not previous.get('thread' if D.platform(home) == 'hejo' else 'thread_ts'):
                     send(home, state, previous, previous['root'], key)
                 continue
             key = name + ':' + today()
@@ -118,6 +198,12 @@ def ask(home, pending):
 
 
 def messages(home, report):
+    if D.platform(home) == 'hejo':
+        if report.get('platform') != 'hejo' or not report.get('thread'):
+            return []
+        return D.read_thread(home, report['channel'], report['thread'])['messages']
+    if report.get('platform') == 'hejo':
+        return []
     body = {'channel': report['channel'], 'ts': report['thread_ts'], 'limit': 100}
     rows = []
     while True:
@@ -132,17 +218,20 @@ def skip_report_thread(home, event=None, **_):
     cfg = config(home)
     source = getattr(event, 'source', None)
     if not cfg['enabled'] or source is None: return None
-    if str(getattr(getattr(source, 'platform', None), 'value', '')) != 'slack': return None
-    owner = R.owner(home)
-    if str(getattr(source, 'chat_id', '')) != cfg['channel'] or str(getattr(source, 'user_id', '')) != owner:
+    platform = str(getattr(getattr(source, 'platform', None), 'value', ''))
+    if platform not in {'slack', 'hejo'} or platform != D.platform(home) or getattr(event, 'internal', False): return None
+    native = platform == 'hejo'
+    owner = 'owner' if native else R.owner(home)
+    channel = D.target(home, 'reports', slack=None) if native else cfg['channel']
+    if str(getattr(source, 'chat_id', '')) != channel or str(getattr(source, 'user_id', '')) != owner:
         return None
     thread = str(getattr(source, 'thread_id', '') or '')
     if not thread: return None
     with L.locked(state_path(home)):
         state = load(home)
-        report = next((r for r in state['reports'].values() if r.get('thread_ts') == thread and r['channel'] == cfg['channel']), None)
+        report = next((r for r in state['reports'].values() if r.get('platform', 'slack') == platform and r.get('thread' if native else 'thread_ts') == thread and r['channel'] == channel), None)
         if report is None: return None
-        if (getattr(event, 'raw_message', None) or {}).get('_hermes_button'):
+        if not native and (getattr(event, 'raw_message', None) or {}).get('_hermes_button'):
             report['button_replies'][str(getattr(event, 'message_id', '') or time.time())] = {'text': str(getattr(event, 'text', '') or '')}
             L.save(state_path(home), state)
     return {'action': 'skip', 'reason': 'starter_plugins_thread'}
@@ -151,16 +240,20 @@ def skip_report_thread(home, event=None, **_):
 def collect(home):
     if not config(home)['enabled']: return []
     result = []
-    owner = R.owner(home)
+    native = D.platform(home) == 'hejo'
+    owner = 'owner' if native else R.owner(home)
     with L.locked(state_path(home)):
         state = load(home)
         for key in state['current'].values():
             report = state['reports'][key]
-            if report.get('finished') or not report.get('thread_ts') or report['owner'] != owner: continue
-            clicks = [{'ts': ts, 'user': owner, **row} for ts, row in report['button_replies'].items()]
-            for message in sorted(messages(home, report) + clicks, key=lambda row: float(row['ts'])):
-                ts = str(message['ts'])
-                if message.get('user') != owner or message.get('subtype') or ts == report['thread_ts'] or ts in report['processed']:
+            if report.get('platform', 'slack') != ('hejo' if native else 'slack'):
+                continue
+            if report.get('finished') or not report.get('thread' if native else 'thread_ts') or report['owner'] != owner: continue
+            clicks = [] if native else [{'ts': ts, 'user': owner, **row} for ts, row in report['button_replies'].items()]
+            for message in sorted(messages(home, report) + clicks, key=lambda row: row['seq'] if native else float(row['ts'])):
+                ts = str(message['seq'] if native else message['ts'])
+                is_owner = message.get('role') == 'owner' if native else message.get('user') == owner
+                if not is_owner or message.get('subtype') or (not native and ts == report['thread_ts']) or ts in report['processed']:
                     continue
                 choice = CHOICES.get(message.get('text', '').strip())
                 if message.get('text', '').strip() == '의견':

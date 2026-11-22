@@ -6,6 +6,8 @@ import fcntl
 import hashlib
 import re
 import json
+import uuid
+from hermes_team_services import delivery as D
 import logging
 import os
 import time
@@ -154,11 +156,40 @@ class Decisions:
             save()  # Never blindly resend after an ambiguous Slack timeout.
             head=f'*🔴 연결된 업무 원본 확인*\n연결이 끊긴 업무 {len(fresh)}건의 원본을 확인해 주세요.'
             if len(certain)>=2:head=batch_text([r for r in fresh if r['certain']])
-            thread=self.send(channel,head);batch['thread_ts']=thread;save()
+            if D.platform(self.home) == 'hejo':
+                self.post_record(batch, head, save)
+                thread = batch['thread_ts']
+            else:
+                thread=self.send(channel,head);batch['thread_ts']=thread;save()
             for r in fresh:
                 d=state['decisions'][r['id']];d['thread_ts']=thread;save()
-                d['message_ts']=self.send(channel,item_text(d),thread_ts=thread);save()
+                if D.platform(self.home) == 'hejo':
+                    self.post_record(d, item_text(d), save, thread=thread)
+                else:
+                    d['message_ts']=self.send(channel,item_text(d),thread_ts=thread);save()
         return {'sent':len(fresh),'rows':rows}
+
+    def post_record(self, row, text, save, *, thread=None):
+        # A new candidate/question is a new occurrence, even if its text is unchanged.
+        row.update(platform='hejo', client_id='link:' + uuid.uuid4().hex, delivery={}, message_ts=None, head_id=None)
+        save()
+        receipt = self.send(row['channel'], text, thread_ts=thread, client_id=row['client_id'],
+                            state=row['delivery'], save=save)
+        row.update(message_ts=receipt['msg_id'], head_id=receipt['head_id'], thread_ts=receipt['thread'])
+        save()
+
+    def paint_record(self, row, text, save):
+        if row.get('platform', 'slack') != D.platform(self.home):
+            return  # Never edit a saved message through another platform.
+        if row.get('platform') != 'hejo':
+            return self.notify(row['channel'], text, message_ts=row['message_ts'])
+        try:
+            receipt = self.send(row['channel'], text, message_ts=row['message_ts'],
+                                state=row['delivery'], save=save)
+            row.update(message_ts=receipt['msg_id'], head_id=receipt['head_id'])
+            save()
+        except Exception as exc:
+            logging.getLogger(__name__).warning('decision_notification_failed:%s', type(exc).__name__)
 
     def notify(self, channel, text, **kwargs):
         # The durable decision must not fall through to an LLM on Slack failure.
@@ -182,7 +213,7 @@ class Decisions:
         else:
             index=int(label)-1
             candidate=d['candidates'][index]
-            self.notify(d['channel'],f'*🟡 {d["title"]}*\n원본을 다시 확인하고 있습니다.',message_ts=d['message_ts'])
+            self.paint_record(d,f'*🟡 {d["title"]}*\n원본을 다시 확인하고 있습니다.',save)
             try:
                 fresh=self.inventory.fresh(d['domain'],candidate['source_id'])
                 if (fresh['owner_scope']!='company' or fresh['identity']!=candidate['identity'] or deleted(fresh['identity'])):
@@ -192,14 +223,14 @@ class Decisions:
             except Exception as exc:
                 self.answer_state='failed'
                 d['status']='failed';d['failure_type']=type(exc).__name__;save()
-                self.notify(d['channel'],item_text(d,failed=True),message_ts=d['message_ts'])
+                self.paint_record(d,item_text(d,failed=True),save)
                 return f'{d["title"]}: 연결하지 못했습니다. 항목의 확인 버튼을 다시 선택해 주세요.'
-        self.notify(d['channel'],f'*🟢 {d["title"]}*\n'+('새 원본을 연결했습니다.' if d['status']=='linked' else '연결하지 않기로 했습니다.'),message_ts=d['message_ts'])
+        self.paint_record(d,f'*🟢 {d["title"]}*\n'+('새 원본을 연결했습니다.' if d['status']=='linked' else '연결하지 않기로 했습니다.'),save)
         return f'{d["title"]}: '+('연결 완료' if d['status']=='linked' else '연결 안 함')
 
-    def handle(self, channel, thread, text, button=None):
+    def handle(self, channel, thread, text, button=None, *, platform='slack'):
         with locked(self.home) as (state,save):
-            batches=[b for b in state['batches'].values() if b['channel']==channel and b['thread_ts']==thread]
+            batches=[b for b in state['batches'].values() if b['channel']==channel and b['thread_ts']==thread and b.get('platform','slack')==platform]
             if len(batches)!=1:return None
             batch=batches[0]
             ds=[state['decisions'][key] for key in batch['decisions']]
@@ -209,7 +240,7 @@ class Decisions:
                 return ''
             if button:
                 if button.get('label')!=text:return None
-                if button.get('message_ts')==thread:
+                if button.get('message_ts')==(batch.get('message_ts') if platform=='hejo' else thread):
                     if batch.get('numbered'):
                         self.claimed=True
                         if text=='확인':
@@ -248,7 +279,7 @@ class Decisions:
                     if keys:
                         self.answer_state='done'
                         return '\n'.join(self.decide(state['decisions'][key],'1',save) for key in dict.fromkeys(keys))
-            active=[d for d in ds if d['status'] in {'waiting','failed'}]
+            active=[d for d in ds if d['status'] in {'waiting','failed'} and (platform != 'hejo' or d.get('message_ts'))]
             parts=text.split(maxsplit=1)
             selected=[d for d in active if parts and parts[0]==d['id']]
             if selected and len(parts)==2:
@@ -265,7 +296,10 @@ class Decisions:
             # A text-discovered candidate is never part of the original bulk approval.
             batch['bulk_disabled']=True
             save()
-            d['message_ts']=self.send(channel,item_text(d),thread_ts=thread);save()
+            if platform == 'hejo':
+                self.post_record(d, item_text(d), save, thread=thread)
+            else:
+                d['message_ts']=self.send(channel,item_text(d),thread_ts=thread);save()
             return '원본 후보를 찾았습니다. 새 확인 버튼을 선택해 주세요.'
 
 
@@ -273,8 +307,13 @@ async def dispatch(home, event=None, **_):
     if not enabled(home):return None
     if not (Path(home)/'state/link-decisions.json').is_file():return None
     source=getattr(event,'source',None)
-    if getattr(getattr(source,'platform',None),'value','')!='slack':return None
-    if getattr(source,'user_id','')!=slack_report._sender().owner(home):return None
+    from hermes_team_services import delivery as D
+    platform=getattr(getattr(source,'platform',None),'value','')
+    if platform not in {'slack','hejo'} or platform!=D.platform(home) or getattr(event,'internal',False):return None
+    owner='owner' if platform=='hejo' else slack_report._sender().owner(home)
+    if getattr(source,'user_id','')!=owner:return None
+    button=(getattr(event,'raw_message',None) or {}).get('_hermes_button')
+    if button and platform=='hejo':button={**button,'message_ts':D.clicked_message_id(event)}
     from hermes_packs.linked_work.common_work_links import CommonWorkStore
     from hermes_constants import get_hermes_home
     if Path(get_hermes_home()).resolve()!=Path(home).resolve():return None
@@ -283,7 +322,7 @@ async def dispatch(home, event=None, **_):
         channel,thread=getattr(source,'chat_id',''),getattr(source,'thread_id','')
         try:
             result=app.handle(channel,thread,str(getattr(event,'text','') or '').strip(),
-                              (getattr(event,'raw_message',None) or {}).get('_hermes_button'))
+                              button,platform=platform)
         except Exception as exc:
             if not app.claimed:
                 raise

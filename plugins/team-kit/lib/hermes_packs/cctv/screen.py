@@ -4,9 +4,13 @@ Every call goes through `run`, a subprocess.run-shaped function, so tests observ
 captures the whole screen, and no call types a credential or accepts a certificate."""
 import contextlib
 import json
+import os
+import plistlib
+import re
 from time import sleep
 import subprocess
 from pathlib import Path
+from xml.parsers.expat import ExpatError
 
 APP = 'Windows App'
 OSASCRIPT = '/usr/bin/osascript'
@@ -15,6 +19,9 @@ OPEN = '/usr/bin/open'
 OPEN_TIMEOUT = 30
 LIST_TIMEOUT = 30
 CAPTURE_TIMEOUT = 30
+STATUS_TIMEOUT = 5
+RENDER_QUERY_ERROR = 'SCREEN_RENDER_QUERY_FAILED'
+COVERED = 'SESSION_WINDOW_NOT_FRONT'  # click.js: another app's window is above the session (`:<app name>` follows)
 RECONNECT_GRACE = 60  # starting the app (up to 20 s), the library window (15 s) and the desktop painting (12 s) come on top of the wait
 HERE = Path(__file__).resolve().parent
 
@@ -117,6 +124,56 @@ class Session:
         self.site, self.policy, self.run = site, policy, run
         self.previous, self.active, self.data = None, False, None
 
+    def rendering(self):
+        """Observe this login's console or screen-sharing renderer without any UI input.
+
+        Unknown OS state keeps the existing inspection available and records the
+        query failure. Only a successfully observed disconnected state blocks it.
+        """
+        def output(argv):
+            done = self.run(argv, capture_output=True, text=True, timeout=STATUS_TIMEOUT)
+            if done.returncode != 0:
+                raise ValueError('query failed: ' + Path(argv[0]).name)
+            return done.stdout
+
+        try:
+            rows = plistlib.loads(output(['/usr/sbin/ioreg', '-r', '-n', 'IOResources', '-d', '1', '-a']).encode())
+            if not isinstance(rows, list) or not rows:
+                raise ValueError('invalid IOResources')
+            users = []
+            for row in rows:
+                if not isinstance(row, dict) or not isinstance(row.get('IOConsoleUsers'), list):
+                    raise ValueError('invalid IOConsoleUsers')
+                users.extend(row['IOConsoleUsers'])
+            if not users or any(not isinstance(user, dict)
+                                or type(user.get('kCGSSessionUserIDKey')) is not int
+                                or type(user.get('kCGSSessionOnConsoleKey')) is not bool for user in users):
+                raise ValueError('invalid console user')
+            uid = os.getuid()
+            if any(user['kCGSSessionUserIDKey'] == uid and user['kCGSSessionOnConsoleKey'] for user in users):
+                return True
+            assertions = output(['/usr/bin/pmset', '-g', 'assertions'])
+            if 'Assertion status system-wide:' not in assertions or 'Listed by owning process:' not in assertions:
+                raise ValueError('invalid assertions')
+            connected = re.search(r'^\s*pid \d+\(screensharingd\):[^\n]*named: "Remote user is connected"',
+                                  assertions, re.M)
+            if not connected:
+                return False
+            processes = output(['/bin/ps', '-A', '-o', 'uid=,comm='])
+            agents = []
+            for line in processes.splitlines():
+                fields = line.split(None, 1)
+                if len(fields) != 2 or not fields[0].isdecimal() or not fields[1].strip():
+                    raise ValueError('invalid process row')
+                agents.append((int(fields[0]), Path(fields[1].strip()).name))
+            if not agents:
+                raise ValueError('empty process query')
+            return (uid, 'ScreensharingAgent') in agents
+        except (OSError, ValueError, ExpatError, subprocess.SubprocessError) as error:
+            self.data['last_error'] = {'reason': RENDER_QUERY_ERROR,
+                                       'detail': type(error).__name__ + ': ' + str(error)}
+            return True
+
     @contextlib.contextmanager
     def session(self, data):
         self.data = data
@@ -139,6 +196,13 @@ class Session:
     def windows(self):
         return list_windows(self.run)
 
+    def focus(self):
+        """Bring the session window to the front (the Window-menu item of the device). Returns the script's result."""
+        done = self.run([OSASCRIPT, '-l', 'JavaScript', str(HERE / 'focus.js'), 'focus', self.site['rdp_device'],
+                         str(self.policy['min_window_width']), str(self.policy['min_window_height'])],
+                        capture_output=True, text=True, timeout=LIST_TIMEOUT)
+        return json.loads(done.stdout) if done.returncode == 0 else {'ok': False, 'reason': 'FOCUS_SCRIPT_FAILED'}
+
     def activate(self):
         if self.active:
             return
@@ -152,10 +216,7 @@ class Session:
             if type(self.previous) is not int or self.previous <= 0:
                 self.previous = None
                 raise FocusFailed('FOCUS_REMEMBER_INVALID')
-            done = self.run([OSASCRIPT, '-l', 'JavaScript', str(HERE / 'focus.js'), 'focus', self.site['rdp_device'],
-                             str(self.policy['min_window_width']), str(self.policy['min_window_height'])],
-                            capture_output=True, text=True, timeout=LIST_TIMEOUT)
-            result = json.loads(done.stdout) if done.returncode == 0 else {'ok': False, 'reason': 'FOCUS_SCRIPT_FAILED'}
+            result = self.focus()
         except (OSError, ValueError, subprocess.SubprocessError) as error:
             raise FocusFailed('FOCUS_FAILED:' + type(error).__name__) from error
         self.previous = result.get('previous', {}).get('pid', self.previous)
@@ -163,6 +224,18 @@ class Session:
         if not result.get('ok'):
             raise FocusFailed(str(result.get('reason', 'FOCUS_FAILED')))
         self.active = True
+
+    def refocus(self):
+        """Raise the session window again after another app's window covered it. The app remembered at the start of
+        this wake-up stays the one restored at the end (the frontmost app is now Windows App itself)."""
+        try:
+            result = self.focus()
+        except (OSError, ValueError, subprocess.SubprocessError) as error:
+            self.data['last_focus']['focused'] = False
+            raise FocusFailed('FOCUS_FAILED:' + type(error).__name__) from error
+        if not result.get('ok'):
+            self.data['last_focus']['focused'] = False
+            raise FocusFailed(str(result.get('reason', 'FOCUS_FAILED')))
 
     def prepare(self, window):
         self.activate()
@@ -175,7 +248,15 @@ class Session:
         return capture(window, path, run=self.run)
 
     def input(self, window, command, box=None):
+        """Only a covered session window is retried, once: raise it again, then the same pre-input window recheck
+        and click.js front-window checks run again before the second attempt. Every other refusal ends here."""
         self.activate()
+        try:
+            return input(window, command, box, run=self.run)
+        except CaptureFailed as error:
+            if COVERED not in str(error):
+                raise
+        self.refocus()
         return input(window, command, box, run=self.run)
 
 

@@ -66,6 +66,8 @@ class WatchError(ValueError):
 
 # ---- 시스템 접점(시험에서 대체한다) ----
 
+from hermes_team_services import delivery
+
 def run_command(args, timeout, *, stdout_path=None):
     """(returncode, stdout, stderr, timed_out). 없는 프로그램·시간 초과·권한 오류로 예외를 내지 않는다."""
     out_fd = None
@@ -108,7 +110,7 @@ def uid():
 
 def deliver(home, text):
     report = load('learning_report', 'eventkit_stall_report')
-    return report.slack(home, 'chat.postMessage', {'channel': CHANNEL, 'text': text,
+    return report.slack(home, 'chat.postMessage', {'channel': delivery.target(home, 'doctor', slack=lambda: CHANNEL), 'text': text,
                                                     'unfurl_links': False, 'unfurl_media': False})
 
 
@@ -405,7 +407,7 @@ def message(kind, detection, evidence, outcome, count, limit, now, sent=None):
 def notify(home, text, now):
     """진단담당 DM. 00:00~08:29는 보류 줄로 넘긴다. 실패는 알림 실패 기록만 남기고 감시 결과를 바꾸지 않는다."""
     try:
-        if not CHANNEL:
+        if delivery.platform(home) == "slack" and not CHANNEL:
             raise WatchError("owner vault value 'dms.doctor' is not set")
         if quiet(now):
             hold(home, text, now)

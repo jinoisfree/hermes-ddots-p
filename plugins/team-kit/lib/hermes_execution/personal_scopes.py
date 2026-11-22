@@ -405,6 +405,8 @@ def install_mail(td):
     original = td._gmail_direct
     @wraps(original)
     def mail(args, runner=None, mail_runner=None, **context):
+        if td._PLUGIN_CONTEXT and td._PLUGIN_CONTEXT.get_config('gmail',{}).get('enabled') is False:
+            return td._error('GOOGLE_DISABLED')
         context = {**context, 'runner': runner, 'mail_runner': mail_runner}
         cfg = config(td)
         if cfg is None or current(td) not in OWNERS:return original(args, **context)

@@ -49,6 +49,9 @@ STAMP_LEVEL = re.compile(
 TOOL_RETURN_ERROR = re.compile(r"^agent\.tool_executor:\s+Tool [\w.-]+ returned error\b")
 
 
+from hermes_team_services import delivery
+import uuid
+
 def safe_path(path):
     path = Path(path).absolute()
     if path.resolve() != path:
@@ -186,9 +189,39 @@ def save_state(path, data):
             os.unlink(name)
 
 
+_NOTICE_SKIPPED = re.compile(r"dedicated ([a-z_]+) notification was not delivered")
+_NOTICE_CACHE = {}
+
+
+def enabled_notification_events():
+    """루트 지시서가 켠 시스템 알림 종류. 읽지 못하면 None이라 기존처럼 전달 실패로 본다."""
+    try:
+        from hermes_facility.team_registry import root_home
+        path = root_home() / "config.yaml"
+        key = (str(path), path.stat().st_mtime_ns)
+        if key not in _NOTICE_CACHE:
+            import hermes_yaml as yaml
+            raw = yaml.safe_load(path.read_text()) or {}
+            config = (raw.get("gateway") or {}).get("system_notifications")
+            # 본체(system_restart_notice.system_notification_config)와 같은 조건만 쓴다.
+            if not isinstance(config, dict) or config.get("enabled") is not True:
+                return None
+            _NOTICE_CACHE.clear()
+            _NOTICE_CACHE[key] = frozenset(str(item) for item in config.get("events") or [])
+        return _NOTICE_CACHE[key]
+    except Exception:
+        return None
+
+
 def explain(summary):
     """Explain only recognizable log facts; do not infer recovery or user impact."""
     message = summary.lower()
+    skipped = _NOTICE_SKIPPED.search(message)
+    if skipped:
+        enabled = enabled_notification_events()
+        # 2026-11-21 사장 결정으로 끈 종류(재시작·온라인)는 본체가 보내지 않고 이 줄만 남긴다.
+        if enabled is not None and skipped[1] not in enabled:
+            return "설정에서 끈 시스템 알림 생략", "지시서(config.yaml gateway.system_notifications.events)에서 끈 종류의 시스템 알림이라 보내지 않았다는 정상 기록이다. 전달 실패가 아니다. 켠 종류의 실제 전달 실패는 '시스템 알림 전달 실패'로 따로 남는다."
     if "failed to connect" in message and "slack.com" in message:
         return "슬랙 서버 접속 실패", "슬랙 서버에 연결하지 못했다는 기록이다. 연결 실패의 원인과 메시지 손실 여부는 이 줄만으로 알 수 없다. 같은 시각의 재연결·전송 기록을 확인해야 한다."
     if "system prompt section" in message and "exceeded" in message and "budget" in message:
@@ -260,11 +293,12 @@ def _require_channel():
 
 
 def deliver(home, text):
-    _require_channel()
+    if delivery.platform(home) == "slack":
+        _require_channel()
     spec = importlib.util.spec_from_file_location("error_digest_report", Path(__file__).with_name("learning_report.py"))
     R = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(R)
-    return R.slack(home, 'chat.postMessage', {'channel': CHANNEL, 'text': text,
+    return R.slack(home, 'chat.postMessage', {'channel': delivery.target(home, 'doctor', slack=lambda: CHANNEL), 'text': text,
                                             'unfurl_links': False, 'unfurl_media': False})
 
 
@@ -290,24 +324,70 @@ def prepare(root, home, *, hours=24, now=None):
     return {"path": state_path, "state": state, "groups": groups, "new": new}
 
 
-def stage_pending(prepared):
+def stage_pending(prepared, *, preserve=False):
     # Pending is an unacknowledged send intent, never the confirmed baseline.
-    state = {**prepared['state'], 'pending': prepared['new']}
-    save_state(prepared['path'], state)
+    state = load_state(prepared['path']) if preserve else prepared['state']
+    pending = {**state.get('pending', {}), **prepared['new']} if preserve else prepared['new']
+    save_state(prepared['path'], {**state, 'pending': pending})
 
 
-def acknowledge(prepared):
-    state = prepared['state']
+def acknowledge(prepared, *, preserve=False, notice=None):
+    state = load_state(prepared['path']) if preserve else prepared['state']
     seen = dict(state['signatures'])
-    for key, item in {**prepared['groups'], **prepared['new']}.items():
+    covered = {**prepared['groups'], **prepared['new']}
+    for key, item in covered.items():
         seen[key] = {"last_seen": max(item["last_seen"], seen.get(key, {}).get("last_seen", 0))}
+    pending = {key: item for key, item in state.get('pending', {}).items()
+               if key not in covered or item['last_seen'] > covered[key]['last_seen']} if preserve else {}
     state = {k: v for k, v in state.items() if k != 'pending'}
+    if pending:
+        state['pending'] = pending
+    if notice is not None:
+        state['notice'] = notice
     state.update(version=STATE_VERSION, initialized=True, signatures=dict(sorted(
         seen.items(), key=lambda pair: (-pair[1]["last_seen"], pair[0]))[:MAX_SIGNATURES]))
     save_state(prepared['path'], state)
 
 
+def run_hejo(root, home, *, hours, now):
+    path = Path(home) / "state/error-digest.json"
+    state = load_state(path)
+    notice = state.get("notice", {})
+    if notice.get("platform") != "hejo" or notice.get("complete", True):
+        prepared = prepare(root, home, hours=hours, now=now)
+        text = format_digest(prepared["new"])
+        if hours != 24:
+            text = text.replace("지난 24시간", f"지난 {hours}시간", 1)
+        if not text:
+            acknowledge(prepared, preserve=True)
+            return ""
+        notice = {"platform": "hejo", "key": "error-digest:" + uuid.uuid4().hex,
+                  "text": text, "groups": prepared["groups"], "new": prepared["new"],
+                  "target": delivery.target(home, "doctor", slack=lambda: CHANNEL),
+                  "delivery": {}, "complete": False}
+        state["notice"] = notice
+    def save():
+        save_state(path, state)
+    save()
+    try:
+        receipt = delivery.post(home, notice["target"], state=notice["delivery"], save=save,
+            client_id=notice["key"], **delivery.presentation({"text": notice["text"]}))
+        notice.update(receipt=receipt, outcome="sent")
+    except delivery.Refused as exc:
+        if not exc.permanent:
+            raise
+        notice.update(outcome="rejected", error=exc.error)
+    notice["complete"] = True
+    acknowledge({"path": path, "state": state, "groups": notice["groups"], "new": notice["new"]},
+                preserve=True, notice=notice)
+    return ""
+
+
 def run(root, home, *, hours=24, dry_run=False, now=None):
+    if delivery.platform(home) == "hejo" and not dry_run:
+        from hermes_team_services.morning_queue import locked
+        with locked(Path(home) / "state/error-digest.json"):
+            return run_hejo(root, home, hours=hours, now=now)
     prepared = prepare(root, home, hours=hours, now=now)
     result = format_digest(prepared['new'])
     if hours != 24:

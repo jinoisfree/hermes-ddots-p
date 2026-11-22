@@ -697,8 +697,9 @@ def build_CONTACTS_DIRECT_LOOKUP_SCHEMA():
                             "처음에는 macOS 자동화 허용이 필요할 수 있고 메모 조회 실패는 note_error로 따로 보고한다. "
                             "list는 offset/limit·organization·group_id로 표시 이름순 목록(total/next_offset), groups는 그룹과 인원, "
                             "group_members는 group_id 필수와 offset/limit, containers는 저장소 목록이다. "
-                            "export_vcf는 contact_ids(최대500) 또는 group_id 중 하나로 허용 폴더의 999. <<work_profile>>/연락처에 "
-                            "새 vcf를 저장한다. file_name은 선택이며 덮어쓰지 않는다. notes_included=false다.")),
+                            "export_vcf는 contact_ids(최대500) 또는 group_id 중 하나와 folder(허용 폴더 안의 기존 폴더, 절대 경로)가 필요하며 그 폴더에 "
+                            "새 vcf를 저장한다. folder는 file_list()로 허용 폴더를 확인한 뒤 사장이 말한 폴더나 알맞은 폴더를 고르고 모르면 묻는다. "
+                            "file_name은 선택이며 덮어쓰지 않는다. notes_included=false다.")),
             "parameters": {"type": "object", "properties": {
                 "action": {"type": "string", "enum": ["access", "search", "get", "list", "groups", "group_members", "containers", "export_vcf"]},
                 "query": {"type": "string"}, "contact_id": {"type": "string"},
@@ -706,6 +707,7 @@ def build_CONTACTS_DIRECT_LOOKUP_SCHEMA():
                 "offset": {"type": "integer", "minimum": 0, "default": 0},
                 "contact_ids": {"type": "array", "minItems": 1, "maxItems": 500, "items": {"type": "string", "minLength": 1}},
                 "file_name": {"type": "string", "description": "export_vcf의 새 .vcf 파일 이름. 기존 파일을 덮어쓰지 않는다."},
+                "folder": {"type": "string", "description": "export_vcf 필수. .vcf를 둘 절대 경로의 기존 폴더로, 허용 폴더 안이어야 한다. 하위 폴더를 만들지 않는다."},
                 "include_note": {"type": "boolean", "description": "get 전용. Contacts.app 자동화로 메모를 읽어 확인한다."},
                 "limit": {"type": "integer", "minimum": 1, "maximum": 100, "description": "search 기본20/최대50, list/group_members 기본50/최대100"}},
                 "required": ["action"], "additionalProperties": False}}
@@ -717,7 +719,7 @@ def build_CONTACTS_DIRECT_MUTATION_SCHEMA(_CONTACTS_EMAIL, _CONTACTS_PHONE):
     return (
         {
             "name": "contacts_direct_mutation",
-            "description": (_owner_text("macOS 연락처·그룹 관리(명함 포함). 생성 전 contacts_direct_lookup search로 중복 확인. 휴대폰 없는 명함은 직장 번호만 쓴다. delete는 contact_id+expected_name, group_rename은 group_id+expected_name+name, group_delete는 group_id+expected_name, group_create는 name, group_add/remove는 group_id+contact_ids(최대200)가 필수다. 삭제는 연락처/백업에 vcf·메모 또는 그룹 구성 JSON 백업 후 실행하며 그룹 삭제는 멤버를 지우지 않는다. import_vcf는 허용 폴더의 실제 .vcf(file_path, 5MiB 이하)를 중복 건너뛰고 한 번에 저장한다. group_id는 선택이다. vCard NOTE는 가져오지 않으며 notes_included=false로 보고한다. create에는 family_name/given_name 중 하나가 필요하다. 이메일·휴대폰 중복은 CONTACTS_DUPLICATE로 거부하며 소유자가 중복 등록을 명시한 경우에만 allow_duplicate=true를 쓴다. update: get으로 확인한 contact_id+expected_name 필수, 준 필드만 변경. 전화·이메일은 add_*(기존 유지) 또는 replace_*(전체 교체)만 쓴다. image_path는 현재 직원의 cache/images의 실제 파일(5MB 이하)만 된다. 수정은 Contacts.app에서 준 필드만 쓰며, 되돌릴 때도 그 필드만 복원한다. 사진 변경은 원본 바이트를 정확히 복원할 수 없어 먼저 승인받는다. 지원하지 않는 주소 항목은 거부한다. 실패 후 재생성·자동 재시도하지 않는다. note_applied가 참일 때만 메모가 저장됐다. ") + rule_note()),
+            "description": (_owner_text("macOS 연락처·그룹 관리(명함 포함). 생성 전 contacts_direct_lookup search로 중복 확인. 휴대폰 없는 명함은 직장 번호만 쓴다. delete는 contact_id+expected_name, group_rename은 group_id+expected_name+name, group_delete는 group_id+expected_name, group_create는 name, group_add/remove는 group_id+contact_ids(최대200)가 필수다. 삭제는 backups/contacts에 vcf·메모 또는 그룹 구성 JSON 백업 후 실행하며 그룹 삭제는 멤버를 지우지 않는다. import_vcf는 허용 폴더의 실제 .vcf(file_path, 5MiB 이하)를 중복 건너뛰고 한 번에 저장한다. group_id는 선택이다. vCard NOTE는 가져오지 않으며 notes_included=false로 보고한다. create에는 family_name/given_name 중 하나가 필요하다. 이메일·휴대폰 중복은 CONTACTS_DUPLICATE로 거부하며 소유자가 중복 등록을 명시한 경우에만 allow_duplicate=true를 쓴다. update: get으로 확인한 contact_id+expected_name 필수, 준 필드만 변경. 전화·이메일은 add_*(기존 유지) 또는 replace_*(전체 교체)만 쓴다. image_path는 현재 직원의 cache/images의 실제 파일(5MB 이하)만 된다. 수정은 Contacts.app에서 준 필드만 쓰며, 되돌릴 때도 그 필드만 복원한다. 사진 변경은 원본 바이트를 정확히 복원할 수 없어 먼저 승인받는다. 지원하지 않는 주소 항목은 거부한다. 실패 후 재생성·자동 재시도하지 않는다. note_applied가 참일 때만 메모가 저장됐다. ") + rule_note()),
             "parameters": {"type": "object", "properties": {
                 "action": {"type": "string", "enum": ["create", "update", "delete", "group_create", "group_rename", "group_delete", "group_add", "group_remove", "import_vcf"]},
                 **{key: {"type": "string"} for key in ('contact_id', 'expected_name', 'family_name', 'given_name',

@@ -194,6 +194,8 @@ def instagram_module(home, profile):
     """The profile's own plugin file supplies GRAPH_BASE and the token name; nothing is copied here."""
     import importlib.util
     import sys
+    from hermes_facility.connections import home_service_enabled
+    if not home_service_enabled(home,'instagram'):raise ValueError('DISABLED')
     path = Path(home) / 'plugins/instagram-dm/__init__.py'
     name = 'hermes_connections_instagram_' + re.sub(r'\W', '_', str(profile))
     if name in sys.modules:

@@ -14,6 +14,8 @@ from typing import Any, Callable
 from dataclasses import dataclass
 from zoneinfo import ZoneInfo
 
+from hermes_facility import path_form
+
 
 @dataclass(frozen=True)
 class Services:
@@ -59,7 +61,7 @@ def inside(path: Any, roots: list[Path]) -> Path | None:
         target = target.resolve()
     except (OSError, RuntimeError, ValueError):
         return None
-    return target if any(root == target or root in target.parents for root in roots) else None
+    return path_form.anchored(target, roots)
 
 
 def problem(services, tool_name: str, args: dict[str, Any]) -> str | None:

@@ -27,7 +27,7 @@ NAMES = {p: team.label_of(p) for p in team.profiles() if not team.has_role(p, 's
 
 ROLES = {'wiki': 'Wiki·지식·기억', 'personal': _owner_text('AI 아이디어 탐색·일반 대화·개인 범위(개인메모·개인 목록·<<owner_account>>)'),
          'work': '회사 업무 전체(메모·일정·Notion·메일·파일 조회·실행·종합 보고·마감)',
-         'customers': '고객 상담·SNS·소식', 'doctor': 'Hermes·ddots 읽기 전용 시스템 진단'}
+         'customers': '고객 상담·SNS·소식', 'doctor': 'Hermes·hejo 읽기 전용 시스템 진단'}
 LIMITS = {'wiki': 'Wiki 게시·승격·삭제는 기존 승인. 다른 담당자의 업무 원본은 변경하지 않음.',
           'personal': '회사 원본 변경·회사 메일·Notion·공문 불가. 개인 범위만 쓰며 발송·삭제는 기존 승인. 내부 업무 상태·학습은 별도.',
           'work': '파일은 허용 폴더에서 사용. Notion은 현재 설정의 범위·승인 규칙 적용. 발송·삭제 등 기존 승인 유지. Gmail 임시보관함 저장·HWP 편집·수식 재계산 미지원.',

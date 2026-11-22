@@ -7,7 +7,7 @@ import sys as _owner_sys
 _owner_library = str((_OwnerPath(__file__).resolve().parent / '../..').resolve())
 if _owner_library not in _owner_sys.path:
     _owner_sys.path.insert(0, _owner_library)
-from hermes_facility.owner_text import render as _owner_text
+from hermes_facility.owner_text import render as _owner_text, repository as _repository
 
 from hermes_facility.loading import source_path
 
@@ -29,7 +29,7 @@ import importlib.util as _ilu, pathlib as _pl, sys as _sys
 from hermes_facility import team_registry as team
 
 ROOT = Path.home() / '.hermes'
-SETTINGS_REPO = (Path.home() / _owner_text('<<workspace_folder>>/Hermes-ddots')).resolve()
+SETTINGS_REPO = _repository().resolve()
 KST = ZoneInfo('Asia/Seoul')
 PROFILES = tuple(team.profiles_sorted())
 MAX_CHARS, MAX_LINES, MAX_FILE = 16000, 160, 16_000_000

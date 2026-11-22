@@ -22,6 +22,9 @@ import sys as _atomic_sys
 if str(_AtomicPath(__file__).resolve().parents[1]) not in _atomic_sys.path:
     _atomic_sys.path.insert(0, str(_AtomicPath(__file__).resolve().parents[1]))
 from hermes_facility import atomic as _atomic
+from hermes_team_services import delivery
+import uuid
+import logging
 
 
 def quiet(now=None):
@@ -96,6 +99,11 @@ def hold(home, channel, text, at=None, *, topic=None):
     path = held_path(home)
     row = {'at': at or datetime.now(KST).isoformat(), 'channel': channel, 'text': text}
     if topic: row['topic'] = topic
+    if delivery.platform(home) == 'hejo':
+        role = 'learning_reports' if memory_row(row) else 'doctor'
+        row.update(platform='hejo', channel=delivery.target(home, role, slack=lambda: channel))
+        if not memory_row(row):
+            row.update(client_id='held:' + uuid.uuid4().hex, delivery={})
     with locked(path):
         current = read(path)
         if current and not current.endswith('\n'):
@@ -114,7 +122,24 @@ def flush_held(home, post):
             for row in rows:
                 if memory_row(row):
                     continue  # The learning producer owns these receipts, not the system DM.
-                post(row['channel'], row['text'])
+                if delivery.platform(home) == 'hejo':
+                    if row.get('platform', 'slack') != 'hejo':
+                        row.update(platform='hejo', channel=delivery.target(home, 'doctor', slack=lambda: row['channel']),
+                                   client_id='held:' + uuid.uuid4().hex, delivery={})
+                    def save():
+                        atomic_write(path, ''.join(json.dumps(r, ensure_ascii=False) + '\n' for r in remaining))
+                    save()
+                    try:
+                        delivery.post(home, row['channel'], client_id=row['client_id'], state=row['delivery'], save=save,
+                                      **delivery.presentation({'text': row['text']}))
+                    except delivery.Refused as exc:
+                        if not exc.permanent:
+                            raise
+                        logging.getLogger(__name__).error('Held notice refused (%s): %s', exc.status, exc.error)
+                else:
+                    if row.get('platform', 'slack') != 'slack':
+                        continue  # Never pass native targets/IDs to a restored Slack sender.
+                    post(row['channel'], row['text'])
                 remaining.remove(row)
                 sent += 1
         finally:
@@ -129,8 +154,10 @@ def memory_row(row):
 def learning_appendices(home, channel):
     path = held_path(home)
     with locked(path):
+        native = delivery.platform(home) == 'hejo'
         return [r for r in (json.loads(line) for line in read(path).splitlines() if line.strip())
-                if memory_row(r) and r.get('channel') == channel]
+                if memory_row(r) and ((native and (r.get('platform', 'slack') == 'slack' or r.get('channel') == channel))
+                                     or (not native and r.get('platform', 'slack') == 'slack' and r.get('channel') == channel))]
 
 
 def acknowledge_appendices(home, delivered):

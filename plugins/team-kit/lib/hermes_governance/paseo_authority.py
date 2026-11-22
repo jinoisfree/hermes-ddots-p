@@ -48,6 +48,8 @@ def owner_text(home=None, **context):
         raise ValueError('Paseo refuses unattended and diagnosis-request execution')
     fields = {key: env('HERMES_SESSION_' + key, '') for key in
               ('PLATFORM', 'ID', 'USER_ID', 'CHAT_ID', 'THREAD_ID', 'MESSAGE_ID')}
+    if fields['PLATFORM'] == 'hejo':
+        fields['ID'] = str(context.get('session_id') or '')
     if fields['PLATFORM'] not in {'slack', 'hejo'} or not all(fields[key] for key in ('ID', 'USER_ID', 'CHAT_ID', 'MESSAGE_ID')):
         raise ValueError('Paseo requires a current Slack transport event')
     if context.get('session_id') and context['session_id'] != fields['ID']:

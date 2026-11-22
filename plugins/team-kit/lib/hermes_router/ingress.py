@@ -361,6 +361,18 @@ def install(adapter: Any, platform: str, *, shadow: bool, home: Path, contract=N
     original = adapter.handle_message
 
     async def handle_message(event):
+        if platform in {"photon", "bluebubbles"}:
+            try:
+                adapters = getattr(getattr(adapter, "gateway_runner", None), "adapters", {})
+                hejo = next((value for key, value in adapters.items()
+                             if getattr(key, "value", key) == "hejo"), None)
+                claims = getattr(hejo, "claims_external", None)
+                claimed = claims is not None and claims(event) is True
+            except Exception:
+                # Optional door unavailable: retain the existing admission path.
+                claimed = False
+            if claimed:
+                return await original(event)
         if not getattr(adapter, "_message_handler", None):
             return await original(event)
         if shadow:

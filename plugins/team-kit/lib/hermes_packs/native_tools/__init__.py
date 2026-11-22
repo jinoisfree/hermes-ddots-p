@@ -78,8 +78,8 @@ def _request_usage_lookup(services, args: dict[str, Any], **_: Any) -> str:
     thread_id = services.get_session_env("HERMES_SESSION_THREAD_ID", "").strip()
     current_message_id = services.get_session_env("HERMES_SESSION_MESSAGE_ID", "").strip()
     requested_message_id = str(args.get("message_id") or "").strip()
-    if not services.team.has_role(profile, 'doctor') or platform != "slack" or not chat_id or not thread_id:
-        return services._error(f"request_usage_lookup requires the {services.team.first_with('doctor')} profile in one Slack thread")
+    if not services.team.has_role(profile, 'doctor') or platform not in {"slack", "hejo"} or not chat_id or not thread_id:
+        return services._error(f"request_usage_lookup requires the {services.team.first_with('doctor')} profile in one conversation thread")
     if set(args) - {"message_id"}:
         return services._error("request_usage_lookup accepts only message_id")
 
@@ -94,9 +94,24 @@ def _request_usage_lookup(services, args: dict[str, Any], **_: Any) -> str:
     if not existing_ledgers:
         return services._error("REQUEST_USAGE_LEDGER_MISSING")
 
+    native_order = {}
+    if platform == 'hejo':
+        from hermes_constants import get_hermes_home
+        from hermes_owner_chat import authenticated_owner
+        from hermes_team_services import delivery
+        if not authenticated_owner(services.get_session_env, legacy_owner=lambda _: False):
+            return services._error("REQUEST_USAGE_OWNER_REQUIRED")
+        try:
+            rows = delivery.read_thread(Path(get_hermes_home()), chat_id, thread_id)['messages']
+            native_order = {r['msg_id']: int(r['seq']) for r in rows if r.get('role') == 'owner'}
+        except (OSError, ValueError, RuntimeError, KeyError, TypeError):
+            return services._error("REQUEST_USAGE_THREAD_READ_FAILED")
+        if current_message_id not in native_order:
+            return services._error("REQUEST_USAGE_CURRENT_MESSAGE_MISSING")
+
     candidate: dict[str, Any] | None = None
     candidate_order: tuple[int, int, int, str] | None = None
-    current_order = services._request_usage_message_order(current_message_id)
+    current_order = (1, native_order[current_message_id], 0, '') if platform == 'hejo' else services._request_usage_message_order(current_message_id)
     try:
         for allowed_profiles, ledger in existing_ledgers:
             with ledger.open("rb") as handle:
@@ -114,9 +129,9 @@ def _request_usage_lookup(services, args: dict[str, Any], **_: Any) -> str:
                         continue
                     if row.get("schema") != "hermes.response_usage.v1":
                         continue
-                    if row.get("stage") != "delivery:slack":
+                    if row.get("stage") != "delivery:" + platform:
                         continue
-                    if str(row.get("platform") or "slack").lower() != "slack":
+                    if str(row.get("platform") or "slack").lower() != platform:
                         continue
                     if str(row.get("profile_id") or "") not in allowed_profiles:
                         continue
@@ -129,7 +144,9 @@ def _request_usage_lookup(services, args: dict[str, Any], **_: Any) -> str:
                         continue
                     if requested_message_id and origin_message_id != requested_message_id:
                         continue
-                    origin_order = services._request_usage_message_order(origin_message_id)
+                    if platform == 'hejo' and origin_message_id not in native_order:
+                        continue
+                    origin_order = (1, native_order[origin_message_id], 0, '') if platform == 'hejo' else services._request_usage_message_order(origin_message_id)
                     if current_order[0] and origin_order[0] and origin_order >= current_order:
                         continue
                     if candidate_order is None or origin_order > candidate_order:
@@ -145,7 +162,7 @@ def _request_usage_lookup(services, args: dict[str, Any], **_: Any) -> str:
         "ok": True,
         "scope": "request-local numeric usage only",
         "request": {
-            "platform": "slack",
+            "platform": platform,
             "chat_id": chat_id,
             "thread_id": thread_id,
             "message_id": str(candidate.get("origin_message_id") or ""),
@@ -433,7 +450,7 @@ def _contacts_arguments(services, args: dict[str, Any], *, mutation: bool) -> tu
         'list': shared | {'offset', 'limit', 'organization', 'group_id'},
         'groups': shared, 'containers': shared,
         'group_members': shared | {'group_id', 'offset', 'limit'},
-        'export_vcf': shared | {'contact_ids', 'group_id', 'file_name'},
+        'export_vcf': shared | {'contact_ids', 'group_id', 'file_name', 'folder'},
         'create': shared | fields | {'phones', 'emails', 'allow_duplicate'},
         'update': shared | identity | fields | {'add_phones', 'replace_phones', 'add_emails', 'replace_emails'},
         'delete': shared | identity,
@@ -461,6 +478,10 @@ def _contacts_arguments(services, args: dict[str, Any], *, mutation: bool) -> tu
         if 'file_name' in payload:
             try: payload['file_name'] = services.contacts_files.filename(payload['file_name'], '.vcf')
             except ValueError: return payload, 'CONTACTS_EXPORT_NAME_REFUSED'
+        if 'folder' not in payload:
+            return payload, 'CONTACTS_EXPORT_FOLDER_REQUIRED'
+        try: payload['folder'] = str(services.contacts_files.export_folder(payload['folder']))
+        except (OSError, RuntimeError, ValueError, KeyError, TypeError): return payload, 'CONTACTS_EXPORT_FOLDER_REFUSED'
     if action == 'import_vcf':
         try: payload['file_path'] = str(services.contacts_files.import_path(payload.get('file_path', '')))
         except (OSError, RuntimeError, ValueError, KeyError): return payload, 'CONTACTS_IMPORT_PATH_REFUSED'
@@ -660,7 +681,7 @@ def _contacts_backup(services, payload: dict[str, Any], native: Any, runner: Any
         data, suffix = services.contacts_files.group_backup(group), '.json'
     stamp = datetime_type.now().astimezone().strftime('%Y%m%d_%H%M%S_%f')
     name = re.sub(r'[/\\\x00-\x1f]', '_', payload['expected_name'])[:100]
-    folder = services.contacts_files.storage(backup=True)
+    folder = services.contacts_files.backup_folder()
     backup = services.contacts_files.write_unique(folder, services.contacts_files.filename(stamp + '_' + name, suffix), data)
     details = {'backup_path': str(backup)}
     if action == 'delete':
@@ -685,7 +706,7 @@ def _contacts_direct(services, args: dict[str, Any], *, mutation: bool, **contex
     note_requested = mutation and ('note' in payload or payload.get('clear_note') is True)
     note = '' if payload.get('clear_note') is True else payload.get('note')
     include_note = not mutation and payload.get('include_note') is True
-    native_payload = {key: value for key, value in payload.items() if key not in {'note', 'clear_note', 'include_note', 'file_name'}}
+    native_payload = {key: value for key, value in payload.items() if key not in {'note', 'clear_note', 'include_note', 'file_name', 'folder'}}
     prepared = contacts_undo.prepared()
     if prepared:
         native_payload['_journal']=True
@@ -745,7 +766,7 @@ def _contacts_direct(services, args: dict[str, Any], *, mutation: bool, **contex
                     if data and not data.startswith(b'BEGIN:VCARD'):
                         raise ValueError('invalid vCard')
                     name = payload.get('file_name') or datetime_type.now().astimezone().strftime('연락처_%Y%m%d_%H%M%S.vcf')
-                    path = services.contacts_files.write_unique(services.contacts_files.storage(), services.contacts_files.filename(name, '.vcf'), data)
+                    path = services.contacts_files.write_unique(services.contacts_files.export_folder(payload['folder']), services.contacts_files.filename(name, '.vcf'), data)
                     result.update(file_path=str(path), notes_included=False)
                 except (OSError, ValueError, KeyError, TypeError):
                     return failed('CONTACTS_EXPORT_FAILED')

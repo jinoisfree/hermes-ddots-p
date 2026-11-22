@@ -11,7 +11,7 @@ import sys as _owner_sys
 _owner_library = str((_OwnerPath(__file__).resolve().parent / '..').resolve())
 if _owner_library not in _owner_sys.path:
     _owner_sys.path.insert(0, _owner_library)
-from hermes_facility.owner_text import render as _owner_text
+from hermes_facility.owner_text import render as _owner_text, repository as _repository
 
 import argparse
 from contextlib import ExitStack
@@ -19,6 +19,8 @@ from datetime import datetime
 import importlib.util
 import json
 import hashlib
+import uuid
+from hermes_team_services import delivery
 import time
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -198,6 +200,8 @@ def run(root, home, agents, document, *, dry_run=False, now=None):
         if not dry_run:
             stack.enter_context(Q.locked(home / 'watcher-state/morning-system.json'))
             stack.enter_context(Q.locked(home / 'watcher-state/doctor.json'))
+            if delivery.platform(home) == 'hejo':
+                stack.enter_context(Q.locked(home / 'state/error-digest.json'))
         if outbox.is_symlink():
             raise ValueError('symlink state')
         pending = json.loads(outbox.read_text()) if outbox.exists() else {}
@@ -226,7 +230,7 @@ def run(root, home, agents, document, *, dry_run=False, now=None):
                        'parts': [{'text': t} for t in R.layout.chunks(text.split('\n\n'))]}
         if dry_run:
             return text
-        if text and not CHANNEL:
+        if text and delivery.platform(home) == 'slack' and not CHANNEL:
             raise vault.VaultError("owner vault value 'dms.doctor' is not set; morning system report not sent")
         def save():
             D.atomic_state(outbox, pending)
@@ -236,39 +240,64 @@ def run(root, home, agents, document, *, dry_run=False, now=None):
         save()  # Persist the exact snapshot; new arrivals must not be acknowledged with this report.
         if text:
             if errors['new']:
-                E.stage_pending(errors)
-            for index, part in enumerate(pending['parts']):
-                if part.get('ts'):
-                    continue
-                marker = 'morning_system_' + hashlib.sha256(
-                    (str(home.resolve()) + pending['day'] + text + str(index)).encode()).hexdigest()[:40]
-                ts = None
-                if part.get('attempted_at'):
-                    pending['bot'] = R.slack(home, 'auth.test', {})['user_id']
-                    ts = R.recover(home, pending, part, marker)
-                if not ts:
-                    part['attempted_at'] = time.time()
-                    save()
-                    body = {'channel': CHANNEL, 'text': part['text'], 'metadata': R.layout.metadata(marker),
-                            'unfurl_links': False, 'unfurl_media': False}
-                    if index:
-                        body['thread_ts'] = pending['thread_ts']
-                    receipt = R.slack(home, 'chat.postMessage', body)
-                    if not (isinstance(receipt, dict) and receipt.get('ok') is True
-                            and receipt.get('ts') and receipt.get('channel') == CHANNEL):
-                        raise ValueError('morning delivery unconfirmed')
-                    ts = str(receipt['ts'])
-                part['ts'] = ts
-                if index == 0:
-                    pending['thread_ts'] = ts
+                E.stage_pending(errors, preserve=delivery.platform(home) == 'hejo')
+            if delivery.platform(home) == 'hejo':
+                if pending.get('platform', 'slack') != 'hejo':
+                    pending.update(platform='hejo', channel=delivery.target(home, 'doctor', slack=lambda: CHANNEL),
+                                   client_id='morning-system:' + pending['day'] + ':' + uuid.uuid4().hex, delivery={})
+                    pending.pop('thread_ts', None)
                 save()
-            if any(night.get('job') for night in nights):
-                module('paseo_autofix').attach_thread(home, CHANNEL, pending['thread_ts'])
+                try:
+                    receipt = delivery.post(home, pending['channel'], client_id=pending['client_id'],
+                        state=pending['delivery'], save=save, **delivery.presentation({'text': text}))
+                    pending.update(message_id=receipt['msg_id'], head_id=receipt['head_id'], thread=receipt['thread'])
+                    save()
+                except delivery.Refused as exc:
+                    if not exc.permanent:
+                        raise
+                    pending['delivery_error'] = exc.error
+                    save()
+                if not pending.get('delivery_error') and any(night.get('job') for night in nights):
+                    module('paseo_autofix').attach_thread(home, pending['channel'], pending['thread'],
+                                                       platform='hejo', message_id=pending['message_id'])
+            else:
+                if pending.get('platform', 'slack') == 'hejo':
+                    pending.update(platform='slack', channel=CHANNEL, parts=[{'text': t} for t in R.layout.chunks(text.split('\n\n'))])
+                    for field in ('thread_ts', 'thread', 'message_id', 'head_id', 'delivery', 'delivery_error', 'client_id'):
+                        pending.pop(field, None)
+                    save()
+                for index, part in enumerate(pending['parts']):
+                    if part.get('ts'):
+                        continue
+                    marker = 'morning_system_' + hashlib.sha256(
+                        (str(home.resolve()) + pending['day'] + text + str(index)).encode()).hexdigest()[:40]
+                    ts = None
+                    if part.get('attempted_at'):
+                        pending['bot'] = R.slack(home, 'auth.test', {})['user_id']
+                        ts = R.recover(home, pending, part, marker)
+                    if not ts:
+                        part['attempted_at'] = time.time()
+                        save()
+                        body = {'channel': CHANNEL, 'text': part['text'], 'metadata': R.layout.metadata(marker),
+                                'unfurl_links': False, 'unfurl_media': False}
+                        if index:
+                            body['thread_ts'] = pending['thread_ts']
+                        receipt = R.slack(home, 'chat.postMessage', body)
+                        if not (isinstance(receipt, dict) and receipt.get('ok') is True
+                                and receipt.get('ts') and receipt.get('channel') == CHANNEL):
+                            raise ValueError('morning delivery unconfirmed')
+                        ts = str(receipt['ts'])
+                    part['ts'] = ts
+                    if index == 0:
+                        pending['thread_ts'] = ts
+                    save()
+                if any(night.get('job') for night in nights):
+                    module('paseo_autofix').attach_thread(home, CHANNEL, pending['thread_ts'])
         mark_reported(home, [night['day'] for night in nights])
-        D.atomic_state(home / 'watcher-state/doctor.json', doctor['state'])
-        E.acknowledge(errors)
+        D.accept_snapshot(home / 'watcher-state/doctor.json', doctor['state'])
+        E.acknowledge(errors, preserve=delivery.platform(home) == 'hejo')
         Q.acknowledge(queue, sent)
-        pending.update(complete=True, outcome='sent' if text else 'skipped_empty', finished_at=now.isoformat())
+        pending.update(complete=True, outcome='rejected' if pending.get('delivery_error') else 'sent' if text else 'skipped_empty', finished_at=now.isoformat())
         save()
     after_report(home)
     return ''
@@ -282,7 +311,7 @@ def main(argv=None, *, root=None, home=None):
     home = Path(home) if home else team.home_of_role('doctor', root)
     try:
         text = run(root, home, Path.home() / 'Library/LaunchAgents',
-                   Path.home() / _owner_text('<<workspace_folder>>/Hermes-ddots/백그라운드-작업-목록.md'), dry_run=args.dry_run)
+                   _repository() / '백그라운드-작업-목록.md', dry_run=args.dry_run)
         if text:
             print(text)
     except Exception as exc:

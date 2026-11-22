@@ -789,18 +789,18 @@ def note(config: Any) -> str:
                 "읽기: databases(목록), schema(열과 선택지), query(행 조회), page(한 항목의 속성과 본문), search, users. "
                 "<<personal_skill_prefix>>-work-sources를 열어 조회 범위와 근거를 확인한다."))
     if config.get('full_api') is True:
-        return (_owner_text('[Notion] 연결에 공유된 모든 페이지·표에서 생성은 즉시, 수정은 먼저 실행하고 후보고, 삭제만 도구 승인을 받는다. '
-                'api_help로 공식 문서 API 46개와 입력 스키마를 찾고 api(operation, params, body)로 실행한다. '
-                'api_help(operation=이름)는 경로·쿼리 인수와 본문 형식, api_help(schema_ref=$ref)는 참조 형식을 보여준다. '
-                '페이지·데이터베이스·데이터 소스·모든 열 종류·보기·블록·마크다운·이동·댓글·파일 업로드를 지원한다. '
-                '열은 retrieve-database로 data_sources를 찾은 뒤 retrieve-a-data-source/update-a-data-source를 쓴다. '
-                'upload-file(file_path, part_number?, offset?, length?)은 PDF/PPTX/XLSX 등 파일을 첨부한다. '
-                '기존 databases/schema/query/page/search/users/create/update/append/edit/batch/trash도 사용 가능하다. '
-                '수정 전 원본을 읽고 요청한 부분만 바꾼다. report·verification·rollback_available·limitations를 확인해 바뀐 항목과 복원 가능 여부를 보고한다. '
-                'rollback은 같은 대화의 최근 변경을 30분 안 복원하며 이후 24시간 안에는 확인을 받는다. 복원이 삭제를 수반하면 승인을 받는다. '
-                '동시 수정은 덮어쓰지 않고, 미확인 쓰기·비동기 작업은 성공으로 보고하거나 반복하지 않는다. '
-                'API에서 복원 불가한 원본 첨부·댓글/보기 삭제 등은 제한을 보고한다. 예약·배경 쓰기는 차단한다. '
-                'Notion 자체의 연결 공유·권한·요금제 제한은 API 오류를 근거로 알린다. <<work_skill_prefix>>-notion 스킬을 참고한다.'))
+        return (_owner_text(
+                '[Notion] 연결에 공유된 모든 페이지·표:생성 즉시·수정 후보고, 삭제만 도구 승인. '
+                'api_help:공식 API 46개·입력 스키마(operation=이름:경로·쿼리 인수·본문 형식;schema_ref=$ref:참조 형식). 실행:api(operation,params,body). '
+                '페이지·DB·데이터 소스·모든 열 종류·보기·블록·마크다운·이동·댓글·파일 업로드(upload-file(file_path,part_number?,offset?,length?):PDF/PPTX/XLSX 등 첨부) 지원. '
+                '열:retrieve-database의 data_sources→retrieve-a-data-source/update-a-data-source. '
+                'databases/schema/query/page/search/users/create/update/append/edit/batch/trash 지원. '
+                '원본부터 조회·요청분만 수정;report·verification·rollback_available·limitations 확인:변경 항목·복원 가능 여부 보고. '
+                'rollback:같은 대화 최근 변경을 30분내 복원, 이후 24시간내 확인 후. 삭제 수반 시 승인. '
+                '동시 수정 덮어쓰기·미확인 쓰기/비동기 작업 성공 보고·반복 금지. '
+                'API 복원 불가(원본 첨부·댓글/보기 삭제 등)는 제한 보고;예약·배경 쓰기 금지. '
+                '연결 공유·권한·요금제 제한은 API 오류 근거로 보고. <<work_skill_prefix>>-notion 스킬 참조.'
+        ))
     limited = ("" if writable(config) is None else
                " 만들거나 고칠 수 있는 곳은 설정에 지정된 표와 그 하위 항목뿐이고, 나머지는 보기만 한다. 범위 밖 변경은 도구가 거부하니 시도하지 말고 사용자에게 알린다.")
     approval_note = '변경 결과의 report·verification·되돌리기 가능 여부를 답변에 적는다. '

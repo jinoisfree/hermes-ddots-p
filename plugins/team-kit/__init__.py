@@ -905,7 +905,7 @@ def _news_watch_note(config, room=None) -> str:
     place = (_owner_text(f'<<report_channel_label>>(<#{room}>)') if isinstance(room, str) and re.fullmatch(r'[CG][A-Z0-9]+', room)
              else '소유자 개인 DM')
     end = (_owner_text(f'\n알림은 감시 프로그램이 {place}으로 직접 보낸다. <<customers_name>>는 이 설정을 바꿀 수 없고 '
-           '변경은 Paseo Hermes-ddots에서 한다. 설정이 바뀌면 이 안내도 바뀐다.'))
+           '변경은 Paseo <<repository_name>>에서 한다. 설정이 바뀌면 이 안내도 바뀐다.'))
     body = '\n'.join(lines)
     return (body[:800-len(end)-1] + '…' if len(body)+len(end)>800 else body) + end
 
@@ -1164,6 +1164,7 @@ def _register_vault_backup(ctx):
     spec = importlib.util.spec_from_file_location('team_vault_backup_base', Path(__file__).with_name('learning_report.py'))
     base = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(base)
+    base.slack = partial(base.retained_slack, route='vault_backup')
     handler = base.learning.extension('vault_backup_approval')
     ctx.register_hook('pre_gateway_dispatch', partial(handler.dispatch, home, base, team))
 

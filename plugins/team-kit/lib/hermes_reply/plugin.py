@@ -303,16 +303,6 @@ def install(adapter, native=None):
     else:
         logger.warning('reply buttons: adapter has no usable _build_message_event; clicks will not name their message')
 
-    prefilter_original = getattr(adapter, '_prefilter_inbound', None)
-    if callable(prefilter_original) and {'event', 'payload'}.issubset(inspect.signature(prefilter_original).parameters):
-        @wraps(prefilter_original)
-        async def prefilter_inbound(event, payload):
-            """A button answered from ddots arrives as an owner message naming the post it pressed."""
-            return await prefilter_original(await rb.adopt_click(adapter, event) if isinstance(event, dict) else event, payload)
-        adapter._prefilter_inbound = prefilter_inbound
-    else:
-        logger.warning('reply buttons: adapter has no usable _prefilter_inbound; ddots clicks stay ordinary messages')
-
     for name, wrapper in (('send', send), ('edit_message', edit), ('_post_chunks', post_chunks),
                           ('_call_with_block_fallback', call), ('_maybe_blocks', maybe_blocks),
                           ('_commit_stream', commit), ('_peer_bot_drop', peer_drop)):
@@ -376,7 +366,7 @@ def install_hejo(adapter):
                set(parameters).issubset(inspect.signature(getattr(adapter, name)).parameters)
                for name, parameters in contracts.items()) or not all(
                    callable(getattr(adapter, name, None)) for name in
-                   ('set_reply_state', 'register_click_handler', 'handle_message')):
+                   ('set_reply_state', 'register_click_handler', 'handle_message', 'on_processing_start', 'on_processing_complete')):
         logger.warning('hejo reply buttons: adapter contract changed; choices will be sent as text')
         _install_plain(adapter)
         return False
@@ -497,6 +487,25 @@ def install_hejo(adapter):
         tracking.working.setdefault(key, set()).add(click['msg_id'])
         return False
 
+    original_start = adapter.on_processing_start
+    original_complete = adapter.on_processing_complete
+
+    @wraps(original_start)
+    async def processing_start(event):
+        # Every dispatched turn, including a base-adapter queued drain, starts here.
+        _HEJO_TURN.set((adapter, event, asyncio.get_running_loop()))
+        await original_start(event)
+
+    @wraps(original_complete)
+    async def processing_complete(event, outcome):
+        try:
+            await original_complete(event, outcome)
+        finally:
+            _HEJO_TURN.set(None)
+
+    adapter.on_processing_start = processing_start
+    adapter.on_processing_complete = processing_complete
+
     @wraps(original_handle)
     async def handle_message(event):
         button = (event.raw_message or {}).get('_hermes_button')
@@ -504,28 +513,23 @@ def install_hejo(adapter):
             context = rb.clicked_context({**button, 'message_ts': button['message_id']},
                                          identity_label='hejo id')
             event.channel_context = context + (event.channel_context or '')
-        binding = (adapter, event, asyncio.get_running_loop())
-        token = _HEJO_TURN.set(binding)
-        try:
-            result = await original_handle(event)
-            # The base adapter has admitted this authenticated turn before any state changes.
-            if getattr(event, '_gateway_accepted', False) and event.user_id == 'owner':
-                key = (event.source.profile or event.source.chat_id, event.source.thread_id)
-                for mid, checklist in tuple(tracking.checklists.items()):
-                    if tracking.message_threads.get(mid) != key:
-                        continue
-                    selected = event.text.removeprefix('선택: ').split(', ')
-                    valid = (event.text == '건너뛰기' and checklist['can_skip'] or
-                             event.text == '전체' and '전체' in checklist['items'] or
-                             event.text.startswith('선택: ') and selected and
-                             all(label in checklist['items'] for label in selected))
-                    if valid:
-                        tracking.working.setdefault(key, set()).add(mid)
-                        await adapter.set_reply_state(mid, 'answered')
-                        tracking.checklists.pop(mid, None)
-            return result
-        finally:
-            _HEJO_TURN.reset(token)
+        result = await original_handle(event)
+        # The base adapter has admitted this authenticated turn before any state changes.
+        if getattr(event, '_gateway_accepted', False) and event.user_id == 'owner':
+            key = (event.source.profile or event.source.chat_id, event.source.thread_id)
+            for mid, checklist in tuple(tracking.checklists.items()):
+                if tracking.message_threads.get(mid) != key:
+                    continue
+                selected = event.text.removeprefix('선택: ').split(', ')
+                valid = (event.text == '건너뛰기' and checklist['can_skip'] or
+                         event.text == '전체' and '전체' in checklist['items'] or
+                         event.text.startswith('선택: ') and selected and
+                         all(label in checklist['items'] for label in selected))
+                if valid:
+                    tracking.working.setdefault(key, set()).add(mid)
+                    await adapter.set_reply_state(mid, 'answered')
+                    tracking.checklists.pop(mid, None)
+        return result
 
     adapter.send, adapter.edit_message, adapter.handle_message = send, edit_message, handle_message
     adapter.register_click_handler('reply', clicked)

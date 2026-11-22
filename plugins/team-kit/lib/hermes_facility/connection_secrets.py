@@ -25,14 +25,14 @@ SAFE_BARE = re.compile(r'[A-Za-z0-9_@%+=:,./-]+')
 
 # field id -> fixed env name, or a pattern the configured name must match (CK-10)
 FIELDS = {
-    'slack': [('bot_token', 'Bot User OAuth Token', True, re.compile('SLACK_BOT_TOKEN')),
-              ('app_token', 'App-Level Token', True, re.compile('SLACK_APP_TOKEN'))],
-    'notion': [('token', 'Integration 비밀값', True, re.compile('NOTION_API_KEY'))],
-    'synology': [('user', 'DSM 사용자 이름', False, re.compile(r'SYNOLOGY_[A-Z0-9_]+')),
-                 ('password', 'DSM 비밀번호', True, re.compile(r'SYNOLOGY_[A-Z0-9_]+'))],
+    'slack': [('bot_token', '봇 로그인 열쇠', True, re.compile('SLACK_BOT_TOKEN')),
+              ('app_token', '앱 로그인 열쇠', True, re.compile('SLACK_APP_TOKEN'))],
+    'notion': [('token', 'Notion 로그인 열쇠', True, re.compile('NOTION_API_KEY'))],
+    'synology': [('user', '아이디', False, re.compile(r'SYNOLOGY_[A-Z0-9_]+')),
+                 ('password', '비밀번호', True, re.compile(r'SYNOLOGY_[A-Z0-9_]+'))],
     'x': [('auth_token', 'auth_token 쿠키 값', True, re.compile('X_AUTH_TOKEN')),
           ('ct0', 'ct0 쿠키 값', True, re.compile('X_CT0'))],
-    'instagram': [('token', '장기 액세스 토큰', True, re.compile('INSTAGRAM_ACCESS_TOKEN'))]}
+    'instagram': [('token', '장기 로그인 열쇠', True, re.compile('INSTAGRAM_ACCESS_TOKEN'))]}
 # Instagram's plugin keeps the .env value it loaded at gateway start (instagram-dm/__init__.py _token).
 RESTART_REQUIRED = {'instagram', 'slack'}
 
@@ -63,10 +63,6 @@ def names_for(context):
 
 def guide(root, profile, connection, manifest=None):
     from hermes_facility import connections
-    if connection == 'ddots-slack':
-        from hermes_facility.connection_guides import instructions
-        return dict(action='secret_guide',profile=profile,connection=connection,outcome='done',reason='OK',
-                    fields=[dict(id='token',label='User OAuth Token',secure=True)],guide=instructions('ddots_slack',manifest=manifest))
     context = connections.find_connection(root, profile, connection)
     if context is None or context.row['service'] not in FIELDS:
         return dict(action='secret_guide', profile=profile, connection=connection, outcome='refused',

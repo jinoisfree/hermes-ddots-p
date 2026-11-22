@@ -6,7 +6,7 @@ import sys as _owner_sys
 _owner_library = str((_OwnerPath(__file__).resolve().parent / '../..').resolve())
 if _owner_library not in _owner_sys.path:
     _owner_sys.path.insert(0, _owner_library)
-from hermes_facility.owner_text import render as _owner_text
+from hermes_facility.owner_text import render as _owner_text, repository as _repository
 
 from hermes_facility.loading import source_path
 import importlib.util
@@ -21,7 +21,7 @@ import subprocess
 import time
 
 ROOT = Path.home() / '.hermes'
-REPO = (Path.home() / _owner_text('<<workspace_folder>>/Hermes-ddots')).resolve()
+REPO = _repository().resolve()
 COMMANDS = {'grep', 'rg', 'sed', 'awk', 'head', 'tail', 'wc', 'sort', 'uniq', 'cut', 'ls', 'find', 'stat', 'cat', 'jq', 'git'}
 TIMEOUT = 30
 MAX_OUTPUT = 20000

@@ -20,7 +20,7 @@ def overview(project, profile):
         tasks = [t for t in tasks if t['profile'] == profile]
         if not tasks:
             return None
-    return {'project_id': project['id'], 'title': 'ddots·Hermes 시스템 진단' if team.has_role(profile, 'doctor') else project['title'],
+    return {'project_id': project['id'], 'title': 'hejo·Hermes 시스템 진단' if team.has_role(profile, 'doctor') else project['title'],
             'status': project['status'], 'updated_at': project.get('updated_at'),
             'review_state': project.get('review_state') if not team.has_role(profile, 'doctor') else None,
             'remaining': [{'id': t['id'], 'profile': t['profile'], 'title': t['title'], 'status': t['status'],

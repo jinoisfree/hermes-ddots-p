@@ -49,7 +49,8 @@ def report(home, rows):
     """At most one send attempt. A timeout is uncertain and must not be replayed automatically."""
     # learning_report.slack routes every report through slack_blocks.
     from hermes_packs.linked_work import work_content as content
-    channel = vault.text('channels.reports')
+    from hermes_team_services import delivery as D
+    channel = D.target(home, 'reports', slack=lambda: vault.text('channels.reports'))
     if not channel:
         raise vault.VaultError("owner vault value 'channels.reports' is not set; backfill report not sent")
     with content.ledger(home, 'work-scope-backfill-report') as (path,state):
@@ -62,10 +63,16 @@ def report(home, rows):
         lines = ['*🟢 업무 등급 분류 완료*', '', '*기존 업무*']
         lines += [f"• {r['title']} — {'공용(lv2)' if r['scope']=='shared' else '개인(lv1)'}" for r in rows]
         try:
-            result = module.slack(home,'chat.postMessage',{'channel':channel,'text':'\n'.join(lines)})
-            if not result.get('ok'):
-                raise RuntimeError('backfill_report_unverified')
-            state['report'].update(status='sent',ts=result['ts'])
+            if D.platform(home) == 'hejo':
+                state['report'].update(platform='hejo')
+                content.save(path,state)
+                receipt = D.post(home, channel, **D.presentation({'text':'\n'.join(lines)}))
+                state['report'].update(status='sent',msg_id=receipt['msg_id'],thread=receipt['thread'])
+            else:
+                result = module.slack(home,'chat.postMessage',{'channel':channel,'text':'\n'.join(lines)})
+                if not result.get('ok'):
+                    raise RuntimeError('backfill_report_unverified')
+                state['report'].update(status='sent',ts=result['ts'])
         except Exception:
             state['report']['status']='uncertain'
             content.save(path,state)

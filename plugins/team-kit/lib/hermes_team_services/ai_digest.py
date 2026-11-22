@@ -342,7 +342,46 @@ def render(day, items, summaries, failing, dropped=0):
     return [parent] + layout.chunks(details)
 
 
+def deliver_hejo(home, state, key):
+    from hermes_team_services import delivery as D
+    import uuid
+    report = state['reports'][key]
+    if report.get('platform') != 'hejo':
+        report.update(platform='hejo', channel=D.target(home, 'reports', slack=None), client_id='ai-digest:' + key + ':' + uuid.uuid4().hex)
+        report.pop('thread_ts', None)
+        for part in report['parts']:
+            part.pop('ts', None)
+            part.pop('attempted_at', None)
+    save = lambda: learning.save(path(home), state)
+    save()
+    for index, part in enumerate(report['parts']):
+        if part.get('message_id') or part.get('delivery_error'):
+            continue
+        part.setdefault('delivery', {})
+        try:
+            receipt = D.post(home, report['channel'], client_id=report['client_id'] + ':' + str(index),
+                             state=part['delivery'], save=save, thread=report.get('thread'),
+                             **D.presentation({'text': part['text']}))
+        except D.Refused as exc:
+            if not exc.permanent:
+                raise
+            part['delivery_error'] = exc.error
+            report.update(complete=True, outcome='rejected')
+            save()
+            return
+        part.update(message_id=receipt['msg_id'], head_id=receipt['head_id'])
+        report['thread'] = receipt['thread']
+        save()
+    report.update(complete=True, outcome='sent')
+    save()
+
+
 def deliver(home, state, key):
+    from hermes_team_services import delivery as D
+    if D.platform(home) == 'hejo':
+        return deliver_hejo(home, state, key)
+    if state['reports'][key].get('platform') == 'hejo':
+        return
     report = state["reports"][key]
     if not report.get("channel"):
         report["owner"] = base.owner(home)
@@ -413,6 +452,11 @@ def run(home, now=None, *, reader=fetch, summarizer=summarize):
         learning.save(path(home), state)
         key = now.date().isoformat()
         if (now.hour, now.minute) >= base._rest_day().start(now, clock('quiet_until', (8, 30))):
+            from hermes_team_services import delivery as D
+            if D.platform(home) == 'hejo':
+                for pending_key, pending in sorted(state['reports'].items()):
+                    if pending_key != key and not pending.get('complete'):
+                        deliver(home, state, pending_key)
             if key not in state["reports"]:
                 build(home, state, sources, now.date(), summarizer)
                 learning.save(path(home), state)

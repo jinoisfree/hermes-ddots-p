@@ -9,6 +9,7 @@ if _owner_library not in _owner_sys.path:
     _owner_sys.path.insert(0, _owner_library)
 from hermes_facility.owner_text import render as _owner_text
 from hermes_schedule.policy import clock
+from hermes_team_services import delivery
 
 
 import argparse
@@ -90,7 +91,40 @@ def with_blocks(body, update=False):
         return body
 
 
-def slack(home, method, body):
+def slack(home, method, body, *, client_id=None, state=None, save=None):
+    """Compatibility entry; Slack bytes stay unchanged, hejo uses native identities."""
+    if delivery.platform(home) == "slack":
+        return _slack(home, method, body)
+    destination = delivery.validate_target(body.get("channel"))
+    if method == "chat.postMessage":
+        shown = delivery.presentation(body)
+        result = delivery.post(home, destination, client_id=client_id, state=state, save=save,
+                               thread=body.get("thread_ts"), **shown)
+        return {"ok": True, "channel": destination, "ts": result["msg_id"], **result}
+    if method == "chat.update":
+        shown = delivery.presentation(body)
+        if state is not None:
+            result = delivery.edit(home, destination, state=state, save=save, **shown)
+        else:
+            result = delivery.edit_message(home, destination, body["ts"], shown.pop("text"),
+                buttons=shown.get("buttons", []), reply_state=shown.get("reply_state"))
+        return {"ok": True, "channel": destination, "ts": result["msg_id"], **result}
+    if method == "chat.delete":
+        return {"ok": True, **delivery.delete(home, destination, body["ts"])}
+    if method == "conversations.replies":
+        return {"ok": True, **delivery.read_thread(home, destination, body["ts"])}
+    raise ValueError("unsupported hejo delivery operation: " + method)
+
+
+def retained_slack(home, method, body, *, route):
+    """Only the named, independently checked paths retained on Slack."""
+    delivery.require_slack(home, route=route, method=method)
+    return _slack(home, method, body, route=route)
+
+
+def _slack(home, method, body, *, route=None):
+    if method not in {"auth.test", "conversations.history", "conversations.replies"}:
+        delivery.require_slack(home, route=route, method=method)
     if method in {"chat.postMessage", "chat.update"}:
         body = learning.extension("jang_voice").prepare(home, body)
         body = with_blocks(body, update=method == "chat.update")
@@ -112,8 +146,16 @@ def slack(home, method, body):
     return data
 
 
-def upload_image(home, channel, thread_ts, path, title):
+def upload_image(home, channel, thread_ts, path, title, *, client_id=None, state=None, save=None):
+    if delivery.platform(home) == "hejo":
+        return delivery.post(home, channel, title, thread=thread_ts, images=[str(path)],
+                             client_id=client_id, state=state, save=save)
+    return _upload_image(home, channel, thread_ts, path, title)
+
+
+def _upload_image(home, channel, thread_ts, path, title):
     """Attach one image file to a thread through Slack's external upload flow."""
+    delivery.require_slack(home)
     token = learning.env(home, "SLACK_BOT_TOKEN")
     if not token:
         raise ValueError("SLACK_BOT_TOKEN is missing.")
@@ -381,6 +423,27 @@ def review_text(report):
     return text
 
 
+def update_local_part(home, store, loader, thread, index, part, body):
+    """Persist native edit pieces without replacing concurrent review decisions."""
+    def save():
+        with learning.locked(store):
+            current = loader(home)
+            report = next(r for r in current['reports'].values() if r.get('thread_ts') == thread)
+            saved = report['parts'][index]
+            if report.get('platform') != 'hejo' or saved.get('client_id') != part.get('client_id'):
+                raise ValueError('Report delivery changed during edit.')
+            saved.update(delivery=part['delivery'], ts=part['delivery']['msg_id'],
+                         head_id=part['delivery']['head_id'])
+            learning.save(store, current)
+    controls = delivery.presentation(body)
+    controls.setdefault('buttons', [])
+    if 'edit' in part['delivery']:
+        pending = part['delivery']['edit']
+        delivery.edit(home, body['channel'], pending['text'], state=part['delivery'], save=save,
+                      **pending['controls'])
+    delivery.edit(home, body['channel'], state=part['delivery'], save=save, **controls)
+
+
 def update_status(home, thread_ts, *, store=None, loader=None):
     """Update only the original report head; a transport failure never undoes learning.
 
@@ -396,8 +459,12 @@ def update_status(home, thread_ts, *, store=None, loader=None):
                 if not report or not (report.get("items") or report.get("skills", {}).get("items")) or not report.get("parts"):
                     return False
                 part = report["parts"][0]
-                if not part.get("ts") or part["ts"] != thread_ts or not report.get("channel"):
+                native = delivery.platform(home) == 'hejo'
+                if report.get('platform', 'slack') != ('hejo' if native else 'slack'):
                     return False
+                if not part.get("ts") or (not native and part["ts"] != thread_ts) or not report.get("channel"):
+                    return False
+                update_parts = {p.get('ts'): (i, p) for i, p in enumerate(report['parts'])}
                 part.setdefault("original_text", part["text"])
                 part["text"] = review_text(report)
                 updates = [{"channel": report["channel"], "ts": part["ts"], "text": part["text"]}]
@@ -428,7 +495,11 @@ def update_status(home, thread_ts, *, store=None, loader=None):
                     updates.append({"channel": report["channel"], "ts": detail["ts"], "text": detail["text"], "attachments": []})
                 learning.save(store, state)
             for body in updates:
-                slack(home, "chat.update", body)
+                if native:
+                    index, target = update_parts[body['ts']]
+                    update_local_part(home, store, loader, thread_ts, index, target, body)
+                else:
+                    slack(home, "chat.update", body)
             with learning.locked(store):
                 state = loader(home)
                 report = next(r for r in state["reports"].values() if r.get("thread_ts") == thread_ts)
@@ -480,18 +551,72 @@ def recover(home, report, part, marker):
         params["cursor"] = cursor
 
 
+def prepare_delivery(home, report, save):
+    name = delivery.platform(home)
+    if report.get("platform", "slack") != name:
+        for field in ("channel", "owner", "bot", "thread_ts", "delivery_error"):
+            report.pop(field, None)
+        for part in report.get("parts", []):
+            for field in ("ts", "head_id", "attempted_at", "delivery", "client_id"):
+                part.pop(field, None)
+        report["complete"] = False
+    report["platform"] = name
+    save()
+    return name
+
+
+def deliver_local_parts(home, report, key, prefix, save):
+    """Shared durable parts for regular learning and threaded skill reports."""
+    if not report.get("channel"):
+        report['owner'] = 'owner'
+        report['bot'] = delivery.employee(home)
+        report["channel"] = learning.report_target(home, slack, "owner")
+        save()
+    for index, part in enumerate(report["parts"]):
+        if part.get("ts"):
+            continue
+        if not part.get("client_id"):
+            part["client_id"] = prefix + hashlib.sha256(
+                f"{Path(home).resolve()}:{key}:{index}".encode()).hexdigest()[:40]
+            part["delivery"] = {}
+            save()
+        body = {"channel": report["channel"], "text": part["text"]}
+        if index:
+            body["thread_ts"] = report["thread_ts"]
+        try:
+            result = slack(home, "chat.postMessage", body, client_id=part["client_id"],
+                           state=part["delivery"], save=save)
+        except delivery.Refused as exc:
+            if exc.permanent:
+                # Terminal rejection must not hold every later daily report behind
+                # this one. Preserve its failure, without pretending it was sent.
+                report["delivery_error"] = {"status": exc.status, "error": exc.error, "part": index}
+                report["complete"] = True
+                save()
+            raise
+        part.update(ts=result["msg_id"], head_id=result["head_id"], platform="hejo")
+        if index == 0:
+            report["thread_ts"] = result["thread"]
+        save()
+
+
 def deliver(home, state, key):
     report = state["reports"][key]
+    save = lambda: learning.save(path(home), state)
+    name = prepare_delivery(home, report, save)
+    if report.get("delivery_error"):
+        return
     if not report.get("parts") and not (report["items"] or report.get("skills", {}).get("items")
                                         or report.get("routing") or report.get("appendices")):
         report["complete"] = True
         report["parts"] = []
         learning.save(path(home), state)
         return
-    auth = slack(home, "auth.test", {}) if not report.get("channel") or not report.get("parts") else {}
+    auth = (slack(home, "auth.test", {}) if name == "slack" and
+            (not report.get("channel") or not report.get("parts")) else {})
     if not report.get("channel"):
-        report["owner"] = owner(home)
-        report["bot"] = auth["user_id"]
+        report["owner"] = owner(home) if name == "slack" else "owner"
+        report["bot"] = auth["user_id"] if name == "slack" else delivery.employee(home)
         report["channel"] = learning.report_target(home, slack, report["owner"])
         learning.save(path(home), state)
     if not report.get("parts"):
@@ -511,7 +636,9 @@ def deliver(home, state, key):
         if report["items"] or report.get("skills", {}).get("items"):
             report["parts"] = with_final(report["parts"])
         learning.save(path(home), state)
-    for index, part in enumerate(report["parts"]):
+    if name == "hejo":
+        deliver_local_parts(home, report, key, "team_learning_", save)
+    for index, part in enumerate(report["parts"] if name == "slack" else []):
         if part.get("ts"):
             continue
         marker = "team_learning_" + hashlib.sha256(f"{Path(home).resolve()}:{key}:{index}".encode()).hexdigest()[:40]
@@ -528,6 +655,7 @@ def deliver(home, state, key):
                 body["thread_ts"] = report["thread_ts"]
             ts = str(slack(home, "chat.postMessage", body)["ts"])
         part["ts"] = ts
+        part["platform"] = "slack"
         if index == 0:
             report["thread_ts"] = ts
         learning.save(path(home), state)
@@ -594,7 +722,7 @@ def daily(home, now=None, *, dry_run=False, day=None):
                 learning.save(path(home), state)
             if not state["reports"][key]["complete"]:
                 deliver(home, state, key)
-            if state['reports'][key].get('appendices'):
+            if state['reports'][key].get('appendices') and not state['reports'][key].get('delivery_error'):
                 learning.extension('morning_queue').acknowledge_appendices(home, state['reports'][key]['appendices'])
             target += timedelta(days=1)
     return 0

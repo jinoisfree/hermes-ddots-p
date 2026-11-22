@@ -64,6 +64,15 @@ def settings(config):
 def note(config):
     """The standing instruction for the profile this guard serves (<= 900 chars)."""
     cfg = settings(config) or settings({"enabled": True})
+    from hermes_constants import get_hermes_home
+    from hermes_team_services import delivery
+    home = Path(get_hermes_home())
+    if delivery.platform(home) == 'hejo':
+        target = delivery.target(home, 'reports', slack=None)
+        return (f"[예약 만들기] 사장의 현재 대화에서만 cronjob_manage를 사용한다. "
+                f"deliver는 local 또는 hejo:{target}, 이름은 {cfg['prefix']}로 시작한다. "
+                f"enabled_toolsets는 {', '.join(cfg['toolsets'])}, 반복은 {cfg['min_interval']}분 이상, "
+                f"활성 예약은 {cfg['max_active']}개까지다. 예약·배경 실행에서 새 예약과 쓰기는 금지한다.")
     if team.has_role(cfg['profile'], 'doctor'):
         return (_owner_text("[<<doctor_name>> 예약] 소유자 Slack 대화에서만 cronjob_manage로 jc- 예약을 만든다. 활성 10개, 간격 60분 이상. "
                 f"deliver는 local·slack:{REPORTS}·slack:{DOCTOR_DM}, enabled_toolsets는 web·session_search만. "
@@ -138,7 +147,7 @@ def _check_fields(args, cfg, *, creating):
             if bad or not _targets(args[key]):
                 return f"{key}는 {', '.join(cfg['deliver'])}만 허용한다."
     if creating and not _targets(args.get("deliver") or ""):
-        return _owner_text(f"deliver를 local 또는 <<report_room>>(slack:{REPORTS})으로 직접 지정해야 한다.")
+        return "deliver를 " + ", ".join(cfg["deliver"]) + " 중 직접 지정해야 한다."
     toolsets = args.get("enabled_toolsets")
     if creating and not toolsets:
         return f"enabled_toolsets를 {', '.join(cfg['toolsets'])} 안에서 직접 지정해야 한다."
@@ -165,8 +174,11 @@ def check(config, home, args, *, kind, profile, platform):
         return "예약 관리 도구가 이 프로필에서 켜져 있지 않다."
     if profile != cfg["profile"] or Path(home).name != cfg["profile"]:
         return _owner_text("예약 관리 도구는 <<personal_full_name>>에서만 쓸 수 있다.")
-    if kind != "chat" or platform != "slack":
+    if kind != "chat" or platform not in {"slack", "hejo"}:
         return "예약 관리는 소유자 Slack 대화에서만 할 수 있다. 예약·배경 실행은 예약을 만들지 못한다."
+    from hermes_team_services import delivery
+    if delivery.platform(home) == 'hejo':
+        cfg['deliver'] = ('local', 'hejo:' + delivery.target(home, 'reports', slack=None))
     args = args if isinstance(args, dict) else {}
     action = str(args.get("action") or "")
     if action not in ACTIONS:

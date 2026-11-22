@@ -1,6 +1,6 @@
 """Owner-button decisions for changes that a background job may only propose.
 
-A background job posts one proposal to a Slack room and records it in the staff locker
+A background job posts one proposal to the configured room and records it in the staff locker
 (`state/proposals.json`). Nothing changes until the owner presses a button on that post: this module
 checks who pressed it, in which thread, and whether the proposal is still open, then calls the
 executor a plugin registered for the proposal's action. The job never calls an executor itself.
@@ -17,6 +17,7 @@ import uuid
 from pathlib import Path
 
 from hermes_governance import app_results, app_tools, write_policy
+from hermes_team_services import delivery as D
 
 LABELS = ('승인', '거절', '의견', '확인')
 BUTTONS = '[[버튼: 승인 | 거절 | 의견 | 확인]]'
@@ -123,33 +124,54 @@ def post(home, *, action, args, channel, text, expires_at, slack, upload=None, i
     refused post is marked and may be tried again. A failed image upload does not undo the proposal."""
     now = (clock or time.time)()
     recover(home, clock=clock)
+    native = D.platform(home) == 'hejo'
     key = uuid.uuid4().hex
     with ledger(home) as (rows, save):
         rows.append({'id': key, 'action': action, 'args': args, 'channel': channel, 'message_ts': None,
                      'posted_at': now, 'day': day_of(now), 'expires_at': expires_at, 'status': 'posting'})
+        if native:
+            rows[-1].update(platform='hejo', msg_id=None, thread=None, delivery={})
         save()
     body = {'channel': channel, 'text': f'{text}\n제안 번호: {key}\n{BUTTONS}', 'unfurl_links': False, 'unfurl_media': False}
     try:
-        reply = slack('chat.postMessage', body)
-        ts = str(reply['ts'])
+        if native:
+            # The original once-only proposal policy is retained. Persist the pieces before IO;
+            # an uncertain post remains 'posting' and is never proposed again by the caller.
+            with ledger(home) as (rows, save):
+                row = next(item for item in rows if item['id'] == key)
+                receipt = D.post(home, channel, client_id='proposal:' + key,
+                                 state=row['delivery'], save=save, **D.presentation(body))
+                row.update(msg_id=receipt['msg_id'], head_id=receipt['head_id'],
+                           thread=receipt['thread'], status='pending')
+                save()
+            ts = receipt['msg_id']
+        else:
+            reply = slack('chat.postMessage', body)
+            ts = str(reply['ts'])
     except RuntimeError as error:
-        if str(error).startswith('Slack refused'):
+        if (isinstance(error, D.Refused) and error.permanent) or str(error).startswith('Slack refused'):
             _settle(home, key, 'post_failed')
             raise PostFailed(str(error)) from error
         raise PostUnconfirmed(type(error).__name__) from error
     except Exception as error:
         raise PostUnconfirmed(type(error).__name__) from error
-    with ledger(home) as (rows, save):
-        row = next(item for item in rows if item['id'] == key)
-        row.update(message_ts=ts, status='pending')
-        save()
+    if not native:
+        with ledger(home) as (rows, save):
+            row = next(item for item in rows if item['id'] == key)
+            row.update(message_ts=ts, status='pending')
+            save()
     uploaded = None
-    if image is not None and upload is not None:
+    if image is not None and (native or upload is not None):
         try:
-            upload(channel, ts, image)
+            if native:
+                D.post(home, channel, '', thread=receipt['thread'], images=[str(image)])
+            else:
+                upload(channel, ts, image)
             uploaded = True
         except Exception:
             uploaded = False
+    if native:
+        return {'id': key, 'platform': 'hejo', **receipt, 'image_posted': uploaded}
     return {'id': key, 'message_ts': ts, 'image_posted': uploaded}
 
 
@@ -191,6 +213,7 @@ def decide(home, entry_id, label, source, *, clock=None):
     with app_tools.source(source):
         owner = write_policy.owner_chat(home, app_tools.env)
         chat, thread_id = app_tools.env('HERMES_SESSION_CHAT_ID'), app_tools.env('HERMES_SESSION_THREAD_ID')
+        platform = app_tools.env('HERMES_SESSION_PLATFORM')
     recover(home, clock=clock)
     with ledger(home) as (rows, save):
         row = next((item for item in rows if item['id'] == entry_id), None)
@@ -199,7 +222,8 @@ def decide(home, entry_id, label, source, *, clock=None):
         refusal = None
         if not owner:
             refusal = '소유자만 누를 수 있는 버튼이에요.'
-        elif chat != row['channel'] or thread_id != row['message_ts']:
+        elif (platform != row.get('platform', 'slack') or chat != row['channel']
+              or thread_id != (row.get('thread') if platform == 'hejo' else row['message_ts'])):
             refusal = '이 제안 글의 스레드에서 누른 버튼만 처리해요.'
         if refusal:
             return _title(False, '제안 처리 안 됨') + refusal + ' 아무것도 바꾸지 않았어요.'
@@ -252,14 +276,19 @@ def _event_parts(event):
 
 def thread_parent_text(home, chat, thread):
     """Text of the post that opened a Slack thread (the post's own text keeps its proposal marker)."""
+    if D.platform(home) == 'hejo':
+        rows = D.read_thread(home, chat, thread)['messages']
+        return '\n'.join(row.get('text', '') for row in rows if row.get('role') == 'employee')
     from hermes_team_services import load
     reply = load('learning_report', 'proposal_learning_report').slack(
         home, 'conversations.replies', {'channel': chat, 'ts': thread, 'limit': 1})
     return str(reply['messages'][0].get('text', ''))
 
 
-def _owner_room():
+def _owner_room(home=None):
     from hermes_facility import owner_vault
+    if home is not None and D.platform(home) == 'hejo':
+        return D.target(home, 'customer_room', slack=lambda: None)
     return owner_vault.text('channels.customer_room')
 
 
@@ -278,7 +307,7 @@ def _unreadable_means_ours(home, button, label, source, fetch_parent):
         return bool(MARKER.search(fetch_parent(home, chat, thread)))
     except Exception:
         try:
-            return label == '승인' and bool(chat) and chat == _owner_room()
+            return label == '승인' and bool(chat) and chat == _owner_room(home)
         except Exception:
             return False
 
@@ -286,14 +315,24 @@ def _unreadable_means_ours(home, button, label, source, fetch_parent):
 def _locate(home, button, label, source, fetch_parent):
     """The ledger row a press belongs to: its button's post, or the one open proposal of a thread
     that a bare label was typed in. An unreadable ledger fails closed for presses that are ours."""
-    thread = str(getattr(source, 'thread_id', '') or '')
+    platform = getattr(source, 'platform', '')
+    platform = str(getattr(platform, 'value', platform)).lower()
+    event = {'source': source, 'raw_message': {'_hermes_button': button}}
+    thread = D.thread_key(event)
     try:
         with ledger(home) as (rows, _):
             if button is not None:
-                # A press without a post id (e.g. hejo) never matches an unposted or failed row.
-                ts = button.get('message_ts')
-                return next((dict(row) for row in rows if ts and row.get('message_ts') == ts), None), False
-            found = [dict(row) for row in rows if thread and row.get('message_ts') == thread]
+                message = D.clicked_message_id(event)
+                return next((dict(row) for row in rows if message
+                             and row.get('platform', 'slack') == platform
+                             and row.get('msg_id' if platform == 'hejo' else 'message_ts') == message), None), False
+            if platform == 'hejo':
+                found = [dict(row) for row in rows if thread and row.get('platform') == platform
+                         and row.get('channel') == str(getattr(source, 'chat_id', '') or '')
+                         and row.get('thread') == thread and row['status'] in OPEN]
+            else:
+                found = [dict(row) for row in rows if thread and row.get('platform', 'slack') == platform
+                         and row.get('message_ts') == thread]
             return (found[0] if len(found) == 1 else None), False
     except Exception:
         return None, _unreadable_means_ours(home, button, label, source, fetch_parent)

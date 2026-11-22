@@ -11,6 +11,7 @@ import importlib.util
 from functools import lru_cache
 from pathlib import Path
 from hermes_facility.loading import source_path
+from hermes_team_services import delivery as D
 
 COLORS = {'ok': '#2EB67D', 'warn': '#ECB22E', 'fail': '#E01E5A'}
 TOKEN_RE = re.compile(r'(「[^」]*」|`[^`]*`)')
@@ -83,6 +84,8 @@ def _sender():
 
 def report_room(home):
     """Owner report room (team-kit.settings.report_channel); None keeps the owner's DM."""
+    if D.platform(home) == 'hejo':
+        return D.target(home, 'reports', slack=lambda: None, fallback=True)
     import hermes_yaml as yaml
     try:
         config = yaml.safe_load((Path(home) / 'config.yaml').read_text()) or {}
@@ -107,14 +110,19 @@ def post_dm(home, reports):
         seen.add(identity)
         blocks, attachments = render(report['title'], report.get('url'), report['subtitle'], report['lines'], report['when'])
         try:
-            R.slack(home, 'chat.postMessage', {'channel': channel, 'text': report['fallback'], 'blocks': blocks,
-                                              'attachments': attachments, 'unfurl_links': False})
+            body = {'channel': channel, 'text': report['fallback'], 'blocks': blocks,
+                    'attachments': attachments, 'unfurl_links': False}
+            if D.platform(home) == 'hejo':
+                D.post(home, channel, **D.presentation(body))
+            else:
+                R.slack(home, 'chat.postMessage', body)
         except Exception:
             missed.append(report['fallback'])
     return missed
 
 
-def post_thread(home, channel, text, *, thread_ts=None, message_ts=None, script=None):
+def post_thread(home, channel, text, *, thread_ts=None, message_ts=None, script=None,
+                client_id=None, state=None, save=None):
     """Decision reports use the same rich-block sender and return their exact Slack receipt.
 
     ``script`` names the decision module whose own fixed buttons this text carries (team-kit button_policy)."""
@@ -125,4 +133,13 @@ def post_thread(home, channel, text, *, thread_ts=None, message_ts=None, script=
         body['ts'] = message_ts
     elif thread_ts:
         body['thread_ts'] = thread_ts
+    if D.platform(home) == 'hejo':
+        shown = D.presentation(body)
+        if message_ts:
+            shown.setdefault('buttons', [])
+            if state is not None:
+                return D.edit(home, channel, state=state, save=save, **shown)
+            return D.edit_message(home, channel, message_ts, **shown)
+        return D.post(home, channel, thread=thread_ts, client_id=client_id,
+                      state=state, save=save, **shown)
     return _sender().slack(home, 'chat.update' if message_ts else 'chat.postMessage', body)['ts']

@@ -6,7 +6,6 @@ import os
 from pathlib import Path
 import importlib.util as _ilu, pathlib as _pl, sys as _sys
 from hermes_facility import team_registry as team
-from hermes_facility import owner_vault as vault
 
 
 def roots() -> list[Path]:
@@ -27,24 +26,38 @@ def roots() -> list[Path]:
             if (p := Path(str(item)).expanduser()).is_absolute() and p.is_dir()]
 
 
-def storage(*, backup: bool = False) -> Path:
-    allowed = roots()
-    work_folder = vault.text('files.work_folder_name')  # 업무비서 전용 폴더 이름(사장 금고)
-    if not work_folder:
-        raise ValueError('owner vault files.work_folder_name is not set')
-    candidates = [p if p.name == work_folder else p / work_folder for p in allowed]
-    if not candidates:
-        raise ValueError('no configured file folder')
-    folder = candidates[0] / '연락처'
-    if backup:
-        folder /= '백업'
-    resolved = folder.resolve()
-    if not any(resolved.is_relative_to(root) for root in allowed):
-        raise ValueError('output folder outside configured roots')
-    folder.mkdir(parents=True, exist_ok=True)
-    if folder.resolve(strict=True) != resolved:
-        raise ValueError('output folder changed')
+def export_folder(value) -> Path:
+    """The existing folder the employee chose for an export: absolute, inside the file reach, no symbolic link."""
+    if not isinstance(value, str) or not value or '\x00' in value or not os.path.isabs(value):
+        raise ValueError('folder must be an absolute path')
+    path = Path(value)
+    if any(part.is_symlink() for part in (path, *path.parents)):
+        raise ValueError('folder path contains a symbolic link')
+    if not path.is_dir():
+        raise ValueError('folder does not exist')
+    resolved = path.resolve(strict=True)
+    if not any(resolved.is_relative_to(root) for root in roots()):
+        raise ValueError('folder outside configured roots')
     return resolved
+
+
+def backup_folder() -> Path:
+    """The employee home's pre-delete backup shelf; it does not depend on the file reach."""
+    from hermes_constants import get_hermes_home
+    shelf = Path(get_hermes_home()) / 'backups'
+    folder = shelf / 'contacts'
+    for step in (shelf, folder):
+        if step.is_symlink():
+            raise ValueError('backup folder is a symbolic link')
+        if not step.exists():
+            step.mkdir(mode=0o700)
+            step.chmod(0o700)
+        if not step.is_dir():
+            raise ValueError('backup folder is not a directory')
+    if folder.stat().st_uid != os.getuid():
+        raise ValueError('backup folder is owned by another user')
+    folder.chmod(0o700)
+    return folder.resolve(strict=True)
 
 
 def filename(value: str, extension: str) -> str:

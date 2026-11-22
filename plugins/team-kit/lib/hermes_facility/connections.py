@@ -111,31 +111,55 @@ def action(identifier, label, primary=False):
     return dict(id=identifier, label=label, primary=primary)
 
 
+ACCOUNT_SWITCHES = {
+    'google': ('plugins','entries','team-delegation','settings','gmail','enabled'),
+    'x': ('plugins','entries','team-kit','settings','x_read','enabled'),
+    'instagram': ('plugins','enabled'),
+}
+ACCOUNT_IDS = {'google':'google','google-personal':'google','google-company':'google','x':'x','instagram':'instagram'}
+
+
+def service_enabled(config, service):
+    value=config
+    for key in ACCOUNT_SWITCHES[service]:
+        value=value.get(key,{}) if isinstance(value,dict) else {}
+    if service=='instagram':return isinstance(value,list) and 'instagram-dm' in value
+    return value is not False if service=='google' else value is True
+
+
+def home_service_enabled(home, service):
+    from hermes_facility.config_assembly import CONFIG, yaml_load
+    path=Path(home)/'config.yaml'
+    return service_enabled(yaml_load(path.read_bytes(),CONFIG) if path.exists() else {},service)
+
+
 def actions_for(row):
     """The only source of what a connection row offers; the app draws these and never infers its own."""
     state, reason, kind = row['state'], row['reason'], row['connect_kind']
-    if state == 'off' or kind is None:
-        return []
+    switchable=row.get('group')=='account' and row.get('id') in ACCOUNT_IDS
+    if state=='off':return [action('account_connect','연결',True)] if switchable else []
+    if kind is None:return []
+    extra=[action('account_disconnect','해제')] if switchable else []
     check = action('check', '확인')
     if kind == 'oauth':
         if state in ('needs_reconnect', 'not_connected') and row['reconnect']:
-            return [action('oauth_connect', '권한 업데이트' if reason == 'SCOPE_MISSING' else '다시 연결', True), check]
+            return [action('oauth_connect', '권한 업데이트' if reason == 'SCOPE_MISSING' else '다시 연결', True), check]+extra
     elif kind == 'secret':
         first, change = SECRET_LABELS[row['service']]
         if state in ('needs_reconnect', 'not_connected'):
-            return [action('secret_set', first if state == 'not_connected' else change, True), check]
-        return [dict(check, primary=True), action('secret_set', change)]
+            return [action('secret_set', first if state == 'not_connected' else change, True), check]+extra
+        return [dict(check, primary=True), action('secret_set', change)]+extra
     elif kind == 'channel':
         guide = [action('secret_set', '연결 안내')] if row['service'] == 'slack' else []
         # A revoked token is not fixed by a restart; the owner reinstalls the app in Slack.
         if state != 'connected' and not (state == 'needs_reconnect' and reason == 'TOKEN_INVALID'):
-            return [action('gateway_restart', '다시 시작', True), check, *guide]
+            return [action('gateway_restart', '다시 시작', True), check, *guide]+extra
     elif kind == 'mac_permission':
         if reason == 'NOT_DETERMINED':
-            return [action('permission_request', '권한 요청', True), check]
+            return [action('permission_request', '권한 요청', True), check]+extra
         if reason == 'PERMISSION_DENIED':
-            return [action('open_settings', '시스템 설정', True), check]
-    return [dict(check, primary=True), *([action('secret_set', '연결 안내')] if row['service']=='slack' else [])]
+            return [action('open_settings', '시스템 설정', True), check]+extra
+    return [dict(check, primary=True), *([action('secret_set', '연결 안내')] if row['service']=='slack' else [])]+extra
 
 
 def event_time(stamp):
@@ -197,9 +221,9 @@ def connection_rows(root, profile, home, config, *, accounts, google, events, ch
         value = gmail.get('account')
         selected = [key for key, email in accounts.items() if email and value in (email, email.split('@')[0])]
         if not selected:
-            add('google', 'account', 'google', 'Google', 'unknown', 'ACCOUNT_UNMAPPED')
+            add('google', 'account', 'google', 'Google', 'unknown' if service_enabled(config,'google') else 'off', 'ACCOUNT_UNMAPPED' if service_enabled(config,'google') else 'DISABLED')
     for scope in selected:
-        state, reason = google[scope]
+        state, reason = google[scope] if service_enabled(config,'google') else ('off','DISABLED')
         add('google-' + scope, 'account', 'google', 'Google ' + ('개인' if scope == 'personal' else '회사'),
             state, reason, scope=scope, account=accounts[scope], reconnect=scope, verified_by='google_check',
             capabilities=['메일·캘린더·Drive·Sheets·Docs·Slides의 연결 상태를 확인합니다.'],
@@ -228,11 +252,11 @@ def connection_rows(root, profile, home, config, *, accounts, google, events, ch
             'CONFIG_ONLY' if enabled else 'DISABLED',
             rules=['설정과 환경변수 존재만 확인합니다. 네트워크 연결은 검사하지 않습니다.'])
     if 'x_read' in kit:
-        add('x', 'account', 'x', 'X', 'unknown' if app_enabled(kit['x_read']) else 'off', 'CONFIG_ONLY')
+        add('x', 'account', 'x', 'X', 'unknown' if app_enabled(kit['x_read']) else 'off', 'CONFIG_ONLY' if app_enabled(kit['x_read']) else 'DISABLED')
     entries = config.get('plugins', {}).get('entries', {})
     if 'instagram-dm' in entries:
         add('instagram', 'account', 'instagram', 'Instagram',
-            'unknown' if entries['instagram-dm'].get('enabled', True) else 'off', 'CONFIG_ONLY',
+            'unknown' if service_enabled(config,'instagram') else 'off', 'CONFIG_ONLY' if service_enabled(config,'instagram') else 'DISABLED',
             rules=['기존 자동 답장·알림 설정을 유지합니다. 이 화면은 로그인 유효성을 확인하지 않습니다.'])
     for key, value in config.get('platforms', {}).items():
         if key not in ('slack', 'photon') or not isinstance(value, dict):
@@ -295,6 +319,9 @@ def inventory(root, runner=subprocess.run, *, google=None):
                     and (expires := checks.instagram_expiry(home)):
                 row['expires_at'] = expires
             row['actions'] = actions_for(row)
+            if row['id'] in ACCOUNT_IDS:
+                from hermes_facility.account_connect import undo_available
+                if undo_available(home,row['id']):row['actions'].append(action('account_undo','되돌리기'))
         from hermes_facility import app_registry
         if app_registry.explicit(root, profile):
             from hermes_packs.mac_apps.catalog import load_catalog
@@ -388,8 +415,14 @@ def build_parser():
     app.add_argument('--scope', dest='scopes', action='append')
     app.add_argument('--default')
     app.add_argument('--values-stdin', action='store_true')
+    app.add_argument('--change', choices=['address','login','sync_root','values'])
     app.add_argument('--resume', choices=['gateway_restart', 'permission_request', 'internet_accounts'])
     app.add_argument('--json', action='store_true', required=True)
+    account=sub.add_parser('account')
+    account.add_argument('action',choices=['connect','disconnect','undo'])
+    account.add_argument('--profile',required=True)
+    account.add_argument('--connection',required=True)
+    account.add_argument('--json',action='store_true',required=True)
     checking = sub.add_parser('check')
     checking.add_argument('--profile', required=True)
     target = checking.add_mutually_exclusive_group(required=True)
@@ -427,7 +460,10 @@ def run_command(root, args):
             if any(not isinstance(v, str) or not v or len(v) > 4096 or any(ord(c) < 32 for c in v) for v in values.values()):
                 raise ValueError('VALUES_INVALID')
         return app_connect.run(root, args.action, args.profile, args.bundle, account=args.account,
-            scopes=args.scopes, default=args.default, values=values, resume=args.resume)
+            scopes=args.scopes, default=args.default, values=values, resume=args.resume, change=args.change)
+    if args.command=='account':
+        from hermes_facility import account_connect
+        return account_connect.run(root,args.action,args.profile,args.connection)
     if args.command == 'status':
         return inventory(root)
     if args.command == 'reconnect':

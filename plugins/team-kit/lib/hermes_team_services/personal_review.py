@@ -116,6 +116,8 @@ def mail(home, args):
     import hermes_yaml as yaml
     from pm.environments import project_python
     cfg = yaml.safe_load((home / 'config.yaml').read_text())
+    from hermes_facility.connections import service_enabled
+    if not service_enabled(cfg,'google'):raise ValueError('GOOGLE_DISABLED')
     account = cfg.get('plugins', {}).get('entries', {}).get('team-delegation', {}).get('settings', {}).get('gmail', {}).get('account')
     account=args.get('account') or account
     if not account: raise ValueError('gmail_account_not_configured')

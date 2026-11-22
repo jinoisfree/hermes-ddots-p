@@ -175,9 +175,15 @@ class Authority:
     def room_problem(self):
         from hermes_facility import owner_vault
         from hermes_governance import app_tools, write_policy
-        if not write_policy.owner_chat(self.home, app_tools.env) or app_tools.env('HERMES_SESSION_PLATFORM', '').lower() != 'slack':
+        from hermes_team_services import delivery as D
+        platform = app_tools.env('HERMES_SESSION_PLATFORM', '').lower()
+        if not write_policy.owner_chat(self.home, app_tools.env) or platform not in ('slack', 'hejo'):
             return 'CCTV_REFERENCE_OWNER_CHAT_REQUIRED'
         chat = app_tools.env('HERMES_SESSION_CHAT_ID', '')
+        if platform == 'hejo':
+            if chat == D.employee(self.home) or chat == D.target(self.home, 'customer_room', slack=lambda: None):
+                return None
+            return 'CCTV_REFERENCE_ROOM_REQUIRED'
         if chat != owner_vault.text('channels.customer_room') and not chat.startswith('D'):
             return 'CCTV_REFERENCE_ROOM_REQUIRED'
         return None

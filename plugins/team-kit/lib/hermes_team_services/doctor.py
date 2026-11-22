@@ -12,7 +12,7 @@ import sys as _owner_sys
 _owner_library = str((_OwnerPath(__file__).resolve().parent / '..').resolve())
 if _owner_library not in _owner_sys.path:
     _owner_sys.path.insert(0, _owner_library)
-from hermes_facility.owner_text import render as _owner_text
+from hermes_facility.owner_text import render as _owner_text, repository as _repository
 
 
 import argparse
@@ -66,6 +66,9 @@ if str(_AtomicPath(__file__).resolve().parents[1]) not in _atomic_sys.path:
     _atomic_sys.path.insert(0, str(_AtomicPath(__file__).resolve().parents[1]))
 from hermes_facility import atomic as _atomic
 
+
+from hermes_team_services import delivery
+import uuid
 
 def managed(label):
     return label.startswith(("ai.hermes.", _owner_text("com.<<owner_label_lower>>.")))
@@ -325,14 +328,28 @@ def atomic_state(path, data):
     _atomic.write_json(path, data, mode=0o600, prefix=".doctor-")
 
 
-def deliver(home, text):
-    if not CHANNEL:
+def accept_snapshot(path, snapshot, *, notice=None):
+    """Morning and standalone reports share a baseline; preserve any pending notice."""
+    current = json.loads(path.read_text()) if path.exists() else {}
+    newest = current if current.get('ranAt', '') > snapshot.get('ranAt', '') else snapshot
+    result = {**newest}
+    saved_notice = notice if notice is not None else current.get('notice')
+    if saved_notice is not None:
+        result['notice'] = saved_notice
+    atomic_state(path, result)
+
+
+def deliver(home, text, *, client_id=None, state=None, save=None):
+    if delivery.platform(home) == "slack" and not CHANNEL:
         raise vault.VaultError("owner vault value 'dms.doctor' is not set; doctor report not sent")
     spec = importlib.util.spec_from_file_location("doctor_report", Path(__file__).with_name("learning_report.py"))
     report = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(report)
-    return report.slack(home, "chat.postMessage", {"channel": CHANNEL, "text": text,
-                                                  "unfurl_links": False, "unfurl_media": False})
+    channel = delivery.target(home, "doctor", slack=lambda: CHANNEL)
+    body = {"channel": channel, "text": text, "unfurl_links": False, "unfurl_media": False}
+    if delivery.platform(home) == "slack":
+        return report.slack(home, "chat.postMessage", body)
+    return report.slack(home, "chat.postMessage", body, client_id=client_id, state=state, save=save)
 
 
 def prepare(root, home, agents, document, *, now=None, runner=run_command):
@@ -354,6 +371,37 @@ def prepare(root, home, agents, document, *, now=None, runner=run_command):
             "persisting": [x for x in current if x["status"] == "broken"]}
 
 
+def report_hejo(root, home, agents, document, *, now, runner):
+    """Keep the report occurrence with the old health baseline until delivery ends."""
+    path = home / "watcher-state/doctor.json"
+    previous = json.loads(path.read_text()) if path.exists() else {}
+    notice = previous.get("notice", {})
+    if notice.get("platform") != "hejo" or notice.get("complete", True):
+        prepared = prepare(root, home, agents, document, now=now, runner=runner)
+        text = format_report(prepared["broken"], prepared["recovered"])
+        if not text:
+            atomic_state(path, prepared["state"])
+            return {**prepared["state"], "wakeAgent": False}, ""
+        notice = {"platform": "hejo", "key": "doctor:" + uuid.uuid4().hex, "text": text,
+                  "baseline": prepared["state"], "delivery": {}, "complete": False,
+                  "target": delivery.target(home, "doctor", slack=lambda: CHANNEL)}
+        previous["notice"] = notice
+    def save():
+        atomic_state(path, previous)
+    save()
+    try:
+        receipt = delivery.post(home, notice["target"], state=notice["delivery"], save=save,
+            client_id=notice["key"], **delivery.presentation({"text": notice["text"]}))
+        notice.update(receipt=receipt, outcome="sent")
+    except delivery.Refused as exc:
+        if not exc.permanent:
+            raise
+        notice.update(outcome="rejected", error=exc.error)
+    notice["complete"] = True
+    accept_snapshot(path, notice["baseline"], notice=notice)
+    return {**notice["baseline"], "wakeAgent": True}, ""
+
+
 def run(root, home, agents, document, *, dry_run=False, now=None, runner=run_command):
     now = now or datetime.now(KST)
     state_path = home / "watcher-state/doctor.json"
@@ -361,6 +409,8 @@ def run(root, home, agents, document, *, dry_run=False, now=None, runner=run_com
         raise ValueError("symlink state")
 
     def inspect_and_report():
+        if delivery.platform(home) == "hejo" and not dry_run:
+            return report_hejo(root, home, agents, document, now=now, runner=runner)
         prepared = prepare(root, home, agents, document, now=now, runner=runner)
         text = format_report(prepared["broken"], prepared["recovered"])
         result = {**prepared["state"], "wakeAgent": bool(text)}
@@ -392,7 +442,7 @@ def main(argv=None, *, root=None, home=None):
     args = parser.parse_args(argv)
     root = Path(root) if root else Path.home() / ".hermes"
     home = Path(home) if home else team.home_of_role('doctor', root)
-    document = Path.home() / _owner_text("<<workspace_folder>>/Hermes-ddots/백그라운드-작업-목록.md")
+    document = _repository() / "백그라운드-작업-목록.md"
     try:
         result, text = run(root, home, Path.home() / "Library/LaunchAgents", document, dry_run=args.dry_run)
         if args.dry_run:

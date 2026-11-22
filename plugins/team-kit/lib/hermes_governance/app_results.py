@@ -134,7 +134,7 @@ def decide(home, ref, label, source, *, clock=None):
 
 
 def pending_in_thread(entries, conversation, label, home, *, clock=None):
-    """Group ids (or keys of single entries) a bare owner word can only mean in this thread (ddots sends a
+    """Group ids (or keys of single entries) a bare owner word can only mean in this thread (an app sends a
     lone post's button as the word). 되돌리기 matches a delivered, live receipt; 승인/거절 match a waiting
     undo approval. 확인 is left to the agent."""
     now=(clock or time.time)()

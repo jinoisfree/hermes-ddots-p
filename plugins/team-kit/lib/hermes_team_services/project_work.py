@@ -50,7 +50,7 @@ consult는 읽기 전용이며 결과 보고이지 변경 완료가 아니다. �
 조회 보고를 선행 조건으로 쓸 때 source(task_id)로 이번 턴에서 원문 전체를 확인한 뒤 accept_report(task_id)로 채택한다. 오류·한계가 남은 보고는 채택하지 말고 block한다. 채택은 조회 근거의 확인이며 쓰기 완료나 승인이 아니다.
 다른 담당자의 도구·입력·범위가 불확실할 때만 preflight(task_id 또는 profile, tool, arguments)로 확인한다. 이미 아는 자기 도구마다 반복하지 않는다. 실제 인증·외부 연결·실행 성공을 보장하지 않는다.
 현재 요청에서 다른 담당자가 실행할 미착수 단계는 plan(title, goal, profile, depends_on) 후 dispatch(task_id, reason, tool)로 연결한다. <<personal_name>>→<<work_name>>와 <<work_name>>→<<personal_name>> 메일(tool=gmail_direct·mail_waiting) auto_referrals 설정 시 묻지 않고 즉시 넘기며 그 외에는 버튼 승인을 받는다. goal에는 필수 산출물을 적는다. capabilities/preflight로 실제 도구·동작을 확인한다. <<work_name>>가 같은 스레드에서 직접 답변하므로 자동 전달에 성공한 <<personal_name>>는 결과를 중복 설명하지 않고 <<work_name>>가 처리한다고 한 줄로 알린다. 실행 중·결과 미확인 단계는 재호출하지 않는다. handoff는 다음 사용자 메시지까지 기다려야 하는 경우만 쓴다. 이전 승인은 넘기지 않는다.
-<<doctor_name>>은 ddots·Hermes 시스템만 진단한다. 문서·표·자료 검토는 <<work_name>>에게 맡긴다. <<doctor_name>> 진단은 시스템 이름을 명시한 단계로 handoff하고 실제 소유자 대화에서 진행한다.
+<<doctor_name>>은 hejo·Hermes 시스템만 진단한다. 문서·표·자료 검토는 <<work_name>>에게 맡긴다. <<doctor_name>> 진단은 시스템 이름을 명시한 단계로 handoff하고 실제 소유자 대화에서 진행한다.
 쓰기·발송은 현재 소유자 요청을 이어받은 담당자의 기존 도구 승인 절차를 거친다. 회사 범위의 메모·일정·Notion·메일·파일 조회·생성·수정·실행·종합 보고는 <<work_name>> 한 명에게 배정한다. <<personal_name>>는 AI 아이디어 탐색·일반 대화와 개인 범위만 맡는다. 다른 담당자의 단계는 직접 완료했다고 쓰지 않는다. 공유할 내용은 이 프로젝트의 허용된 자료 요약·출처만 쓴다.
 프로젝트 완료는 사용자의 종료 의도가 분명하고 미완료 단계가 없을 때만 close한다.
 변경 지시에는 영향받는 미완료 단계·산출물·예약을 확인한다. 재개할 때 기존 단계·근거를 재사용하고 낡은 값만 다시 조회한다. 성공한 쓰기를 반복하지 않으며 부분 결과·불명확한 전송은 block에 남긴다. 원인·조건이 그대로인 실패를 자동 반복하지 않는다.
@@ -190,7 +190,7 @@ def context_note(project, turn):
 
 def view(project, *, compact=False, profile=None):
     if team.has_role(profile, 'doctor'):
-        project = dict(project, title='ddots·Hermes 시스템 진단', goal='시스템 상태와 실행 근거만 확인한다.',
+        project = dict(project, title='hejo·Hermes 시스템 진단', goal='시스템 상태와 실행 근거만 확인한다.',
                        facts=[], decisions=[], handoff=None, approvals=[],
                        tasks=[t for t in project['tasks'] if team.has_role(t['profile'], 'doctor') and re.search(r'ddots|디닷|디도츠|hermes|헤르메스|게이트웨이|gateway|런타임|runtime', t['title'], re.I)])
     result = {k: project.get(k, []) for k in ("title", "goal", "status", "current_profile", "tasks", "facts", "decisions", "approvals", "handoff", "updated_at")}
@@ -256,7 +256,7 @@ def guard(home, learning, *, tool_name, args, session_id, turn_id="", tool_call_
             except Exception:
                 return {'action': 'block', 'message': 'Paseo는 현재 소유자의 직접 요청에서만 쓴다.'}
         else:
-            return {'action': 'block', 'message': _owner_text('<<doctor_name>>은 ddots·Hermes 시스템 진단만 맡는다. 문서 도구는 <<work_name>>에게 넘긴다.')}
+            return {'action': 'block', 'message': _owner_text('<<doctor_name>>은 hejo·Hermes 시스템 진단만 맡는다. 문서 도구는 <<work_name>>에게 넘긴다.')}
     if turn.get("ambiguous_approval") and tool_name != "team_project" and not gmail_native_write(tool_name, args):
         return {"action": "block", "message": "승인할 작업을 먼저 선택해야 한다."}
     # Native search has no enforceable cross-profile/project ACL. Project recall

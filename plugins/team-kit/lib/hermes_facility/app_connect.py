@@ -8,8 +8,8 @@ import hashlib
 import json
 from pathlib import Path
 import time
-import unicodedata
 from hermes_facility import app_registry as registry
+from hermes_facility import path_form
 from hermes_facility import plugin_store as store
 from hermes_facility.config_assembly import CONFIG, assemble_config, app_manifests, atomic_write, locked, yaml_bytes, yaml_load, checked_path
 from hermes_packs.mac_apps import catalog, discovery
@@ -54,9 +54,48 @@ def steps_from(record):
     finished = set(record.get('done', []))
     labels=([('address','주소 입력'),('login','로그인'),('sync_root','동기화 폴더 확인'),
              ('values','폴더 고르기'),*[(i,l) for i,l in LABELS if i!='values']]
-            if record.get('service')=='synology' else LABELS)
+            if record.get('service')=='synology' else [('login','로그인 열쇠'),*LABELS] if record.get('service')=='notion' else LABELS)
     return [dict(id=id, label=label, state='done' if id in finished else 'todo',
                  reason=None, needs_user=False, hint=None) for id, label in labels]
+
+
+# Public setting steps are projections of the existing setup flow, never another form registry.
+SETTING_STEPS = ('address', 'login', 'sync_root', 'values')
+
+
+def settings_for(app, selected, home):
+    from urllib.parse import urlsplit
+    from hermes_facility.connections import environment_names
+    service=app.get('service'); result=[]
+    def add(step,label,value):result.append(dict(step=step,label=label,value=value))
+    if service=='synology' and selected.get('api_base'):
+        add('address','주소',urlsplit(selected['api_base']).hostname or '')
+    names=environment_names(home)
+    required=_input_env_names(app['bundle_id'])
+    if required and required<=names:
+        add('login','로그인 열쇠' if service=='notion' else '로그인','저장됨')
+    if service=='synology' and selected.get('sync_root'):
+        add('sync_root','동기화 폴더',Path(selected['sync_root']).name)
+    choices=selected.get('accounts') or selected.get('account') or selected.get('scope')
+    if service=='obsidian_notes' and selected.get('vault'):
+        add('values','보관함',Path(selected['vault']).name)
+    elif choices:
+        choices=choices if isinstance(choices,list) else [choices]
+        first=Path(str(choices[0])).name or str(choices[0])
+        add('values','계정' if app.get('scope')=='mail_accounts' else '쓸 곳',
+            first+(' 외 '+str(len(choices)-1)+'개' if len(choices)>1 else ''))
+    return result
+
+
+def selected_options(options, saved):
+    """Map stored values back to today's option ids without silently dropping a missing value."""
+    saved=saved if isinstance(saved,list) else [saved] if saved else []
+    ids=[];found=[]
+    for option in options:
+        values=option['value'] if isinstance(option.get('value'),list) else [option.get('value')]
+        if values and all(v in saved for v in values) and not option.get('disabled'):
+            ids.append(option['id']);found.extend(values)
+    return ids, all(v in found for v in saved)
 
 
 def wait(result, step, kind, reason, **extra):
@@ -68,7 +107,8 @@ def wait(result, step, kind, reason, **extra):
                needs_user=kind in HINTS, hint=extra.get('hint') or HINTS.get(kind))
     if 'guide' not in extra and kind not in ('open_settings','permission_request'):
         from hermes_facility.connection_guides import instructions
-        extra['guide'] = instructions(catalog.load_catalog().get(result.get('app'),{}).get('service')) if kind == 'secret_set' else [dict(n=1,text=extra.get('hint') or HINTS.get(kind,'계속을 누르세요.'))]
+        service=catalog.load_catalog().get(result.get('app'),{}).get('service')
+        extra['guide'] = instructions(service,stage=step) if kind == 'secret_set' else [dict(n=1,text=extra.get('hint') or HINTS.get(kind,'계속을 누르세요.'))]
     service = catalog.load_catalog().get(result.get('app'),{}).get('service')
     if kind == 'secret_set' and not extra.get('fields'):
         from hermes_facility.connection_secrets import FIELDS
@@ -403,7 +443,8 @@ def transact(root, profile, bundle, action, config, app_values, clock, app=None)
         if not setup:vault.get('app_setup',{}).pop(profile,None)
         if not vault.get('app_setup'):vault.pop('app_setup',None)
     vault.setdefault('apps', {})[profile] = stored
-    desired = {team_path: yaml_bytes(team), config_path: config_body}
+    team_body=team_path.read_bytes() if bundles==previous and registry.explicit(root,profile) and team_path.exists() else yaml_bytes(team)
+    desired = {team_path: team_body, config_path: config_body}
     tools=sorted({tool for b in bundles for tool in table.get(b,{}).get('tools',[])})
     manifests,manifest_changed=app_manifests(root,home,profile,tools)
     desired.update(manifests)
@@ -426,27 +467,30 @@ def transact(root, profile, bundle, action, config, app_values, clock, app=None)
                            not any(table.get(b, {}).get('route') == 'sdef' for b in previous)
                            if table.get(bundle, {}).get('route', 'sdef') == 'sdef' else
                            bool(set(table.get(bundle, {}).get('tools', [])) - {t for b in previous for t in table.get(b, {}).get('tools', [])}))))
-    # The write-ahead undo record also handles a process dying during the transaction.
+    write_transaction(root,path,journal,desired)
+    return journal
+
+
+def write_transaction(root, path, journal, desired):
+    """One write-ahead format and recovery path for app and account changes; caller owns the lock."""
     atomic_write(path, json.dumps(journal).encode())
     try:
         for p, body in desired.items():
             if isinstance(body,dict):store.write(root,p,body)
             elif body is None:p.unlink(missing_ok=True)
             else:atomic_write(p,body)
-        journal['phase'] = 'applied'
-        atomic_write(path, json.dumps(journal).encode())
+        journal['phase']='applied'
+        atomic_write(path,json.dumps(journal).encode())
     except Exception:
-        journal['phase'] = 'applying'
-        recover(root, path, journal)
+        journal['phase']='applying'
+        recover(root,path,journal)
         raise
 
-    return journal
 
-
-def undo(root, profile, bundle, clock=time.time):
+def undo(root, profile, bundle, clock=time.time, *, journal_path=None):
     root = Path(root).resolve()
     home = registry.profile_home(root, profile)
-    path = checked_path(root, str(record_path(home, bundle).relative_to(root)))
+    path = checked_path(root, str((journal_path or record_path(home, bundle)).relative_to(root)))
     with locked(root / 'owner/.app-connect.lock'):
         record = recover(root, path, read_record(path, clock))
         snapshot = record.get('undo')
@@ -469,11 +513,13 @@ def undo(root, profile, bundle, clock=time.time):
 
 
 def run(root, action, profile, bundle, *, account=None, scopes=None, default=None,
-        values=None, resume=None, adapters=None, clock=time.time):
+        values=None, resume=None, change=None, adapters=None, clock=time.time):
     from hermes_facility.app_setup import Adapters
     root = Path(root).resolve(); home = registry.profile_home(root, profile)
     checked_path(root, str(home.relative_to(root)))
     if not home.is_dir(): return response(profile, bundle, reason='PROFILE_MISSING')
+    if change is not None and (action!='connect' or change not in SETTING_STEPS or resume is not None):
+        return response(profile,bundle,reason='INVALID_ARGUMENTS')
     if action == 'undo':
         try: return undo(root, profile, catalog.connection_key(bundle), clock)
         except ValueError as error: return response(profile, bundle, reason=str(error))
@@ -491,11 +537,16 @@ def run(root, action, profile, bundle, *, account=None, scopes=None, default=Non
         return response(profile,bundle,reason='SCOPE_INVALID')
     if app['route'] in ('none', 'excluded') and action == 'connect':
         return response(profile, bundle, reason='APP_UNAVAILABLE')
+    committed=False
     try:
         path = checked_path(root, str(record_path(home, bundle).relative_to(root)))
         config_path = checked_path(root, str((home/'config.yaml').relative_to(root)))
         checked_path(root, 'owner/team.yaml'); checked_path(root, 'owner/vault.yaml')
-        if path.exists():
+        if change:
+            saved=deepcopy(registry.values(root,profile).get(bundle,{}))
+            if bundle not in registry.grants(root,profile) or change not in {r['step'] for r in settings_for(app,saved,home)}:
+                return response(profile,bundle,reason='INVALID_ARGUMENTS')
+        if path.exists() and not change:
             with locked(root / 'owner/.app-connect.lock'):
                 prior = read_record(path, clock)
                 if prior.get('phase') in ('applying', 'undoing', 'input_applying'): recover(root, path, prior)
@@ -504,30 +555,34 @@ def run(root, action, profile, bundle, *, account=None, scopes=None, default=Non
                     if action=='disconnect':_cancel_input(root,home,profile,bundle,path,prior)
         # All preflight choices are read-only. Even a single account requires a choice.
         config = yaml_load(config_path.read_bytes(), CONFIG) if config_path.exists() else {}
-        record = read_record(path, clock)
+        record = (json.loads(path.read_bytes()) if path.exists() else {}) if change else read_record(path, clock)
+        if change and record.get('phase') in ('applying','undoing','input_applying','choosing'):
+            return response(profile,bundle,reason='CONNECTION_IN_PROGRESS')
         if resume=='internet_accounts' and mac_account_settings(app):
             if record.get('phase')=='choosing':
                 staged=draft_values(root,profile,bundle)
                 staged.pop('account',None);staged.pop('accounts',None)
                 stage_values(root,profile,bundle,staged,clock)
             return wait(response(profile,bundle,steps_from(record)), 'values', reason='ACCOUNT_LOGIN_REQUIRED', **internet_accounts())
-        pending = record.get('phase') == 'applied' and record.get('action') == action and not any((account is not None, scopes is not None, values is not None))
-        selected = registry.values(root, profile).get(bundle, {}) if pending else (draft_values(root,profile,bundle) if record.get('phase')=='choosing' and action=='connect' else {})
+        pending = not change and record.get('phase') == 'applied' and record.get('action') == action and not any((account is not None, scopes is not None, values is not None))
+        selected = deepcopy(draft_values(root,profile,bundle) if record.get('phase')=='choosing' and action=='connect' else registry.values(root,profile).get(bundle,{}))
+        if change:selected['_change']=True
+        reuse_saved=action=='connect' and record.get('action')=='disconnect' and values is None and account is None
         result = response(profile,bundle,steps_from(record if pending else dict(service=app.get('service'),done=selected.get('setup_done',[]))))
         result['role_hint']=registry.role_hint(root,profile)
         if action == 'connect' and not pending:
             supplied=values is not None or account is not None and app.get('scope')=='mail_accounts'
             def checkpoint():
                 nonlocal supplied
-                if supplied:
+                if supplied and not change and not reuse_saved:
                     stage_values(root,profile,bundle,selected,clock)
                     supplied=False
             if app.get('scope') == 'mail_accounts':
                 options = adapters.accounts(home, app)
-                if account is None and selected.get('accounts'):account=selected['accounts']
+                if account is None and selected.get('accounts') and change!='values' and all(any(o['id']==a for o in options) for a in selected['accounts']):account=selected['accounts']
                 if account is None:
                     return wait(result, 'values', 'choose_account', 'CHOOSE_ACCOUNT', options=options,
-                                selected=[], multi=True, other_account=False,
+                                selected=[a for a in selected.get('accounts',[]) if any(o['id']==a for o in options)], multi=True, other_account=False,
                                 account_settings=internet_accounts())
                 accounts = list(dict.fromkeys(account if isinstance(account, list) else [account]))
                 if not accounts or any(not isinstance(a, str) or not a for a in accounts):
@@ -538,28 +593,82 @@ def run(root, action, profile, bundle, *, account=None, scopes=None, default=Non
                 selected['account'] = accounts[0]  # Compatibility for adapters accepting one account.
                 if any(not any(o['id'] == a for o in options) for a in accounts):
                     return wait(result, 'values', reason='ACCOUNT_LOGIN_REQUIRED', **internet_accounts())
+            if app.get('service')=='synology':
+                from hermes_facility import synology_setup as nas
+                from hermes_packs.files_docs import files
+                prior_selected={k:v for k,v in selected.items() if not k.startswith('_') and v}
+                if change:
+                    submitted=values or {}
+                    if change=='address' and not all(k in submitted for k in ('api_base','link_host')):
+                        return wait(result,'address','secret_set','VALUES_REQUIRED',fields=nas.address_fields(selected))
+                    changed_address=any(k in submitted and submitted[k]!=selected.get(k) for k in ('api_base','link_host'))
+                    selected.update({k:submitted[k] for k in ('api_base','link_host') if k in submitted})
+                    if changed_address:selected.pop('login_selected',None)
+                    options=None;address_invalid=bool(files.address_problems(selected.get('api_base'),selected.get('link_host')))
+                    if not address_invalid:selected['setup_done']=list(dict.fromkeys([*selected.get('setup_done',[]),'address']))
+                else:selected,options,address_invalid=nas.prepare(root,profile,bundle,selected,config,values,account)
+                result['steps']=steps_from(dict(service='synology',done=selected.get('setup_done',[])))
+                if options is not None:
+                    return wait(result,'address','choose_account','CHOOSE_ACCOUNT',options=options,selected=[],multi=False,
+                                hint='사용할 연결을 골라 주세요.',
+                                **({'input_error':'넣었던 주소가 맞지 않아요. 서버가 찾은 연결을 골라 주세요'} if address_invalid else {}))
+                complete=not files.address_problems(selected.get('api_base'),selected.get('link_host'))
+                if (complete or prior_selected) and {k:v for k,v in selected.items() if not k.startswith('_') and v}!=prior_selected:supplied=True
+                if not complete:
+                    if supplied:checkpoint()
+                    return wait(result,'address','secret_set','ADDRESS_INVALID' if address_invalid else 'VALUES_REQUIRED',
+                                fields=nas.address_fields(selected),
+                                **({'input_error':'주소를 확인하지 못했어요. 빈 칸을 다시 넣어 주세요.'} if address_invalid else {}))
+            if change=='values' and app.get('service')=='obsidian_notes' and not account and not (values or {}).get('vault'):
+                selected.pop('vault',None)
+            if app.get('service')=='obsidian_notes' and not (selected.get('vault') or (values or {}).get('vault')):
+                options=adapters.obsidian_vaults() if hasattr(adapters,'obsidian_vaults') else []
+                if options:
+                    picked=account[0] if isinstance(account,list) and len(account)==1 else account
+                    chosen=next((o for o in options if o['id']==picked),None)
+                    if chosen:selected['vault']=chosen['value'];supplied=True
+                    else:return wait(result,'values','choose_account','CHOOSE_ACCOUNT',
+                        options=[{k:o[k] for k in ('id','label')} for o in options],selected=[],multi=False,
+                        guide=[dict(n=1,text='쓸 보관함을 골라 주세요.')])
             if app.get('service') in ('synology', 'notion', 'obsidian_notes'):
-                setup = adapters.credentials(home, app, {**selected,**(values or {})}, config)
+                service=app.get('service');submitted=values or {}
+                if service=='synology' and change:
+                    from hermes_facility.connection_checks import env_value
+                    selected['_username']=env_value(home,'SYNOLOGY_DRIVE_USER')
+                force_login=change=='login' or change=='address' and not selected.get('login_selected')
+                if force_login and not submitted.get('token' if service=='notion' else 'password'):
+                    fields=([dict(id='token',label='Notion 로그인 열쇠',secure=True)] if service=='notion' else
+                        [dict(id='user',label='아이디',secure=False,value=selected.get('_username','')),dict(id='password',label='비밀번호',secure=True)])
+                    return wait(result,'login','secret_set','VALUES_REQUIRED',fields=fields)
+                setup = adapters.credentials(home, app, {**selected,**submitted}, config)
                 selected.update(setup.get('values', {}))
                 if not setup.get('ok'):
-                    step=('login' if selected.get('api_base') and selected.get('link_host') else 'address') if app.get('service')=='synology' else 'values'
-                    if step=='login':
-                        selected['setup_done']=['address'];result['steps']=steps_from(dict(service='synology',done=selected['setup_done']))
+                    step=('login' if 'address' in selected.get('setup_done',[]) else 'address') if app.get('service')=='synology' else 'login' if app.get('service')=='notion' else 'values'
                     checkpoint()
-                    if step=='address' and not record:
-                        previous=legacy_values(config,[bundle]).get(bundle,{})
-                        setup['fields']=[dict(f, value=previous[f['id']]) if not f.get('secure') and f['id'] in ('api_base','link_host') and previous.get(f['id']) else f for f in setup.get('fields',[])]
-                    return wait(result, step, 'secret_set', setup.get('reason', 'VALUES_REQUIRED'),
-                                fields=setup.get('fields', []))
+                    return wait(result,step,'secret_set',setup.get('reason','VALUES_REQUIRED'),fields=setup.get('fields',[]),
+                                **({'hint':'넣었던 주소가 맞지 않아 서버가 찾은 주소로 바꿨어요'}
+                                   if app.get('service')=='synology' and address_invalid and complete
+                                   and not any(k in (values or {}) for k in ('api_base','link_host')) else {}))
             checkpoint()
             if app.get('service')=='synology':
+                saved_root=selected.get('sync_root')
+                if change=='sync_root' and not (values or {}).get('sync_root'):selected.pop('sync_root',None)
                 if values and 'sync_root' in values:selected['sync_root']=values['sync_root']
                 try:setup=adapters.synology(home,selected)
                 except ValueError as error:
+                    if str(error)=='invalid NAS config':
+                        from hermes_packs.files_docs import files
+                        for key in files.address_problems(selected.get('api_base'),selected.get('link_host')):selected.pop(key,None)
+                        selected['setup_done']=[s for s in selected.get('setup_done',[]) if s!='address']
+                        if not change and not reuse_saved:stage_values(root,profile,bundle,selected,clock)
+                        return wait(result,'address','secret_set','ADDRESS_INVALID',fields=nas.address_fields(selected),
+                                    input_error='주소를 확인하지 못했어요. 빈 칸을 다시 넣어 주세요.')
                     return wait(result,'sync_root','choose_sync_root',str(error),selected=[])
                 selected.update(setup.get('values',{}))
                 selected['setup_done']=['address']+(['login'] if setup.get('ok') or setup.get('next')=='choose_sync_root' else [])+(['sync_root'] if setup.get('ok') else [])
-                stage_values(root,profile,bundle,selected,clock)
+                if not change and not reuse_saved:stage_values(root,profile,bundle,selected,clock)
+                if change=='sync_root' and not setup.get('ok'):
+                    setup['selected']=[o['id'] for o in setup.get('options',[]) if o['id']==saved_root or o.get('value')==saved_root]
                 result['steps']=steps_from(dict(service='synology',done=selected['setup_done']))
                 if not setup.get('ok'):
                     return wait(result,'sync_root' if setup.get('next')=='choose_sync_root' else 'login',setup.get('next','secret_set'),setup.get('reason','VALUES_REQUIRED'),
@@ -574,20 +683,27 @@ def run(root, action, profile, bundle, *, account=None, scopes=None, default=Non
                                 **(error.details if isinstance(error,LoginError) else {}))
                 choice_fields=dict(scope=app['scope'],
                     options=[{k:v for k,v in o.items() if k in ('id','label','server_path','mac_path','disabled','needs_user','hint')} for o in options],
-                    selected=[],multi=True,select_all=True,needs_default=app['scope']=='calendars',
+                    selected=selected_options(options,selected.get('scope',[]))[0],multi=True,select_all=True,needs_default=app['scope']=='calendars',
                     account_settings=mac_account_settings(app))
+                if scopes is None and change!='values' and selected.get('scope'):
+                    mapped,complete=selected_options(options,selected['scope'])
+                    if complete:
+                        scopes=mapped
+                        if default is None and selected.get('default'):
+                            default=next((o['id'] for o in options if o['value']==selected['default']),None)
                 if not scopes:
                     checkpoint()
+                    hint = selected.get('_scope_hint') or (None if options else '고를 수 있는 항목이 없어요. 앱의 계정과 쓸 곳을 확인한 뒤 다시 골라 주세요.')
                     return wait(result, 'values', 'choose_scope', 'CHOOSE_SCOPE' if options else 'SCOPE_EMPTY',
-                                **({} if options else dict(hint='고를 수 있는 항목이 없어요. 앱의 계정과 쓸 곳을 확인한 뒤 다시 골라 주세요.')),
+                                **(dict(hint=hint) if hint else {}),
                                 **choice_fields)
                 by_id={};ambiguous=set()
                 for option in options:
-                    key=unicodedata.normalize('NFC',option['id'])
+                    key=path_form.normal(option['id'])
                     if key in by_id:ambiguous.add(key)
                     else:by_id[key]=option
-                scope_ids=list(dict.fromkeys(unicodedata.normalize('NFC',s) for s in scopes))
-                default_id=unicodedata.normalize('NFC',default) if isinstance(default,str) else None
+                scope_ids=list(dict.fromkeys(path_form.normal(s) for s in scopes))
+                default_id=path_form.normal(default) if isinstance(default,str) else None
                 if (any(s not in by_id or s in ambiguous or by_id[s].get('disabled') for s in scope_ids)
                         or (app['scope']=='calendars' or default is not None) and default_id not in scope_ids):
                     return wait(result, 'values', 'choose_scope', 'SCOPE_INVALID',
@@ -607,6 +723,7 @@ def run(root, action, profile, bundle, *, account=None, scopes=None, default=Non
             if yaml_load(current, CONFIG) != config: return response(profile, bundle, reason='CONFIG_CHANGED')
             if not pending:
                 record = transact(root, profile, bundle, action, config, selected, clock,app)
+                committed=True;result['committed']=True
             result['steps'] = steps_from(record)
             result['undo_until'] = record['at'] + UNDO_SECONDS if 'undo' in record else None
         if action == 'disconnect' and not record.get('restart_required'):
@@ -633,6 +750,10 @@ def run(root, action, profile, bundle, *, account=None, scopes=None, default=Non
         return result
     except ValueError as error:
         reason = str(error)
-        return response(profile, bundle, reason=reason if reason in ('LOCKED', 'UNSAFE_PATH', 'CONFIG_INVALID', 'AUTH_FAILED', 'PERMISSION_REQUIRED', 'SCOPE_INVALID', 'NETWORK', 'TOKEN_INVALID', 'UNDO_CONFLICT') else 'CONNECTIONS_READ_FAILED')
+        reply=response(profile, bundle, reason=reason if reason in ('LOCKED', 'UNSAFE_PATH', 'CONFIG_INVALID', 'AUTH_FAILED', 'PERMISSION_REQUIRED', 'SCOPE_INVALID', 'NETWORK', 'TOKEN_INVALID', 'UNDO_CONFLICT') else 'CONNECTIONS_READ_FAILED')
+        if committed:reply['committed']=True
+        return reply
     except Exception:
-        return response(profile, bundle, reason='CONNECTIONS_READ_FAILED')
+        reply=response(profile, bundle, reason='CONNECTIONS_READ_FAILED')
+        if committed:reply['committed']=True
+        return reply

@@ -100,7 +100,10 @@ def _settings(home):
 
 
 def account(home):
-    value = str((_settings(home).get("gmail") or {}).get("account") or "").strip().lower()
+    gmail = _settings(home).get("gmail") or {}
+    if gmail.get("enabled") is False:
+        raise ValueError("GOOGLE_DISABLED")
+    value = str(gmail.get("account") or "").strip().lower()
     if not value:
         raise ValueError("gmail_account_not_configured")
     return value
@@ -123,9 +126,10 @@ def store_path(home):
 
 # ---- reads (tool time and check time) -----------------------------------------------------------
 def gmail_service(home):
+    own = account(home)
     from hermes_packs.mail import gmail_watch as watch
     _, service = watch.gmail_client(root(home), token_home=token_home(home))
-    if watch.mailbox_address(service) != account(home):
+    if watch.mailbox_address(service) != own:
         raise ValueError("gmail_account_mismatch")
     return service
 
@@ -160,8 +164,8 @@ def evaluate(home, wait, *, service=None, now=None):
     """(met, facts) for one stored wait. Reads only."""
     now = time.time() if now is None else now
     if wait["kind"] == "mail_reply":
-        service = service or gmail_service(home)
         own = account(home)
+        service = service or gmail_service(home)
         seen = set(wait["baseline"])
         fresh = [m for m in thread_messages(service, wait["gmail_thread_id"])
                  if m["id"] not in seen and _address(m["from"]) != own]
@@ -272,6 +276,9 @@ def _hejo_origin(home):
 
 
 def _matches_origin(wait, origin):
+    if origin and origin.get('platform') == 'hejo':
+        stored = wait.get('origin') or {}
+        return bool(origin.get('profile')) and stored.get('platform') == 'hejo' and stored.get('profile') == origin['profile']
     return origin is None or wait.get('origin') == origin
 
 
@@ -314,6 +321,7 @@ def create(home, args, *, session=None, service=None, now=None, make_job=create_
         gid = str(args.get("gmail_thread_id") or "").strip().lower()
         if not GMAIL_ID.fullmatch(gid):
             raise ValueError("gmail_thread_id_invalid")
+        account(home)
         messages = thread_messages(service or gmail_service(home), gid)
         if not messages:
             raise ValueError("gmail_thread_empty_or_not_found")
@@ -388,10 +396,12 @@ def check(home, cwd, *, service=None, now=None):
         return {"wakeAgent": False, "reason": "outside_wait_folder"}
     wait = load(path)
     if wait["status"] != "waiting":
+        prune(home, origin=wait.get("origin"))
         return {"wakeAgent": False, "reason": wait["status"]}
     if now >= wait["expires_at"]:
         wait.update(status="expired", fired_kst=datetime.fromtimestamp(now, KST).isoformat(timespec="minutes"))
         save(path, wait)
+        prune(home, origin=wait.get("origin"))
         return {"wakeAgent": True, "reason": "expired", "wait": public(wait)}
     try:
         met, facts = evaluate(home, wait, service=service, now=now)
@@ -404,6 +414,7 @@ def check(home, cwd, *, service=None, now=None):
             return {"wakeAgent": False, "reason": "read_failed"}
         wait.update(status="failed", fired_kst=datetime.fromtimestamp(now, KST).isoformat(timespec="minutes"))
         save(path, wait)
+        prune(home, origin=wait.get("origin"))
         return {"wakeAgent": True, "reason": "failed", "error": wait["last_error"], "wait": public(wait)}
     if wait.get("failures"):
         wait["failures"] = 0
@@ -412,4 +423,5 @@ def check(home, cwd, *, service=None, now=None):
         return {"wakeAgent": False, "reason": "waiting"}
     wait.update(status="fired", fired_kst=datetime.fromtimestamp(now, KST).isoformat(timespec="minutes"))
     save(path, wait)
+    prune(home, origin=wait.get("origin"))
     return {"wakeAgent": True, "reason": "met", "wait": public(wait), "facts": facts}

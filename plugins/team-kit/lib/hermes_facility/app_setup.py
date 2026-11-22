@@ -1,14 +1,91 @@
 """Read-only setup adapters. No root-account fallback and no implicit selections."""
 import hashlib
 import json
+import os
 from pathlib import Path
-from urllib.parse import urlsplit
 from hermes_facility import app_registry as registry
+from hermes_facility import path_form
 from hermes_packs.mac_apps import discovery, catalog
 
 
 def option(value, label):
     return dict(id=hashlib.sha256(str(value).encode()).hexdigest()[:24], label=label, value=value)
+
+
+FINDER_LIMIT = 300
+FINDER_PACKAGES = {'.app', '.bundle', '.framework', '.photoslibrary',
+                   '.musiclibrary', '.tvlibrary', '.pkg', '.plugin'}
+
+
+def finder_scopes(selected, home=None):
+    """List folder names only; preserve saved choices beyond the bounded tree."""
+    from hermes_facility import synology_setup
+    home = Path.home() if home is None else Path(home)
+    selected.pop('_scope_hint', None)
+
+    def eligible(path):
+        try:
+            return (not path.name.startswith('.') and path.suffix.casefold() not in FINDER_PACKAGES
+                    and not any(p.is_symlink() for p in (path, *path.parents)) and path.is_dir())
+        except OSError:
+            return False
+
+    def children(path):
+        if not eligible(path): return []
+        try:
+            with os.scandir(path) as entries:
+                paths = [Path(entry.path) for entry in entries]
+        except OSError:
+            return []
+        return sorted((p for p in paths if eligible(p)), key=lambda p: (p.name.casefold(), p.name))
+
+    try:
+        roots = [Path(row['id']) for row in synology_setup.candidates(home)]
+    except OSError:
+        roots = []
+    roots.extend(children(home / 'Library/CloudStorage'))
+    icloud = home / 'Library/Mobile Documents/com~apple~CloudDocs'
+    roots.append(icloud)
+    roots = list(dict.fromkeys(p for p in roots if eligible(p)))
+    rows = []
+
+    def label(path):
+        for root in roots:
+            if path.is_relative_to(root):
+                return ' › '.join(['iCloud Drive' if root == icloud else root.name,
+                                   *path.relative_to(root).parts])
+        return path.name
+
+    def visit(path, depth):
+        rows.append((path, depth))
+        if depth < 2:
+            for child in children(path): visit(child, depth + 1)
+
+    for root in roots: visit(root, 0)
+    # Allocate shallower rows across all roots before restoring display order.
+    chosen = {p for p, depth in sorted(rows, key=lambda row: row[1])[:FINDER_LIMIT]}
+    paths = {path_form.normal(p): p for p, depth in rows if p in chosen}
+    for raw in selected.get('scope', []):
+        path = Path(raw)
+        try:
+            if path.is_absolute() and path.is_dir():
+                paths.setdefault(path_form.normal(path), path)
+        except OSError:
+            continue
+    # A native chooser is a user action. Keep its existing explicit-path contract.
+    for raw in selected.get('_requested_scope', []):
+        path = Path(raw).expanduser()
+        if not path.is_absolute() or not path.is_dir(): raise ValueError('SCOPE_INVALID')
+        path = path.resolve()
+        paths.setdefault(path_form.normal(path), path)
+    if len(rows) > FINDER_LIMIT:
+        selected['_scope_hint'] = '폴더가 많아 일부만 보여요. 위 폴더를 고르면 그 안의 폴더도 함께 쓸 수 있어요.'
+    elif not paths:
+        selected['_scope_hint'] = '서버에서 고를 수 있는 폴더를 찾지 못했어요. 서버 Mac에 Synology Drive나 iCloud Drive 동기화 폴더가 있는지 확인해 주세요.'
+    if 'scope' in selected:
+        selected['scope'] = list(dict.fromkeys(path_form.normal(raw) for raw in selected['scope']))
+    return [dict(id=key, label=path_form.normal(label(path)), value=key)
+            for key, path in paths.items()]
 
 
 class Adapters:
@@ -54,21 +131,17 @@ class Adapters:
             with checks.candidate_values(secret):
                 if not checks.env_value(home, 'NOTION_API_KEY'):
                     return dict(ok=False, reason='VALUES_REQUIRED',
-                                fields=[dict(id='token', label='Notion 비밀값', secure=True)])
+                                fields=[dict(id='token', label='Notion 로그인 열쇠', secure=True)])
                 answer = checks.check_notion(home, checks.default_opener())
             return dict(ok=answer[0] == 'connected', reason=answer[1], values={'_secrets': secret},
-                        fields=[dict(id='token',label='Notion 비밀값',secure=True)])
-        base = values.get('api_base', '')
-        host = values.get('link_host', '')
-        if not base or not host:
-            return dict(ok=False, reason='VALUES_REQUIRED', fields=[
-                dict(id='api_base', label='시놀로지 API 주소', secure=False),
-                dict(id='link_host', label='시놀로지 링크 주소', secure=False)])
-        for value in (base, host if '://' in host else 'https://'+host):
-            parsed = urlsplit(value)
-            if parsed.scheme not in ('https', 'http') or not parsed.hostname or parsed.username or parsed.password or parsed.query or parsed.fragment:
-                return dict(ok=False, reason='FORMAT_INVALID', fields=[dict(id='api_base',label='시놀로지 API 주소',secure=False),dict(id='link_host',label='시놀로지 링크 주소',secure=False)])
-        host=urlsplit(host if '://' in host else 'https://'+host).netloc
+                        fields=[dict(id='token',label='Notion 로그인 열쇠',secure=True)])
+        from hermes_facility import synology_setup as nas
+        from hermes_packs.files_docs import files
+        base=values.get('api_base');host=values.get('link_host')
+        bad=files.address_problems(base,host)
+        if bad:
+            return dict(ok=False,reason='ADDRESS_INVALID',fields=nas.address_fields(values))
+        base=base.rstrip('/')
         secret = {env: values[field] for field, env in [('user', 'SYNOLOGY_DRIVE_USER'),
                   ('password', 'SYNOLOGY_DRIVE_PASSWORD')] if values.get(field)}
         # An unrelated saved credential is never selected merely because it exists.
@@ -78,7 +151,7 @@ class Adapters:
                 checks.env_value(home,k) for k in ('SYNOLOGY_DRIVE_USER','SYNOLOGY_DRIVE_PASSWORD'))
         if not ready:
             return dict(ok=False, reason='VALUES_REQUIRED', values=dict(api_base=base,link_host=host),
-                        fields=[dict(id='user',label='아이디',secure=False),dict(id='password',label='비밀번호',secure=True)])
+                        fields=[dict(id='user',label='아이디',secure=False,**({'value':values['_username']} if values.get('_username') else {})),dict(id='password',label='비밀번호',secure=True)])
         return dict(ok=True, values=dict(api_base=base, link_host=host, login_selected=True, _secrets=secret))
 
     def synology(self,home,selected):
@@ -93,6 +166,21 @@ class Adapters:
                         **(error.details if isinstance(error,nas.LoginError) else {}))
         return dict(ok=False,reason='CHOOSE_SYNC_ROOT',next='choose_sync_root',options=nas.candidates(),selected=[],
                     values=dict(drive_root='/mydrive'),fields=[dict(id='sync_root',label='이 Mac의 Synology Drive 동기화 폴더',secure=False)])
+
+    def obsidian_vaults(self, user_home=None):
+        user_home=Path.home() if user_home is None else Path(user_home)
+        path=user_home/'Library/Application Support/obsidian/obsidian.json'
+        try:
+            raw=json.loads(path.read_text())
+            vaults=raw['vaults']
+            if not isinstance(vaults,dict):return []
+            paths=[]
+            for value in vaults.values():
+                if not isinstance(value,dict) or not isinstance(value.get('path'),str):continue
+                folder=Path(value['path'])
+                if folder.is_absolute() and folder.is_dir() and not folder.is_symlink():paths.append(folder)
+            return [option(str(p),p.name) for p in dict.fromkeys(paths)]
+        except (OSError,ValueError,KeyError,TypeError):return []
 
     def scopes(self, home, app, selected, config):
         kind = app['scope']
@@ -130,14 +218,9 @@ class Adapters:
             pages = result.get('results', [])
             return [option(p['id'], p.get('title') or '공유된 페이지') for p in pages if p.get('object') == 'page']
         if kind in ('folders', 'sync_folders'):
-            paths = catalog.sync_folders(app)
             if app['bundle_id'] == 'com.apple.finder':
-                # A native chooser is a user action in phase 2. No default folder is selected.
-                for raw in selected.get('_requested_scope', []):
-                    path = Path(raw).expanduser()
-                    if not path.is_absolute() or not path.is_dir(): raise ValueError('SCOPE_INVALID')
-                    paths.append(path.resolve())
-                return [dict(id=str(p), label=p.name, value=str(p)) for p in dict.fromkeys(paths)]
+                return finder_scopes(selected)
+            paths = catalog.sync_folders(app)
             if app['service'] == 'synology':
                 from hermes_facility.synology_setup import folders
                 return folders(home,selected)

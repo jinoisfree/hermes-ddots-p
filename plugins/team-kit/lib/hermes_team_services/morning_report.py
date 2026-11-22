@@ -96,7 +96,8 @@ def snapshot(home, args, src, *, now=None):
         raise ValueError('invalid_report_kind_or_view')
     if type(page) is not int or page < 0 or (view == 'summary' and page):
         raise ValueError('invalid_report_page')
-    black = team.home_has_role(home, 'customers')
+    from hermes_facility.connections import home_service_enabled
+    black = team.home_has_role(home, 'customers') and home_service_enabled(home,'instagram')
     if not black and kind == 'replies':
         raise ValueError('this_profile_has_no_automatic_reply_report')
     path = Path(home) / 'state' / ('instagram-dm-learning-reports.json' if black else 'team-learning-reports.json')

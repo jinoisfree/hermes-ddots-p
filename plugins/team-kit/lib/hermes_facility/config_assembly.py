@@ -13,6 +13,9 @@ from pathlib import Path
 import tempfile
 
 
+LOAD_TIMEOUT_SECONDS = 30  # Hermes gives a plugin 10 s to load; a busy start-up needs more, so a profile gets 30 unless the owner set one
+
+
 CONFIG = 'config'  # profile config.yaml and plugin.yaml: Hermes reads them with hermes_yaml (YAML 1.1)
 OWNER = 'owner'    # owner/ files and undo fragments: their readers use ruamel YAML 1.2
 
@@ -70,6 +73,7 @@ def assemble_config(before, *, defaults=None, packs=(), plugins=(), app_settings
     if not isinstance(config, dict): raise ValueError('CONFIG_INVALID')
     missing_merge(config, defaults or {})
     section = config.setdefault('plugins', {})
+    if section.get('load_timeout_seconds') is None: section['load_timeout_seconds'] = LOAD_TIMEOUT_SECONDS  # only when unset
     enabled = section.setdefault('enabled', [])
     disabled = section.get('disabled', [])
     if not isinstance(enabled, list) or not isinstance(disabled, list): raise ValueError('CONFIG_INVALID')
@@ -89,11 +93,17 @@ def assemble_config(before, *, defaults=None, packs=(), plugins=(), app_settings
     if app_settings:
         toolsets = config.setdefault('platform_toolsets', {})
         if not isinstance(toolsets, dict): raise ValueError('CONFIG_INVALID')
-        for platform in ('slack', 'photon'):
+        for platform in ('slack', 'photon', 'hejo'):
             chosen = toolsets.setdefault(platform, [])
             if not isinstance(chosen, list): raise ValueError('CONFIG_INVALID')
             for name in plugins:
                 if name not in chosen: chosen.append(name)
+    toolsets = config.get('platform_toolsets', {})
+    if not isinstance(toolsets, dict): raise ValueError('CONFIG_INVALID')
+    if 'slack' in toolsets:
+        selected = toolsets['slack']
+        if not isinstance(selected, list): raise ValueError('CONFIG_INVALID')
+        toolsets['hejo'] = ['hermes-hejo' if name == 'hermes-slack' else name for name in selected]
     routes = (defaults or {}).get('platforms', {}).get('slack', {}).get('common_router_thread_routes', {})
     if routes.get('profiles'):
         chosen = config['platforms']['slack']['common_router_thread_routes'].setdefault('profiles', [])
@@ -145,8 +155,12 @@ def app_manifests(root,home,profile,tools):
         name=str(host.relative_to(root))
         entry=next((e for e in links['entries'] if e['path']==name),None)
         baseline=state.get(plugin)
+        store_updated=False
         if baseline:
-            if store.fingerprint(before)!=baseline['after']:raise ValueError('UNDO_CONFLICT')
+            if store.fingerprint(before)!=baseline['after']:
+                if not ('link' in before_host and entry is not None and entry.get('overlay') is False
+                        and before==canonical.read_bytes()):raise ValueError('UNDO_CONFLICT')
+                store_updated=True
             template=bytes.fromhex(baseline['before'])
             original_host=baseline.get('host')
             if original_host is None:
@@ -159,11 +173,17 @@ def app_manifests(root,home,profile,tools):
         else:
             template=before if before is not None else canonical.read_bytes()
             original_host=before_host
+        recovery_template=template
         initial=yaml_load(template,CONFIG).get('provides_tools',[]) if (baseline and baseline.get('existed',True) or not baseline and before is not None) else []
         if not isinstance(initial,list):raise ValueError('MANIFEST_INVALID')
         if baseline and not baseline.get('existed',True) and 'host' not in baseline and defaults.get(plugin)==yaml_load(template,CONFIG).get('provides_tools',[]):
             defaults[plugin]=[]  # Earlier assembly inferred store-wide tools for a host that never existed.
         defaults.setdefault(plugin,list(initial))
+        if store_updated:
+            if not isinstance(defaults[plugin],list):raise ValueError('MANIFEST_INVALID')
+            for tool in declared:
+                if tool not in initial and tool not in defaults[plugin]:defaults[plugin].append(tool)
+            template=before
         additions=[t for t in tools if t in declared]
         if plugin=='team-delegation':
             from hermes_packs.files_docs import files
@@ -175,12 +195,15 @@ def app_manifests(root,home,profile,tools):
         if not additions:
             after_host=original_host
             body=bytes.fromhex(original_host['entries']['plugin.yaml']['file']) if original_host.get('entries') else (canonical.read_bytes() if 'link' in original_host else None)
+        elif 'link' in original_host and yaml_load(body,CONFIG)==source_manifest:
+            body=canonical.read_bytes()
+            after_host=original_host
         elif body==before and 'link' in before_host:
             after_host=before_host
         else:after_host=store.overlay(root,host,body)
         original_entry=baseline['entry'] if baseline and 'entry' in baseline else deepcopy(entry)
         if baseline and 'entry' not in baseline and original_entry and original_entry['overlay']:
-            original_entry['manifest_sha']=store.fingerprint(template)
+            original_entry['manifest_sha']=store.fingerprint(recovery_template)
         if baseline and not additions:
             restored_entry=original_entry
         elif after_host.get('entries') is None and 'link' not in after_host:
@@ -193,7 +216,7 @@ def app_manifests(root,home,profile,tools):
                 if restored_entry is None:links['entries'].pop(index)
                 else:links['entries'][index]=restored_entry
             elif restored_entry is not None:links['entries'].append(restored_entry)
-        state[plugin]=dict(before=template.hex(),existed=baseline.get('existed',True) if baseline else before is not None,
+        state[plugin]=dict(before=recovery_template.hex(),existed=baseline.get('existed',True) if baseline else before is not None,
                            after=store.fingerprint(body),host=original_host,
                            entry=original_entry)
         if after_host!=before_host:

@@ -20,6 +20,7 @@ _owner_library = str((_OwnerPath(__file__).resolve().parent / '../..').resolve()
 if _owner_library not in _owner_sys.path:
     _owner_sys.path.insert(0, _owner_library)
 from hermes_facility.owner_text import render as _owner_text
+from hermes_facility import path_form
 
 
 import ctypes
@@ -174,7 +175,7 @@ def available(config: Any, name: str) -> bool:
         return isinstance(config, dict) and config.get("convert") is True
     if name == "doc_fill":  # the owner's main file profile only, not extra-only file tools
         return not (isinstance(config, dict) and config.get("extra_only") is True)
-    configured = isinstance(config, dict) and ("folder_links" in config or _synology_enabled(config))
+    configured = _synology_enabled(config)
     return not (name == "file_link" and configured or name == "file_location" and not configured)
 
 
@@ -322,17 +323,28 @@ def _nas_login(base, settings, home, session, opener, deadline):
         raise
 
 
+def address_problems(api_base, link_host):
+    """Return invalid/missing address fields using the file reader's NAS policy."""
+    problems=set()
+    try:
+        parsed=urllib.parse.urlsplit(api_base.rstrip('/'))
+        if (parsed.scheme!='https' or not (parsed.hostname or '').endswith(_owner_text('.<<relay_domain>>'))
+                or parsed.path or parsed.query or parsed.fragment or parsed.username or parsed.password or parsed.port):
+            problems.add('api_base')
+    except (ValueError,TypeError,AttributeError):problems.add('api_base')
+    if not isinstance(link_host,str) or not _folder_url(f'https://{link_host}/d/f/TEST'):
+        problems.add('link_host')
+    return problems
+
+
 def nas_settings(settings):
     """One address/root boundary shared by file readers and connection setup."""
-    base=settings['api_base'].rstrip('/');parsed=urllib.parse.urlsplit(base)
-    sync_root=Path(settings['sync_root']);host=settings['link_host']
-    if (parsed.scheme!='https' or not (parsed.hostname or '').endswith(_owner_text('.<<relay_domain>>'))
-            or parsed.path or parsed.query or parsed.fragment or parsed.username or parsed.password or parsed.port
-            or not _folder_url(f'https://{host}/d/f/TEST') or not sync_root.is_absolute()
+    sync_root=Path(settings['sync_root'])
+    if (address_problems(settings.get('api_base'),settings.get('link_host')) or not sync_root.is_absolute()
             or settings['drive_root']!='/mydrive' or settings.get('user')!='SYNOLOGY_DRIVE_USER'
             or settings.get('password')!='SYNOLOGY_DRIVE_PASSWORD'):
         raise ValueError('invalid NAS config')
-    return base,sync_root,host
+    return settings['api_base'].rstrip('/'),sync_root,settings['link_host']
 
 
 def _synology_link(config: dict, folder: Path, opener: Any, deadline: float) -> tuple[str | None, str]:
@@ -343,7 +355,7 @@ def _synology_link(config: dict, folder: Path, opener: Any, deadline: float) -> 
         drive_root = settings["drive_root"]
         if not (folder.is_dir() or folder.is_file()):
             return None, "invalid_config"
-        relative = folder.relative_to(sync_root.resolve())
+        relative = _under(folder, sync_root.resolve())
         remote_path = drive_root + "/" + relative.as_posix()
         scope = hashlib.sha256(json.dumps([base, host, str(sync_root), drive_root]).encode()).hexdigest()
         if cached := _folder_cache(folder, scope):
@@ -391,7 +403,6 @@ def _synology_link(config: dict, folder: Path, opener: Any, deadline: float) -> 
 
 def _drive_fragment(config: Any, url: str, target: Path) -> str:
     """Decorate only the returned link; never persist device paths in URLs/caches."""
-    import unicodedata
     settings = config.get('synology')
     if not isinstance(settings, dict) or '#' in url:
         return url
@@ -399,10 +410,10 @@ def _drive_fragment(config: Any, url: str, target: Path) -> str:
         root = Path(settings['sync_root']).expanduser()
         if not root.is_absolute():
             return url
-        relative = target.resolve().relative_to(root.resolve())
+        relative = _under(target.resolve(), root.resolve())
         if not relative.parts:
             return url
-        encoded = '/'.join(urllib.parse.quote(unicodedata.normalize('NFC', part), safe='')
+        encoded = '/'.join(urllib.parse.quote(path_form.normal(part), safe='')
                            for part in relative.parts)
         return url + '#drive=' + encoded
     except (KeyError, TypeError, ValueError, OSError, RuntimeError):
@@ -417,19 +428,6 @@ def file_location(config: Any, args: dict[str, Any], opener: Any = None, **_: An
     paths = args.get("paths")
     if not roots or not isinstance(paths, list) or not 1 <= len(paths) <= 10:
         return _error("file_location needs 1 to 10 paths and configured folders")
-    configured = config.get("folder_links", {})
-    if not isinstance(configured, dict):
-        return _error("Invalid folder_links configuration")
-    folders_by_link = {}
-    try:
-        for path, url in configured.items():
-            if _location_problem(path, roots) or not Path(path).is_dir() or not isinstance(url, str):
-                return _error("Invalid folder_links configuration")
-            if not _folder_url(url):
-                return _error("Invalid folder_links configuration")
-            folders_by_link[Path(path).resolve()] = url
-    except (OSError, ValueError, RuntimeError):
-        return _error("Invalid folder_links configuration")
     links, unlinked, failed = [], [], []
     deadline = time.monotonic() + NAS_TOTAL_SECONDS
     for path in paths:
@@ -441,36 +439,20 @@ def file_location(config: Any, args: dict[str, Any], opener: Any = None, **_: An
                 continue
             target = inside(path, roots)
             folder = target.parent if target.is_file() else target
-            fallback = None
-            if folder not in folders_by_link and _synology_enabled(config):
-                url, source = _synology_link(config, folder, opener, deadline)
-                if url:
-                    links.append({"path": path, "name": target.name, "folder": folder.name,
-                                  "url": _drive_fragment(config, url, folder), "exact": True, "source": source})
-                    continue
-                fallback = source
-            candidates = [parent for parent in folders_by_link if parent == folder or parent in folder.parents]
-            if not candidates:
-                root = max((root for root in roots if root == folder or root in folder.parents),
-                           key=lambda item: len(item.parts))
-                unlinked.append({"path": path, "name": target.name, "folder_path": str(folder.relative_to(root)),
-                                 "reason": "No Synology folder link is configured for this folder or its parents"})
-                if fallback:
-                    unlinked[-1]["fallback"] = fallback
+            url, source = _synology_link(config, folder, opener, deadline)
+            if url:
+                links.append({"path": path, "name": target.name, "folder": folder.name,
+                              "url": _drive_fragment(config, url, folder), "exact": True, "source": source})
                 continue
-            linked = max(candidates, key=lambda item: len(item.parts))
-            item = {"path": path, "name": target.name, "folder": folder.name,
-                    "url": _drive_fragment(config, folders_by_link[linked], linked), "exact": linked == folder}
-            if fallback:
-                item["fallback"] = fallback
-            if linked != folder:
-                item.update(linked_folder=linked.name, below=str(folder.relative_to(linked)))
-            links.append(item)
+            root = max((root for root in roots if root == folder or root in folder.parents),
+                       key=lambda item: len(item.parts))
+            unlinked.append({"path": path, "name": target.name, "folder_path": str(folder.relative_to(root)),
+                             "reason": "The Synology folder link could not be retrieved", "fallback": source})
         except (OSError, ValueError, RuntimeError) as exc:
             failed.append({"path": path, "error": f"file_location failed ({_file_error(exc)})"})
         finally:
             item = links[-1] if len(links) > before_links else unlinked[-1] if len(unlinked) > before_unlinked else None
-            if item is not None and target is not None and target.is_file() and _synology_enabled(config):
+            if item is not None and target is not None and target.is_file():
                 file_url, status = _synology_link(config, target, opener, deadline)
                 if file_url:
                     item.update(file_url=_drive_fragment(config, file_url, target), file_link_status=status)
@@ -510,7 +492,15 @@ def inside(path: Any, roots: list[Path]) -> Path | None:
         target = target.resolve()
     except (OSError, RuntimeError, ValueError):
         return None
-    return target if any(root == target or root in target.parents for root in roots) else None
+    return path_form.anchored(target, roots)
+
+
+def _under(path: Path, base: Path) -> Path:
+    """``path`` below ``base`` (ValueError when outside), compared the way folder scopes are."""
+    rest = path_form.below(path, base)
+    if rest is None:
+        raise ValueError(f"{path} is not below {base}")
+    return rest
 
 
 def _named(roots: list[Path]) -> str:
@@ -647,22 +637,22 @@ def _path_problem(tool_name: str, args: dict[str, Any], roots: list[Path]) -> st
         moves = _moves(args)
         if not moves or len(moves) != len(args.get("moves") or []) or len(moves) > MAX_MOVES:
             return f"file_move needs moves: a list of 1 to {MAX_MOVES} objects with 'from' and 'to'"
-        sources: set[Path] = set()
-        targets: set[Path] = set()
+        sources: set[str] = set()
+        targets: set[str] = set()
         for move in moves:
             source, target = inside(move.get("from"), roots), inside(move.get("to"), roots)
             if source is None or target is None:
                 return f"file_move: 'from' and 'to' must be absolute paths inside the folders ({named})"
             if source in roots or not source.exists():
                 return f"file_move: nothing to move at {source}"
-            if target in roots or target in targets or source in sources:
+            if target in roots or path_form.normal(target) in targets or path_form.normal(source) in sources:
                 return f"file_move: {target} is named twice or is a top folder"
             if target.exists():
                 return f"file_move: {target} already exists; pick another name (nothing is overwritten)"
-            if source == target or source in target.parents:
+            if path_form.below(target, source) is not None:
                 return f"file_move: cannot move {source} into itself"
-            sources.add(source)
-            targets.add(target)
+            sources.add(path_form.normal(source))
+            targets.add(path_form.normal(target))
         return None
     return None
 
@@ -672,7 +662,7 @@ def _linked(path: Any, roots: list[Path]) -> bool:
     for part in (Path(str(path)), *Path(str(path)).parents):
         if part.is_symlink():
             return True
-        if part.resolve() in roots:
+        if path_form.listed(part.resolve(), roots):
             return False
     return False
 
@@ -855,7 +845,7 @@ def guard(config: Any, *, tool_name: str, args: Any, chat: bool) -> dict[str, st
     if not available(config, tool_name):
         return {"action": "block", "message": f"{tool_name} is disabled for this profile."}
     if tool_name == "file_link" and not chat:
-        return {"action": "block", "message": "file_link is available only in a Slack chat, not in scheduled or background runs."}
+        return {"action": "block", "message": "file_link is available only in an owner chat, not in scheduled or background runs."}
     roots = folders(config)
     if not roots:
         if isinstance(config, dict) and config.get("extra_only") is True:
@@ -1064,14 +1054,66 @@ def _wait_link_shared(token: str, file_id: str, channel: str, info: dict, opener
 
 
 @_materialize_dataless()
-def file_link(config: Any, args: dict[str, Any], opener: Any = None, sleep: Any = None, **_: Any) -> str:
+def file_link(config: Any, args: dict[str, Any], opener: Any = None, sleep: Any = None, session_id: str = "", **_: Any) -> str:
     if not available(config, "file_link"):
         return _error("file_link is disabled; use file_location for Synology folder links")
+    from gateway.session_context import get_session_env
+    if get_session_env('HERMES_SESSION_PLATFORM', '') == 'hejo':
+        return _hejo_file_link(config, args, session_id)
+    from hermes_constants import get_hermes_home
+    from hermes_team_services import delivery
+    try:
+        if delivery.platform(Path(get_hermes_home())) == 'hejo':
+            delivery.require_slack(Path(get_hermes_home()), route='slack_session')
+    except ValueError as exc:
+        return _error(str(exc))
     try:
         with _link_locked():
             return _file_link(config, args, opener=opener, sleep=sleep or time.sleep)
     except OSError:
         return _error("Could not lock file link records; no upload attempted")
+
+
+def _hejo_file_link(config, args, session_id):
+    """One-shot attachments through the current public platform adapter contract."""
+    import asyncio
+    from gateway.session_context import get_session_env
+    from hermes_constants import get_hermes_home
+    from hermes_owner_chat import current_owner_message_in_session
+    from hermes_reply.plugin import current_hejo_turn
+    # This verifies owner/profile/chat/thread/message against the bound adapter
+    # and the persisted current user turn, not tool arguments or a copied transcript.
+    if current_owner_message_in_session(Path(get_hermes_home()), session_id, get_session_env) is None:
+        return _error('file_link requires the current authenticated hejo owner turn')
+    roots = folders(config)
+    if not roots:
+        return _error('No folders are configured for this profile.')
+    if reason := problem('file_link', args, roots):
+        return _error(reason)
+    adapter, event, loop = current_hejo_turn()
+    source = event.source
+    links, failed = [], []
+    for path in args['paths']:
+        future = None
+        try:
+            if reason := _link_problem(path, roots):
+                raise ValueError(reason)
+            future = asyncio.run_coroutine_threadsafe(adapter.send_document(
+                source.chat_id, path, file_name=Path(path).name,
+                metadata={'hermes_profile': source.profile, 'thread_id': source.thread_id}), loop)
+            result = future.result(timeout=60)
+            if not result.success or not result.message_id:
+                raise ValueError('attachment_send_failed')
+            links.append({'path': path, 'name': Path(path).name, 'platform': 'hejo',
+                          'message_id': result.message_id, 'thread': source.thread_id})
+        except (OSError, ValueError, TypeError, AttributeError) as exc:
+            if future is not None:
+                future.cancel()
+            failed.append({'path': path, 'error': f'file_link failed ({_file_error(exc)}); attachment may have completed. Do not retry.'})
+            break
+    return json.dumps({'ok': not failed, 'links': links,
+        **({'failed': failed} if failed else {}), 'not_attempted': args['paths'][len(links)+len(failed):],
+        'note': 'Files are attached in this hejo thread; do not invent or reuse a Slack URL.'}, ensure_ascii=False)
 
 
 def _file_link(config: Any, args: dict[str, Any], opener: Any = None, sleep: Any = time.sleep) -> str:
@@ -1312,7 +1354,7 @@ def _ask(job: dict[str, Any], *, runner: Any = None, timeout: int = 120) -> str:
     """Run a read-only worker job and return its JSON as it is."""
     if not DOC_PYTHON.exists():
         return _error("the document environment (~/.local/share/hermes-docs) is missing; "
-                      "it has to be rebuilt in the Paseo Hermes-ddots project")
+                      "it has to be rebuilt in the Paseo " + _owner_text('<<repository_name>>') + " project")
     try:
         result = (runner or subprocess.run)(
             [str(DOC_PYTHON), str(Path(__file__).with_name("doc_worker.py"))],
@@ -1367,11 +1409,10 @@ NAS_FILES_LIMIT = 200
 def _nas_inventory(config, top, opener=None):
     """Metadata only: verified Drive list v1, paginated per folder. No file GET/download."""
     from concurrent.futures import ThreadPoolExecutor
-    import unicodedata
     settings = config['synology']
     base,sync_root,host=nas_settings(settings)
     drive_root=settings['drive_root']
-    relative = top.relative_to(sync_root.resolve()).as_posix()
+    relative = _under(top, sync_root.resolve()).as_posix()
     remote = drive_root + ('/' + relative if relative != '.' else '')
     started = time.monotonic()
     deadline = started + NAS_SCAN_SECONDS
@@ -1425,7 +1466,7 @@ def _nas_inventory(config, top, opener=None):
                         if not isinstance(row, dict) or not isinstance(row.get('name'), str):
                             raise ValueError('invalid NAS item')
                         raw = row['name']
-                        name = unicodedata.normalize('NFC', raw)
+                        name = path_form.normal(raw)
                         if not name or '/' in name or '\x00' in name or name in ('.', '..'):
                             raise ValueError('invalid NAS name')
                         if name.startswith('.'):
@@ -1477,12 +1518,11 @@ print(json.dumps(rows))'''
 
 
 def _compare_nas(config, top, local, local_paths, opener=None):
-    import unicodedata
     settings = config.get('synology')
     if not isinstance(settings, dict) or settings.get('enabled') is not True:
         return {'status': 'skipped', 'reason': 'not_configured' if settings is None else 'disabled'}, []
     try:
-        if not top.is_relative_to(Path(settings['sync_root']).resolve()):
+        if path_form.below(top, Path(settings['sync_root']).resolve()) is None:
             return {'status': 'skipped', 'reason': 'outside_sync_root'}, []
         remote, calls, elapsed = _nas_inventory(config, top, opener)
         def different(key):
@@ -1503,7 +1543,7 @@ def _compare_nas(config, top, local, local_paths, opener=None):
                 rows = _refresh_scan_folder(path, min(0.5, remaining))
                 dirs, file_rows = set(), {}
                 for name, is_dir, size, modified in rows:
-                    normalized = unicodedata.normalize('NFC', name)
+                    normalized = path_form.normal(name)
                     if is_dir:
                         dirs.add(normalized)
                     else:
@@ -1535,7 +1575,6 @@ def folder_scan(config: Any, args: dict[str, Any], runner: Any = None, opener: A
     if reason := problem("folder_scan", args, roots, runner=runner):
         return _error(reason)
     top = inside(args.get("path"), [*roots, attachments(), image_attachments()])
-    import unicodedata
     local, local_paths = {}, {}
     entries: list[dict[str, Any]] = []
     by_type: dict[str, int] = {}
@@ -1555,9 +1594,9 @@ def folder_scan(config: Any, args: dict[str, Any], runner: Any = None, opener: A
         unreadable_folders.append({"path": relative, "error": _file_error(exc), "errno": exc.errno})
     for current, names, files_here in os.walk(top, onerror=onerror):
         names[:] = sorted(name for name in names if not name.startswith("."))
-        key = unicodedata.normalize('NFC', str(Path(current).relative_to(top)))
+        key = path_form.normal(Path(current).relative_to(top))
         local_paths[key] = Path(current)
-        local[key] = {'dirs': {unicodedata.normalize('NFC', n) for n in names}, 'files': {}}
+        local[key] = {'dirs': {path_form.normal(n) for n in names}, 'files': {}}
         for name in sorted(files_here):
             if name.startswith("."):
                 continue
@@ -1567,7 +1606,7 @@ def folder_scan(config: Any, args: dict[str, Any], runner: Any = None, opener: A
             except OSError:
                 unreadable_files += 1
                 continue
-            local[key]['files'][unicodedata.normalize('NFC', name)] = {
+            local[key]['files'][path_form.normal(name)] = {
                 'size': stat.st_size, 'modified': int(stat.st_mtime), 'path': path}
     nas_check, not_local = _compare_nas(config, top, local, local_paths, opener)
     for folder in local.values():
@@ -1659,7 +1698,7 @@ def _work(job: dict[str, Any], target: Path, *, replace: bool, runner: Any = Non
     """Run the worker into a temporary file beside ``target`` and move it into place on success."""
     if not DOC_PYTHON.exists():
         return _error("the document editing environment (~/.local/share/hermes-docs) is missing; "
-                      "it has to be rebuilt in the Paseo Hermes-ddots project")
+                      "it has to be rebuilt in the Paseo " + _owner_text('<<repository_name>>') + " project")
     try:
         make_directories(target.parent)
     except OSError as exc:
@@ -1731,7 +1770,7 @@ def doc_fill(config: Any, args: dict[str, Any], runner: Any = None, **_: Any) ->
         return _ask(_fill_job("fill_inspect", args, roots), runner=runner)
     if not DOC_PYTHON.exists():
         return _error("the document editing environment (~/.local/share/hermes-docs) is missing; "
-                      "it has to be rebuilt in the Paseo Hermes-ddots project")
+                      "it has to be rebuilt in the Paseo " + _owner_text('<<repository_name>>') + " project")
     out = inside(args.get("output_dir"), roots)
     made, created = not out.exists(), []
     try:
@@ -1818,14 +1857,14 @@ SCHEMAS = {
     },
     "file_location": {
         "name": "file_location",
-        "description": "Return configured or automatically queried Synology folder links for 1 to 10 existing files or folders. Batch multiple paths in one call. If file_url is present, write [filename](file_url) plus [folder](url), using returned URLs unchanged. 주소는 받은 그대로 쓴다. #drive= 뒤는 앱이 로컬 파일을 찾는 표시이므로 지우거나 고치지 않는다. Otherwise keep the folder link and filename and say the file link could not be retrieved. If exact is false, link linked_folder and include below. For unlinked, say the link could not be retrieved and give only the relative folder path; follow existing diagnosis rules for repeated unexpected failures. Never link Mac paths or invent URLs. No Slack upload; MEDIA only when asked to show a photo. No approval; usable in background tasks.",
+        "description": "Return automatically queried Synology folder links for 1 to 10 existing files or folders. Batch multiple paths in one call. If file_url is present, write [filename](file_url) plus [folder](url), using returned URLs unchanged. 주소는 받은 그대로 쓴다. #drive= 뒤는 앱이 로컬 파일을 찾는 표시이므로 지우거나 고치지 않는다. Otherwise keep the folder link and filename and say the file link could not be retrieved. For unlinked, say the link could not be retrieved and give only the relative folder path; follow existing diagnosis rules for repeated unexpected failures. Never link Mac paths or invent URLs. No Slack upload; MEDIA only when asked to show a photo. No approval; usable in background tasks.",
         "parameters": {"type": "object", "properties": {"paths": {
             "type": "array", "minItems": 1, "maxItems": 10, "items": _PATH}}, "required": ["paths"]},
     },
     "file_link": {
         "name": "file_link",
         "description": ("Upload readable files into this Slack thread and return confirmed shared permalinks for [filename](url). Do not attach the same file again via MEDIA. "
-                        "Call file_link in the current turn every time you provide a file link, including repeat requests. Never reuse URLs from chat history; copy the returned url exactly without changing any character. Only in Slack chat, without approval; 1 to 10 files, at most 50 MB each. "
+                        "Call file_link in the current turn every time you provide a file link, including repeat requests. Never reuse URLs from chat history; copy the returned url exactly without changing any character. In the owner chat after approval; 1 to 10 files, at most 50 MB each. In hejo the files are attached to the current thread and the result has message_id/thread instead of a URL. "
                         "Reuse identical content and filename only when shared in this channel. Links expire 30 days after the last request; call file_link again when the user reports a dead link. Use returned URLs only. Only when sharing confirmation is delayed, call once more with the same path; do not repeat other failed or uncertain uploads."),
         "parameters": {"type": "object", "properties": {"paths": {
             "type": "array", "minItems": 1, "maxItems": 10, "items": _PATH}}, "required": ["paths"]},

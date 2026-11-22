@@ -264,7 +264,7 @@ def report_sections(blocks: Optional[List[Block]]) -> Optional[Tuple[List[Block]
     sections = [(name, body) for name, body in sections if body]
     if not sections or len(sections) > MAX_REPORT_SECTIONS:
         return None
-    # One bar for the whole reply (owner, 2026-10-19): with several attachments Slack and ddots draw two
+    # One bar for the whole reply (owner, 2026-10-19): with several attachments Slack and the owner app draw two
     # lines beside every section. The most urgent section heading picks its colour.
     body = [block for _, blocks_ in sections for block in blocks_]
     if len(body) > 50:

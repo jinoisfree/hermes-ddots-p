@@ -19,6 +19,8 @@ from hermes_packs.mail import mail_app
 
 def run(home, account, seconds=45):
     home = Path(home).resolve()
+    from hermes_facility.connections import home_service_enabled
+    if not home_service_enabled(home,'google'):return {'disabled':True}
     if not team.home_has_role(home, 'work') or home.parent.name != 'profiles':
         raise ValueError('MAIL_APP_INDEX_PROFILE_REFUSED')
     root = home.parent.parent
@@ -29,7 +31,8 @@ def run(home, account, seconds=45):
     allowed = {str(a).casefold() for a in scopes.get('company', {}).get('mail_accounts', [])}
     if scopes.get('enabled') is not True or account.casefold() not in allowed:
         raise ValueError('MAIL_APP_INDEX_ACCOUNT_REFUSED')
-    settings = hermes_yaml.safe_load((home / 'config.yaml').read_text())['plugins']['entries']['team-delegation']['settings']['gmail']
+    profile_config=hermes_yaml.safe_load((home/'config.yaml').read_text())
+    settings = profile_config['plugins']['entries']['team-delegation']['settings']['gmail']
     if settings.get('company_mail_index') is not True:
         return {'disabled': True}
     return mail_app.fill_index(account, cache_root=home / 'cache/mail-search', seconds=seconds)

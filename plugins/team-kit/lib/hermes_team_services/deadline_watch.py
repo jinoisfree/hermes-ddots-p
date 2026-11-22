@@ -16,10 +16,13 @@ import json
 import os
 from pathlib import Path
 import re
+import sys
 import tempfile
 import logging
 import urllib.parse
 import urllib.request
+import uuid
+from hermes_team_services import delivery as D
 from datetime import date, datetime
 from zoneinfo import ZoneInfo
 import importlib.util as _ilu, pathlib as _pl, sys as _sys
@@ -60,11 +63,16 @@ def enabled(config):
     return isinstance(config, dict) and config.get("enabled") is True
 
 
-def stage(item, today, mode="morning"):
+def stage(item, today, mode="morning", platform="slack"):
     if item.get("closed"):
         return None
     d = (date.fromisoformat(item["due"]) - today).days
     sent = item.get("notifications", {})
+    if platform == 'hejo':
+        for key, receipt in sent.items():
+            if (receipt.get('platform') == 'hejo' and receipt.get('status') == 'pending'
+                    and ((key == '0-recheck') == (mode == 'recheck'))):
+                return key
     if mode == "recheck":
         return "0-recheck" if d == 0 and "0-recheck" not in sent else None
     candidate = "7" if 4 <= d <= 7 else "3" if 2 <= d <= 3 else "1" if d == 1 else "0" if d == 0 else None
@@ -134,10 +142,135 @@ def snapshot(home, mode="morning", now=None):
     # Writers publish complete snapshots with os.replace. Reading the previous
     # version must not wait for a notification's network request under LOCK_EX.
     data = load(path)
-    items = [dict(item, stage=stage(item, today, mode)) for item in data["items"].values() if not item["closed"]]
+    items = [dict(item, stage=stage(item, today, mode, D.platform(home))) for item in data["items"].values() if not item["closed"]]
     if mode == "recheck":
         items = [item for item in items if item["stage"] == "0-recheck"]
     return {"date": today.isoformat(), "mode": mode, "wakeAgent": mode == "morning" or bool(items), "items": items}
+
+
+def read_ledger(home):
+    """Read the ledger without creating directories, locks or notification state."""
+    folder = Path(home) / "state"
+    path = folder / "deadline-watch.json"
+    if any(p.is_symlink() for p in (folder, path, folder / "deadline-watch.lock")):
+        raise ValueError("deadline_symlink_refused")
+    return load(path)
+
+
+def notice_of(item):
+    """Where the owner last saw this deadline in hejo: the newest sent hejo receipt, summarized."""
+    sent = [r for r in item.get("notifications", {}).values()
+            if r.get("platform") == "hejo" and r.get("status") == "sent" and r.get("message_id")]
+    if not sent:
+        return None
+    latest = max(sent, key=lambda r: datetime.fromisoformat(r["at"]))
+    return {"message_id": latest["message_id"], "thread": latest["thread"]} if latest.get("thread") else None
+
+
+def open_items(home):
+    result = []
+    for item in read_ledger(home)["items"].values():
+        if item["closed"]:
+            continue
+        row = {key: item[key] for key in ("id", "title", "due", "deadline_at", "source") if key in item}
+        notice = notice_of(item)
+        if notice:
+            row["notice"] = notice
+        result.append(row)
+    return result
+
+
+def list_main(home, argv=None):
+    """CLI boundary: one failing profile never hides the other profiles."""
+    import argparse
+    from hermes_facility.app_registry import read_team, profile_home
+    from ruamel.yaml.error import YAMLError
+    parser = argparse.ArgumentParser()
+    parser.add_argument("command", choices=["list"])
+    parser.add_argument("--json", action="store_true", required=True)
+    parser.parse_args(argv)
+    try:
+        if not (Path(home) / "owner/team.yaml").is_file():
+            raise ValueError("TEAM_UNAVAILABLE")
+        profiles = list(dict.fromkeys(["default", *read_team(home)["agents"]]))
+        homes = {profile: profile_home(home, profile) for profile in profiles}
+    except (OSError, UnicodeError, ValueError, TypeError, YAMLError):
+        print(json.dumps({"error": "TEAM_UNAVAILABLE"}))
+        return 1
+    result = {"version": 1, "profiles": {}, "failed": []}
+    for profile, folder in homes.items():
+        try:
+            result["profiles"][profile] = open_items(folder)
+        except (OSError, ValueError) as exc:
+            reason = str(exc) if str(exc) in {"deadline_state_corrupt", "deadline_symlink_refused"} else "read_failed"
+            result["failed"].append({"profile": profile, "reason": reason})
+    print(json.dumps(result, ensure_ascii=False))
+    return 0
+
+
+OWNER_CLOSE = {
+    "done": {"reason": "담당자 확인", "reply": "hejo에서 사장이 완료로 닫음"},
+    "cancel": {"reason": "취소", "evidence": "hejo에서 사장이 취소로 닫음"},
+}
+
+
+def close_main(home, argv):
+    """Owner close boundary: the same close rule and repaint the employee tool uses."""
+    import argparse
+    from hermes_facility.app_registry import read_team, profile_home
+    from ruamel.yaml.error import YAMLError
+    parser = argparse.ArgumentParser()
+    parser.add_argument("command", choices=["close"])
+    parser.add_argument("--profile", required=True)
+    parser.add_argument("--id", required=True)
+    parser.add_argument("--outcome", choices=sorted(OWNER_CLOSE), required=True)
+    parser.add_argument("--json", action="store_true", required=True)
+    try:
+        args = parser.parse_args(argv)
+    except SystemExit:
+        print(json.dumps({"error": "INVALID_ARGUMENTS"}))
+        return 1
+    try:
+        if not (Path(home) / "owner/team.yaml").is_file():
+            raise ValueError("TEAM_UNAVAILABLE")
+        profiles = list(dict.fromkeys(["default", *read_team(home)["agents"]]))
+    except (OSError, UnicodeError, ValueError, TypeError, YAMLError):
+        print(json.dumps({"error": "TEAM_UNAVAILABLE"}))
+        return 1
+    if args.profile not in profiles:
+        print(json.dumps({"error": "PROFILE_UNKNOWN"}))
+        return 1
+    folder = profile_home(home, args.profile)
+    try:
+        # Read first: a missing item, a broken ledger or an already closed item must not
+        # create a lock file or rewrite the ledger. perform() below still decides under the lock.
+        known = read_ledger(folder)["items"].get(args.id)
+        if known is None:
+            raise ValueError("unknown_deadline")
+        if known["closed"]:
+            print(json.dumps({"ok": True, "already_closed": True, "repainted": False}))
+            return 0
+        result = perform(folder, dict(action="close", id=args.id, **OWNER_CLOSE[args.outcome]))
+    except (OSError, ValueError, TypeError) as exc:
+        reason = str(exc)
+        error = ("UNKNOWN_DEADLINE" if reason == "unknown_deadline"
+                 else "DEADLINE_STATE_UNAVAILABLE" if reason in {"deadline_state_corrupt", "deadline_symlink_refused"}
+                 else "CLOSE_FAILED")
+        print(json.dumps({"error": error}))
+        return 1
+    repainted = False
+    if result["closed_now"]:
+        try:
+            repainted = bool(repaint_closed(folder, result["item"]))
+        except Exception as exc:  # The close stays; only the notice colour is missing.
+            logging.getLogger(__name__).warning("deadline notice repaint failed (%s)", type(exc).__name__)
+    print(json.dumps({"ok": True, "already_closed": not result["closed_now"], "repainted": repainted}))
+    return 0
+
+
+def main(home, argv=None):
+    argv = sys.argv[1:] if argv is None else list(argv)
+    return close_main(home, argv) if argv[:1] == ["close"] else list_main(home, argv)
 
 
 def perform(home, args, *, mode="morning", now=None, opener=None, session_id="", turn_id="", source_check=False):
@@ -198,7 +331,8 @@ def perform(home, args, *, mode="morning", now=None, opener=None, session_id="",
                 raise ValueError("close_source_required")
             if reason == "마감 경과" and date.fromisoformat(item["due"]) >= today:
                 raise ValueError("deadline_not_past")
-            if not item["closed"]:
+            closed_now = not item["closed"]
+            if closed_now:
                 if reply:
                     item["replies"].append({"text": reply, "at": args.get("reply_at") or at})
                 item["closed"] = {"reason": reason, "at": at, "evidence": evidence}
@@ -214,16 +348,20 @@ def perform(home, args, *, mode="morning", now=None, opener=None, session_id="",
                 item["history"].append({"reopened_at": at, "closed": item["closed"]})
                 item["closed"] = None
         elif action == "notify":
-            s = stage(item, today, mode)
+            s = stage(item, today, mode, D.platform(home))
             if s is None:
                 raise ValueError("notification_not_due")
             text = args.get("text", "")
             if not isinstance(text, str) or not 1 <= len(text.strip()) <= 1800:
                 raise ValueError("notification_text_required")
-            reader = extension("slack_read")
-            secret = reader.token(home)
-            if not secret:
-                raise ValueError("slack_token_missing")
+            native = D.platform(home) == 'hejo'
+            if native and s in item['notifications']:
+                return notify_hejo(home, path, data, item, s)
+            if not native:
+                reader = extension("slack_read")
+                secret = reader.token(home)
+                if not secret:
+                    raise ValueError("slack_token_missing")
             label = "당일 15:00 재확인" if s == "0-recheck" else "당일" if s == "0" else s + "일 전 단계"
             escape = extension("report_layout").escape
             source_note = '\n\n'+SOURCE_CHECKS.description(item.get('source_check'),item['due'],now) if source_check else ''
@@ -232,6 +370,13 @@ def perform(home, args, *, mode="morning", now=None, opener=None, session_id="",
             body = {"channel": CHANNEL, "text": f"*{title_prefix}마감 점검 · {escape(item['title'])}*\n\n*마감: {display_due}* · {label}\n\n*할 일*\n승인=완료했어 · 거절=못했어 · 의견=수정할게 · 확인=확인했어\n\n{escape(text.strip())}\n\n출처: {escape(item['source'])}{escape(source_note)}\n[[버튼: 승인 | 거절 | 의견 | 확인]]",
                     "mrkdwn": True, "parse": "none", "link_names": False,
                     "unfurl_links": False, "unfurl_media": False}
+            if native:
+                item['notifications'][s] = {'at': at, 'status': 'pending', 'ts': None,
+                    'platform': 'hejo', 'client_id': 'deadline:' + uuid.uuid4().hex,
+                    'target': D.target(home, 'reports', slack=lambda: CHANNEL),
+                    'body': D.presentation(body), 'delivery': {}}
+                save(path, data)
+                return notify_hejo(home, path, data, item, s)
             try:
                 body = extension("slack_blocks").apply(body)
             except Exception:
@@ -258,11 +403,32 @@ def perform(home, args, *, mode="morning", now=None, opener=None, session_id="",
         else:
             raise ValueError("invalid_action")
         save(path, data)
-        return {"ok": True, "item": item, "stage": stage(item, today, mode)}
+        result = {"ok": True, "item": item, "stage": stage(item, today, mode, D.platform(home))}
+        if action == "close":
+            result["closed_now"] = closed_now  # decided under the lock: exactly one caller repaints
+        return result
+
+
+def notify_hejo(home, path, data, item, s):
+    receipt = item['notifications'][s]
+    try:
+        result = D.post(home, receipt['target'], client_id=receipt['client_id'],
+                        state=receipt['delivery'], save=lambda: save(path, data), **receipt['body'])
+    except D.Refused as exc:
+        if not exc.permanent:
+            raise
+        # Existing terminal reservation status: no new stage or retry after a 4xx.
+        receipt.update(status='uncertain', delivery_error=exc.error)
+    else:
+        receipt.update(status='sent', ts=result['msg_id'], message_id=result['msg_id'],
+                       head_id=result['head_id'], thread=result['thread'])
+    save(path, data)
+    return {'stage': s, 'receipt': receipt, 'ok': receipt['status'] == 'sent'}
 
 
 def slack_call(home, method, body, *, opener=None):
     """Bot-token Slack call; posts go through slack_blocks (bodies with blocks pass unchanged)."""
+    D.require_slack(home)
     reader = extension("slack_read")
     secret = reader.token(home)
     if not secret:
@@ -285,12 +451,14 @@ def slack_call(home, method, body, *, opener=None):
 
 def repaint_closed(home, item, *, opener=None):
     """A closed deadline turns its sent notices green (취소 grey); a failure keeps the close."""
+    if D.platform(home) == 'hejo':
+        return repaint_closed_hejo(home, item['id'])
     closed = item.get("closed") or {}
     state = "declined" if closed.get("reason") == "취소" else "done"
     marks = extension("report_status")
     ok = True
     for receipt in (item.get("notifications") or {}).values():
-        if receipt.get("status") != "sent" or not receipt.get("ts"):
+        if receipt.get('platform', 'slack') != 'slack' or receipt.get("status") != "sent" or not receipt.get("ts"):
             continue
         try:
             marks.mark(lambda method, body: slack_call(home, method, body, opener=opener),
@@ -298,6 +466,29 @@ def repaint_closed(home, item, *, opener=None):
         except Exception as exc:
             ok = False
             logging.getLogger(__name__).warning("deadline notice repaint failed (%s)", type(exc).__name__)
+    return ok
+
+
+def repaint_closed_hejo(home, key):
+    ok = True
+    with locked(home) as (path, data):
+        item = data['items'][key]
+        if not item.get('closed'):
+            return False
+        for receipt in item['notifications'].values():
+            if receipt.get('platform') != 'hejo' or receipt['status'] != 'sent':
+                continue
+            try:
+                # Keep the frozen notice and edit its final action message only.
+                result = D.edit(home, receipt['target'], receipt['body']['text'],
+                                state=receipt['delivery'], save=lambda: save(path, data),
+                                buttons=[], reply_state='closed')
+                receipt.update(ts=result['msg_id'], message_id=result['msg_id'],
+                               head_id=result['head_id'], thread=result['thread'])
+                save(path, data)
+            except (OSError, D.Refused, ValueError) as exc:
+                ok = False
+                logging.getLogger(__name__).warning('deadline notice repaint failed (%s)', type(exc).__name__)
     return ok
 
 
@@ -323,7 +514,9 @@ def filter_request(config, request, *, kind, session_id=""):
 
 def handle(config, home, args, *, kind, session_id="", opener=None, **kwargs):
     try:
-        if not enabled(config) or not CHANNEL or config.get("channel") != CHANNEL or not team.home_has_role(home, 'personal', 'work'):
+        valid_target = (D.target(home, 'reports', slack=lambda: CHANNEL) if D.platform(home) == 'hejo'
+                        else CHANNEL and config.get('channel') == CHANNEL)
+        if not enabled(config) or not valid_target or not team.home_has_role(home, 'personal', 'work'):
             raise ValueError("deadline_watch_disabled_or_invalid_scope")
         if set(args) - set(SCHEMA["parameters"]["properties"]):
             raise ValueError("unexpected_arguments")
@@ -347,14 +540,14 @@ def handle(config, home, args, *, kind, session_id="", opener=None, **kwargs):
             raise ValueError("deadline_runner_refused")
         result = perform(home, args, mode=mode or "morning", opener=opener, session_id=session_id, turn_id=kwargs.get('turn_id',''), source_check=config.get('official_source_check') is True)
         if args.get("action") == "close" and result.get("ok"):
-            result["status_updated"] = repaint_closed(home, result["item"], opener=opener)
+            result["status_updated"] = bool(result.get("closed_now")) and repaint_closed(home, result["item"], opener=opener)
         return json.dumps(result, ensure_ascii=False)
-    except (ValueError, TypeError, OSError) as exc:
+    except (ValueError, TypeError, OSError, D.Refused) as exc:
         return json.dumps({"ok": False, "error": str(exc) if isinstance(exc, ValueError) else type(exc).__name__}, ensure_ascii=False)
 
 
 def note(home, info=None):
-    if str((info or {}).get("platform", "")).lower() != "slack":
+    if str((info or {}).get("platform", "")).lower() not in {"slack", "hejo"}:
         return ""
     try:
         items = [i for i in snapshot(home)["items"] if i["notifications"]]

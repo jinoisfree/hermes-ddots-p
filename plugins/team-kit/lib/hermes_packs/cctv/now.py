@@ -14,6 +14,7 @@ import sys
 from datetime import datetime
 
 from . import reference, state, vision, watch
+from .screen import RENDER_QUERY_ERROR
 
 TIMEOUT = 180
 CLEANUP_SECONDS = 35
@@ -21,8 +22,9 @@ BUSY = '방금 확인 중이에요, 잠시 뒤 다시 물어 주세요'
 SCHEMA = {
     'name': 'cctv_now',
     'description': ('소유자가 지금 낙화를 하는지, 현장 화면이 어떤지 물으면 이 도구로 지정 채널 CCTV를 확인한다. '
-                    '소유자 Slack 고객 담당방·DM 전용. 결과의 장면·이유·영상 시각·확인 날짜(YYYY-MM-DD)와 시각·다시 틀기 여부를 소유자 보고 양식으로 답한다. relived는 시도 여부이며 relive_result가 ok일 때만 다시 틀기 성공이다. '
+                    '소유자 고객 담당방·DM 전용. 결과의 장면·이유·영상 시각·확인 날짜(YYYY-MM-DD)와 시각·다시 틀기 여부를 소유자 보고 양식으로 답한다. relived는 시도 여부이며 relive_result가 ok일 때만 다시 틀기 성공이다. '
                     '준비중·진행중이면 상황으로 기록할까요?라고 묻고 소유자가 말해야 기존 상황 writer로 기록한다. '
+                    '켜기·다시 틀기에 실패하면 시도한 것과 막힌 이유를 보고하고 사장에게 켜기·누르기를 부탁하지 않는다. '
                     '자동 상황 기록·원격 재연결은 하지 않는다. 캡처는 같은 스레드에 첨부한다. 전체 제한 180초.'),
     'parameters': {'type': 'object', 'properties': {}, 'additionalProperties': False},
 }
@@ -78,6 +80,8 @@ def inspect(home, *, policy, site, now, screen, ask, upload, channel, thread, re
                     result['ok'] = result['scene'] != vision.UNREADABLE
                     if result['reason'] in ('WINDOW_MISSING', watch.ADT_EYE_LOST):
                         result['reason'] = '원격 연결이 끊겨 있어요'
+                    elif result['reason'] == watch.SHARING_LOST:
+                        result['reason'] = '맥 화면 공유가 끊겨 지금 화면을 볼 수 없어요'
                     if result['capture']:
                         try:
                             upload(channel, thread, Path(result['capture']))
@@ -108,6 +112,10 @@ def inspect(home, *, policy, site, now, screen, ask, upload, channel, thread, re
                 not result.get('identified') and result['reason'] in watch.RELIVE_REASONS) else None
             result['focus'] = data.get('last_focus') if data.get('last_focus') != original.get('last_focus') else None
             original['last_ask'] = copy.deepcopy(result)
+            # Preserve the fail-open OS query diagnostic, without consuming any
+            # scheduled alert marker or copying unrelated local inspection state.
+            if data.get('last_error', {}).get('reason') == RENDER_QUERY_ERROR:
+                original['last_error'] = copy.deepcopy(data['last_error'])
             state.save(home, original)
         return result
 

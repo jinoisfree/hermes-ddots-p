@@ -19,7 +19,7 @@ import sys as _owner_sys
 _owner_library = str((_OwnerPath(__file__).resolve().parent / '..').resolve())
 if _owner_library not in _owner_sys.path:
     _owner_sys.path.insert(0, _owner_library)
-from hermes_facility.owner_text import render as _owner_text
+from hermes_facility.owner_text import render as _owner_text, repository as _repository
 
 import argparse
 from datetime import datetime
@@ -229,7 +229,7 @@ def main(argv=None, *, root=None, home=None):
     home = Path(home) if home else team.home_of_role('doctor', root)
     try:
         night = run(root, home, Path.home() / 'Library/LaunchAgents',
-                    Path.home() / _owner_text('<<workspace_folder>>/Hermes-ddots/백그라운드-작업-목록.md'), dry_run=args.dry_run)
+                    _repository() / '백그라운드-작업-목록.md', dry_run=args.dry_run)
     except Exception as exc:
         print(json.dumps({'ok': False, 'error': type(exc).__name__}), flush=True)
         return 1

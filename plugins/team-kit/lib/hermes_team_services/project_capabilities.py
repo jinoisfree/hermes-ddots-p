@@ -67,7 +67,7 @@ def system_task(title):
 
 def check_role(profile, title):
     if team.has_role(profile, 'doctor') and not system_task(title):
-        raise ValueError(_owner_text('<<doctor_name>>은 ddots·Hermes 시스템만 진단한다. 문서 검토는 <<work_name>>에게 맡긴다.'))
+        raise ValueError(_owner_text('<<doctor_name>>은 hejo·Hermes 시스템만 진단한다. 문서 검토는 <<work_name>>에게 맡긴다.'))
 
 
 def config_for(cfg, profile, learning):
