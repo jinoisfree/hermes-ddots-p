@@ -79,6 +79,8 @@
     "scope": "folders"
   },
   "notion.id": {
+    "name": "Notion",
+    "local_install_required": false,
     "route": "tool",
     "service": "notion",
     "tools": [

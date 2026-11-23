@@ -124,6 +124,7 @@ def mail_allowed(home, args):
 def notion_request(method, path, body, send):
     """Enforce chosen page ancestry before a content operation, including raw API calls."""
     import re
+    from hermes_packs.notion import api
     selected = require_selected('notion_pages')
     if selected is None: return send(method, path, body)
     allowed = {str(v).replace('-', '').lower() for v in selected}
@@ -131,28 +132,45 @@ def notion_request(method, path, body, send):
         value = str(value).replace('-', '').lower()
         if not re.fullmatch(r'[0-9a-f]{32}', value): raise ValueError('APP_SCOPE_UNVERIFIED')
         return value
+    cache = {}
     def member(kind, value):
         seen = set()
-        for _ in range(20):
+        for _ in range(20 if api.read_request(method, path) else 10):
             value = ident(value)
-            if value in allowed: return True
-            if value in seen: return False
+            if value in allowed:
+                key = (kind, value)
+                if key not in cache:
+                    with unbound(): cache[key] = send('GET', kind + '/' + value, None)
+                data = cache[key]
+                if not isinstance(data, dict) or data.get('archived') or data.get('in_trash'):
+                    raise ValueError('APP_SCOPE_UNVERIFIED')
+                return True
+            if value in seen: raise ValueError('APP_SCOPE_UNVERIFIED')
             seen.add(value)
-            with unbound(): data = send('GET', kind + '/' + value, None)
+            key = (kind, value)
+            if key not in cache:
+                with unbound(): cache[key] = send('GET', kind + '/' + value, None)
+            data = cache[key]
+            if not isinstance(data, dict) or data.get('archived') or data.get('in_trash'):
+                raise ValueError('APP_SCOPE_UNVERIFIED')
             parent = data.get('parent') or {}; parent_kind = parent.get('type')
             kind = {'page_id': 'pages', 'block_id': 'blocks', 'database_id': 'databases',
                     'data_source_id': 'data_sources'}.get(parent_kind)
-            if not kind: return False
+            if parent_kind == 'workspace': return False
+            if not kind: raise ValueError('APP_SCOPE_UNVERIFIED')
             value = parent.get(parent_kind)
-        return False
+        raise ValueError('APP_SCOPE_UNVERIFIED')
     route = path.lstrip('/').split('?')[0].split('/')
     if route[0] == 'search':
+        data = send(method, path, body)
+        try: api.pagination(data, (body or {}).get('start_cursor'))
+        except api.NotionError as exc: raise ValueError(str(exc)) from None
         rows = []
-        for value in sorted(allowed):
-            with unbound(): row = send('GET', 'pages/' + value, None)
-            query = str((body or {}).get('query') or '').casefold()
-            if not query or query in __import__('json').dumps(row.get('properties', {}), ensure_ascii=False).casefold(): rows.append(row)
-        return dict(object='list', results=rows, has_more=False, next_cursor=None)
+        for row in data['results']:
+            kind = {'page':'pages', 'database':'databases', 'data_source':'data_sources'}.get(row.get('object'))
+            if not kind: raise ValueError('APP_SCOPE_UNVERIFIED')
+            if member(kind, row.get('id')): rows.append(row)
+        return {**data, 'results': rows}
     if route[0] == 'users': return send(method, path, body)
     if len(route) > 1 and route[0] in ('pages', 'blocks', 'databases', 'data_sources'):
         if not member(route[0], route[1]): raise ValueError('APP_OUT_OF_SCOPE')

@@ -182,6 +182,20 @@ def _missing_prompt_note(*args):
 
 
 def _pre_llm_call(session_id: str = "", platform: str = "", **_: Any) -> dict[str, str] | None:
+    if str(platform).lower() != 'hejo':
+        return _pre_llm_context(session_id, platform, **_)
+    # These IDs are supplied by the host's pre_llm_call contract, not tool arguments.
+    with bound_hook_ids(session_id, _.get('turn_id', '')):
+        from gateway.session_context import get_session_env
+        from hermes_owner_chat import current_owner_message_for_preparation
+        message = current_owner_message_for_preparation(
+            session_id, get_session_env, turn_id=_.get('turn_id', ''))
+        if message is not None:
+            _ = dict(_, user_message=message['text'])
+        return _pre_llm_context(session_id, platform, **_)
+
+
+def _pre_llm_context(session_id: str = "", platform: str = "", **_: Any) -> dict[str, str] | None:
     try:
         from hermes_governance import app_receipts
         app_receipts.begin(session_id=session_id, **_)
@@ -865,6 +879,7 @@ def _register_notion(ctx) -> None:
     from hermes_packs.notion import load_api
     module = load_api("team_kit_notion")
     home = Path(get_hermes_home())
+    module.register_budget(ctx, home)
     ctx.register_tool(name="notion", toolset="team-kit", schema=module.schema(configured),
                       handler=lambda args, **kwargs: module.handle(_notion_config(), home, args, files_config=_files_config(), chat=_run_kind() == "chat", require_snapshot=True, **kwargs),
                       description=module.schema(configured)["description"], emoji="🗂️")

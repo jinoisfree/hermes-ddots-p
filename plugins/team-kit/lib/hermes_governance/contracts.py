@@ -1084,7 +1084,7 @@ def build_APP_OPERATIONS():
             'read': ['lookup', 'read', 'thread', 'accounts', 'ack', 'download', 'labels', 'filter_list', 'mailboxes', 'rules_list'],
             'reversible_write': ['label_create', 'label_rename', 'label_apply', 'inbox_restore', 'filter_create', 'mail_organize', 'modify', 'mailbox_create', 'mail_move', 'mail_mark', 'rule_create', 'mail_app_organize', 'untrash', 'draft_create'],
             'delete': ['trash', 'label_delete', 'filter_delete', 'rule_delete', 'mail_trash']},
-        'notion': {'read': ['search', 'databases', 'schema', 'query', 'page', 'users', 'api_help'],
+        'notion': {'read': ['search', 'databases', 'schema', 'query', 'page', 'children', 'users', 'api_help'],
                    'reversible_write': ['create', 'update', 'append', 'edit', 'batch'], 'delete': ['trash']},
         'file_list': {'read': ['*']}, 'doc_read': {'read': ['*']}, 'pdf_render': {'read': ['*']},
         'folder_scan': {'read': ['*']}, 'file_location': {'read': ['*']},

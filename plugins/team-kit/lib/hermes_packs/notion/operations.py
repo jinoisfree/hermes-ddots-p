@@ -395,7 +395,7 @@ def remember(n, home, args, plan, call_id):
         for key, token in list(CALLS.items()):
             if token not in RECEIPTS: CALLS.pop(key)
         token = uuid.uuid4().hex
-        RECEIPTS[token] = {'home': str(home), 'digest': n.call_digest(args), 'who': n.conversation(), 'time': time.time(), 'plan': copy.deepcopy(plan)}
+        RECEIPTS[token] = {'home': str(home), 'digest': n.call_digest(args), 'who': n.conversation(), 'time': time.time(), 'plan': copy.deepcopy(plan), 'budget': n._BUDGET.get()}
         CALLS[(str(home), call_id or id(args))] = token
 
 
@@ -538,7 +538,9 @@ def handle(n, config, home, args, files_config, opener, chat, require_snapshot):
         if args['action'] == 'api_help': return help_result(args)
         if not is_write(args):
             method, path, body = route(n, args)
-            return {'ok': True, 'operation': args['operation'], 'data': request(n, home, method, path, body, opener)}
+            result = request(n, home, method, path, body, opener)
+            if 'results' in result: n.pagination(result, (args.get('params') or {}).get('start_cursor') or (body or {}).get('start_cursor'))
+            return {'ok': True, 'operation': args['operation'], 'data': result}
         if chat is False: raise n.NotionError('예약·배경 실행에서는 Notion을 변경하지 않습니다.')
         approved = consume(n, home, args, require_snapshot)
         plan = api_plan(n, config, home, args, files_config, opener)
@@ -583,8 +585,9 @@ def handle(n, config, home, args, files_config, opener, chat, require_snapshot):
             entry['status'] = 'unknown' if getattr(exc, 'unknown', False) or entry.get('result') else 'failed'; entry['error'] = str(exc)
             if entry['status'] == 'failed': entry['consumed'] = True
             save()
-            return {'ok': False, 'status': entry['status'], 'error': str(exc), 'rollback_key': entry['key'],
-                    'rollback_available': False, 'write_performed': bool(entry.get('result')), 'approval_required': False}
+            return {'ok': False, 'status': entry['status'], 'error': n.safe_error(exc), 'rollback_key': entry['key'],
+                    'rollback_available': False, 'approval_required': False,
+                    **({'write_performed':True} if entry.get('result') else {'write_performed':False} if entry['status']=='failed' else {})}
 
 
 def rollback(n, config, home, args, opener, require_snapshot):

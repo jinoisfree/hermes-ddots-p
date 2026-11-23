@@ -12,6 +12,56 @@ def option(value, label):
     return dict(id=hashlib.sha256(str(value).encode()).hexdigest()[:24], label=label, value=value)
 
 
+def notion_scopes(home, selected):
+    from collections import Counter
+    from hermes_packs.notion import api
+    from hermes_facility.connection_checks import candidate_values
+    from hermes_facility.app_scope import unbound
+    with api.read_budget(120), candidate_values(selected.get('_secrets', {})), unbound():
+        pages = {}; cursors = set(); cursor = None
+        while True:
+            body = {'page_size': 100}
+            if cursor: body['start_cursor'] = cursor
+            result = api.request(home, 'POST', 'search', body, timeout=15)
+            api.pagination(result)
+            for page in result['results']:
+                if page.get('object') not in ('page', 'database'):
+                    raise api.NotionError('APP_SCOPE_UNVERIFIED')
+                api.object_id(page.get('id'))
+                pages[page['id']] = page
+            if not result['has_more']: break
+            cursor = result['next_cursor']
+            if cursor in cursors: raise api.NotionError('NOTION_PAGINATION_INVALID')
+            cursors.add(cursor)
+        choices = []; labels = {key: api._title_of(row).strip() or '제목 없음' for key, row in pages.items()}
+        counts = Counter(labels.values())
+        def parent(row):
+            value = row.get('parent') or {}
+            return value.get(value.get('type'))
+        def depth(key):
+            seen = set()
+            while key in pages:
+                api.remaining()
+                if key in seen: raise api.NotionError('APP_SCOPE_UNVERIFIED')
+                seen.add(key); key = parent(pages[key])
+            return len(seen)
+        for key in sorted(pages, key=lambda k: (depth(k), labels[k], k)):
+            page = pages[key]; title = labels[key]
+            choice = option(key, title)
+            if title == '제목 없음' or counts[title] > 1: choice['label'] += ' · ' + choice['id']
+            choice['label'] = ('페이지' if page['object']=='page' else '데이터베이스') + ' · ' + choice['label']
+            ancestor = parent(page)
+            choice['hint'] = ('상위: ' + labels[ancestor] if ancestor in labels else
+                              '최상위' if (page.get('parent') or {}).get('type')=='workspace' else
+                              '상위 관계를 확인하지 못했어요. 원하는 범위가 없으면 공유 상태를 확인하고 다시 조회해 주세요.')
+            choice['label'] += ' · ' + choice['hint']
+            choices.append(choice)
+            if len(json.dumps(choices).encode()) >= api.JSON_LIMIT:
+                raise api.NotionError('NOTION_RESPONSE_TOO_LARGE')
+        api.remaining()
+        return choices
+
+
 FINDER_LIMIT = 300
 FINDER_PACKAGES = {'.app', '.bundle', '.framework', '.photoslibrary',
                    '.musiclibrary', '.tvlibrary', '.pkg', '.plugin'}
@@ -211,12 +261,7 @@ class Adapters:
                 choices.append(dict(option(a['id'],a['name']+('' if writable else ' (읽기 전용)')),writable=writable))
             return choices
         if kind == 'notion_pages':
-            from hermes_packs.notion import api
-            from hermes_facility.connection_checks import candidate_values
-            with candidate_values(selected.get('_secrets', {})):
-                result = api.request(home, 'POST', 'search', {'filter': {'property': 'object', 'value': 'page'}}, timeout=15)
-            pages = result.get('results', [])
-            return [option(p['id'], p.get('title') or '공유된 페이지') for p in pages if p.get('object') == 'page']
+            return notion_scopes(home, selected)
         if kind in ('folders', 'sync_folders'):
             if app['bundle_id'] == 'com.apple.finder':
                 return finder_scopes(selected)

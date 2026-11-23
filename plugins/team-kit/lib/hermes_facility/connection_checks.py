@@ -165,6 +165,8 @@ def check_notion(home, opener):
     except api.UnknownChange:
         return 'unknown', 'NETWORK', 'notion_users_me'
     except api.NotionError as error:
+        if str(error) in ('PRIVATE_WORK_NOTION_REFUSED', 'CONNECTIONS_READ_FAILED'):
+            return 'unknown', 'PERMISSION_REQUIRED' if str(error)=='PRIVATE_WORK_NOTION_REFUSED' else 'CONNECTIONS_READ_FAILED', 'notion_users_me'
         code = getattr(error, 'code', None)
         if code == 401:
             return 'needs_reconnect', 'TOKEN_INVALID', 'notion_users_me'

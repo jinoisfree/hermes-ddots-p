@@ -27,6 +27,7 @@ import time
 import threading
 import types
 from contextlib import contextmanager
+from contextvars import ContextVar
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 import importlib.util
@@ -54,7 +55,7 @@ ATTACH_BLOCKS = frozenset({'image', 'file'})
 IMAGE_MIME = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
               ".gif": "image/gif", ".webp": "image/webp", ".heic": "image/heic",
               ".tif": "image/tiff", ".tiff": "image/tiff"}
-READ = frozenset({"search", "databases", "schema", "query", "page", "users"})
+READ = frozenset({"search", "databases", "schema", "query", "page", "children", "users"})
 SINGLE_WRITE = frozenset({"create", "update", "append", "edit", "trash"})
 WRITE = SINGLE_WRITE | {"batch", "rollback"}
 MAX_ROWS = 50
@@ -80,6 +81,120 @@ class UnknownChange(NotionError):
     unknown = True
 
 
+JSON_LIMIT = 1_000_000
+_BUDGET = ContextVar('notion_call_budget', default=None)
+_CALL_BUDGETS = {}
+_BUDGET_LOCK = threading.RLock()
+SAFE_ERRORS = frozenset({'PRIVATE_WORK_NOTION_REFUSED', 'CONNECTIONS_READ_FAILED',
+    'NOTION_BUDGET_EXCEEDED', 'NOTION_RESPONSE_TOO_LARGE', 'NOTION_PAGINATION_INVALID',
+    'APP_OUT_OF_SCOPE', 'APP_SCOPE_UNVERIFIED', 'APP_SCOPE_REQUIRED', 'NOTION_HTTP_ERROR'})
+
+
+def safe_error(exc):
+    value = str(exc)
+    return value if value in SAFE_ERRORS else 'CONNECTIONS_READ_FAILED'
+
+
+@contextmanager
+def read_budget(seconds=60, *, clock=None, inherited=None, invocation=False):
+    """One Notion invocation, including nested proof reads and native preflight."""
+    if _BUDGET.get() is not None and not invocation:
+        yield _BUDGET.get()
+        return
+    clock = clock or time.monotonic
+    budget = inherited or dict(clock=clock, deadline=clock()+seconds, http=0, closed=False)
+    token = _BUDGET.set(budget)
+    try: yield budget
+    finally: _BUDGET.reset(token)
+
+
+def register_budget(ctx, home):
+    """Host execution middleware surrounds preflight/approval/dispatch, not just the handler.
+
+    Only live middleware frames are indexed. Terminal observers can close a cancelled
+    worker's shared budget; the worker keeps that closed object until its finally runs.
+    """
+    def identity(context):
+        return (str(home), context.get('session_id',''), context.get('turn_id',''),
+                context.get('tool_call_id') or object())
+    def execution(tool_name, args, next_call, **context):
+        if tool_name != 'notion': return next_call(args)
+        key = identity(context)
+        with read_budget(invocation=True) as budget:
+            with _BUDGET_LOCK:
+                if key in _CALL_BUDGETS or len(_CALL_BUDGETS) >= 128:
+                    return json.dumps({'ok':False,'error':'NOTION_BUDGET_EXCEEDED'})
+                _CALL_BUDGETS[key] = budget
+            try:
+                remaining()
+                return next_call(args)
+            except NotionError as error:
+                error.middleware_hard_stop = True
+                raise
+            finally:
+                with _BUDGET_LOCK:
+                    budget['closed'] = True
+                    if _CALL_BUDGETS.get(key) is budget: _CALL_BUDGETS.pop(key)
+    def finished(tool_name='', **context):
+        if tool_name != 'notion' or not context.get('tool_call_id'): return
+        with _BUDGET_LOCK:
+            budget = _CALL_BUDGETS.pop(identity(context), None)
+            if budget is not None: budget['closed'] = True
+    ctx.register_middleware('tool_execution', execution)
+    ctx.register_hook('post_tool_call', finished)
+
+
+def remaining():
+    budget = _BUDGET.get()
+    if budget is None: return None
+    if budget.get('closed'): raise NotionError('NOTION_BUDGET_EXCEEDED')
+    left = budget['deadline'] - budget['clock']()
+    if left <= 0: raise NotionError('NOTION_BUDGET_EXCEEDED')
+    return left
+
+
+def pagination(data, previous=None):
+    if not isinstance(data, dict) or not isinstance(data.get('results'), list):
+        raise NotionError('NOTION_PAGINATION_INVALID')
+    more, cursor = data.get('has_more'), data.get('next_cursor')
+    if type(more) is not bool or (more and (not isinstance(cursor, str) or not cursor)) or (not more and cursor is not None):
+        raise NotionError('NOTION_PAGINATION_INVALID')
+    if any(not isinstance(row, dict) for row in data['results']):
+        raise NotionError('NOTION_PAGINATION_INVALID')
+    if more and previous and cursor == previous: raise NotionError('NOTION_PAGINATION_INVALID')
+    return dict(has_more=more, next_cursor=cursor)
+
+
+def read_request(method, path):
+    route = path.split('?', 1)[0].strip('/')
+    if method == 'GET': return True
+    if method != 'POST': return False
+    if route == 'search': return True
+    if re.fullmatch(r'databases/[0-9a-fA-F-]+/query', route): return True
+    for name in api_module().READ_POST:
+        op = api_module().OPS[name]
+        pattern = re.sub(r'\{[^}]+\}', '[^/]+', op['path'].removeprefix('/v1/').strip('/'))
+        if re.fullmatch(pattern, route): return True
+    return False
+
+
+def read_json(response):
+    """Bound bytes and time while consuming a JSON body, before parsing it."""
+    chunks = []; size = 0
+    while True:
+        left = remaining()
+        sock = getattr(getattr(getattr(response, 'fp', None), 'raw', None), '_sock', None)
+        if left is not None and sock is not None: sock.settimeout(min(left, sock.gettimeout() or left))
+        chunk = getattr(response, 'read1', response.read)(min(65536, JSON_LIMIT+1-size))
+        remaining()
+        if not chunk: break
+        chunks.append(chunk); size += len(chunk)
+        if size > JSON_LIMIT: raise NotionError('NOTION_RESPONSE_TOO_LARGE')
+    value = json.loads(b''.join(chunks))
+    if not isinstance(value, dict): raise NotionError('CONNECTIONS_READ_FAILED')
+    return value
+
+
 @contextmanager
 def before_mutation():
     """Tag a refusal only inside a phase that cannot have written or saved pending state."""
@@ -97,15 +212,18 @@ _WORK_POLICY = None
 def work_scope_guard(args):
     global _WORK_POLICY
     _WORK_POLICY = work_scope
-    if reason := _WORK_POLICY.notion_problem(args):
+    try: reason = _WORK_POLICY.notion_problem(args)
+    except (sqlite3.Error, OSError, ValueError, TypeError, KeyError):
+        raise NotionError('CONNECTIONS_READ_FAILED') from None
+    if reason:
         raise NotionError(reason)
 
 
 
 def work_block_scope(home,args,opener):
     """A raw block ID has no publication scope. Prove membership from a known shared page first."""
-    if not team.home_has_role(home, 'work') or args.get('action')!='api':return
-    block_id=(args.get('params') or {}).get('block_id')
+    if not team.home_has_role(home, 'work'):return
+    block_id = (args.get('params') or {}).get('block_id') if args.get('action')=='api' else args.get('block_id') if args.get('action')=='children' else None
     if not block_id:return
     pages=_WORK_POLICY.shared_pages(args.get('common_id')) if _WORK_POLICY else []
     if not pages:raise NotionError('WORK_SCOPE_CONTEXT_REQUIRED: 블록 API에는 공용 업무 common_id가 필요하다.')
@@ -115,18 +233,20 @@ def work_block_scope(home,args,opener):
     while queue and len(seen)<10000:
         parent=queue.pop()
         if parent in seen:continue
-        seen.add(parent);cursor=None
+        seen.add(parent);cursor=None; cursors=set()
         while True:
             path=f'blocks/{parent}/children?page_size=100'+('&start_cursor='+urllib.parse.quote(cursor,safe='') if cursor else '')
             result=request(home,'GET',path,opener=opener)
-            for child in result.get('results') or []:
+            pagination(result)
+            for child in result['results']:
                 if child.get('archived') or child.get('in_trash'):continue
                 identifier=child.get('id')
                 if identifier and object_id(identifier)==wanted:return
                 if identifier and child.get('has_children'):queue.append(identifier)
             if not result.get('has_more'):break
             cursor=result.get('next_cursor')
-            if not cursor:raise NotionError('WORK_SCOPE_BLOCK_MEMBERSHIP_UNVERIFIED')
+            if not cursor or cursor in cursors:raise NotionError('NOTION_PAGINATION_INVALID')
+            cursors.add(cursor)
     raise NotionError('WORK_SCOPE_BLOCK_OUTSIDE_SHARED_WORK')
 
 
@@ -200,25 +320,37 @@ def _request(home: Path, method: str, path: str, body: Any = None, *, opener: An
         API + path, method=method, data=body if isinstance(body, bytes) else (None if body is None else json.dumps(body).encode("utf-8")),
         headers={"Authorization": "Bearer " + secret, "Notion-Version": version or (UPLOAD_VERSION if path.startswith("file_uploads") else VERSION),
                  "Content-Type": content_type or "application/json"})
+    is_read = read_request(method, path)
+    budget = _BUDGET.get()
+    left = remaining()
+    if left is not None: timeout = min(timeout, left)
+    if budget is not None:
+        with _BUDGET_LOCK:
+            remaining()
+            if budget['http'] >= 100: raise NotionError('NOTION_BUDGET_EXCEEDED')
+            budget['http'] += 1
     try:
         with (opener or _http_open)(call, timeout=timeout) as response:
             if getattr(response, "status", None) == 204: return {"object": "deleted", "deleted": True}
-            result = json.load(response)
+            result = read_json(response) if is_read else json.load(response)
             if not isinstance(result, dict):
                 raise ValueError("expected JSON object")
+            if is_read:
+                try: work_scope_guard(result)
+                except NotionError: raise
+                except (sqlite3.Error, OSError, ValueError, TypeError, KeyError):
+                    raise NotionError('CONNECTIONS_READ_FAILED') from None
+                remaining()
             return result
     except urllib.error.HTTPError as exc:
-        try:
-            detail = json.load(exc).get("message", "")
-        except Exception:
-            detail = ""
-        error = NotionError(f"Notion refused ({exc.code}): {str(detail)[:300]}")
+        exc.close()  # Never copy or parse an untrusted server error body.
+        error = NotionError('NOTION_HTTP_ERROR')
         error.code = exc.code
         error.unknown = exc.code >= 500 or exc.code == 408
         raise error from None
     except (ValueError, urllib.error.URLError, TimeoutError, OSError) as exc:
         # A timed-out change may or may not have landed: the caller must not repeat it blindly.
-        raise UnknownChange(f"Notion did not answer ({type(exc).__name__}); whether a change landed is unknown") from None
+        raise UnknownChange('CONNECTIONS_READ_FAILED') from None
 
 
 def _plain(parts: Any) -> str:
@@ -659,12 +791,19 @@ def approval_required(config, args):
 
 
 def guard(config: Any, home: Path, *, tool_name: str, args: Any, chat: bool, opener: Any = None, files_config=None, call_id="") -> dict[str, str] | None:
+    if tool_name != 'notion': return None
+    with read_budget():
+        return _guard(config, home, tool_name=tool_name, args=args, chat=chat,
+                      opener=opener, files_config=files_config, call_id=call_id)
+
+
+def _guard(config: Any, home: Path, *, tool_name: str, args: Any, chat: bool, opener: Any = None, files_config=None, call_id="") -> dict[str, str] | None:
     if tool_name != "notion" or not enabled(config):
         return None
     call = args if isinstance(args, dict) else {}
     try:
         work_scope_guard(call)
-        if call.get('action') == 'api':work_block_scope(home,call,opener)
+        work_block_scope(home,call,opener)
     except (NotionError, sqlite3.Error, OSError, ValueError, TypeError, KeyError) as exc:
         return {'action':'block','message':str(exc)}
     if call.get('action') in ('api', 'api_help'):
@@ -711,6 +850,35 @@ def guard(config: Any, home: Path, *, tool_name: str, args: Any, chat: bool, ope
 
 
 def handle(config: Any, home: Path, args: dict[str, Any], opener: Any = None, files_config=None, chat=None, require_snapshot=False, **_: Any) -> str:
+    nonce = args.get('_approval_snapshot')
+    receipt = (api_module().RECEIPTS if args.get('action') in ('api','rollback') else _SNAPSHOTS).get(nonce) if isinstance(nonce,str) else None
+    inherited = receipt.get('budget') if receipt and receipt.get('home')==str(home) and receipt.get('digest')==call_digest(args) else None
+    with read_budget(inherited=inherited):
+        try:
+            encoded = _handle(config, home, args, opener, files_config, chat, require_snapshot)
+            is_write = args.get('action') in WRITE or (args.get('action')=='api' and api_module().is_write(args))
+            if not is_write: remaining()
+            if len(encoded.encode()) < JSON_LIMIT: return encoded
+            result = json.loads(encoded)
+            if is_write:
+                summary = {k:result[k] for k in ('ok','status','write_performed','rollback_available') if k in result}
+                for k in ('rollback_key','undo_key'):
+                    if re.fullmatch('[0-9a-f]{32}', str(result.get(k, ''))): summary[k] = result[k]
+                from hermes_governance import notion_undo
+                summary['verification'] = {'complete': result.get('verification',{}).get('readback') is True if args.get('action')=='api' else notion_undo.complete(result),
+                                           'output_error':'NOTION_RESPONSE_TOO_LARGE'}
+                if args.get('action') == 'batch':
+                    summary['operations'] = [dict(index=op['index'], status=op['status'],
+                        **({'ok':op['ok']} if 'ok' in op else {}),
+                        verification_complete=notion_undo.complete(op)) for op in result['operations']]
+                summary['message'] = '상세 출력을 생략했어요. 반영 상태를 확인하기 전에는 다시 보내지 마세요.'
+                return json.dumps(summary, ensure_ascii=False)
+            raise NotionError('NOTION_RESPONSE_TOO_LARGE')
+        except (NotionError, sqlite3.Error, OSError, ValueError, TypeError, KeyError) as exc:
+            return json.dumps({'ok':False, 'error':safe_error(exc)})
+
+
+def _handle(config: Any, home: Path, args: dict[str, Any], opener: Any = None, files_config=None, chat=None, require_snapshot=False) -> str:
     def error(message: str, mutation_calls=None) -> str:
         result = {"ok": False, "error": message}
         if mutation_calls == 0:result['mutation_calls'] = 0
@@ -754,7 +922,7 @@ def handle(config: Any, home: Path, args: dict[str, Any], opener: Any = None, fi
             data = request(home, "POST", "search", body, opener=opener)
             items = [{"object": item.get("object"), "id": item.get("id"), "title": _title_of(item), "url": item.get("url")}
                      for item in data.get("results", [])]
-            return json.dumps({"ok": True, "results": items, "next_cursor": data.get("next_cursor")}, ensure_ascii=False)
+            return json.dumps({"ok": True, "results": items, **pagination(data, args.get('cursor'))}, ensure_ascii=False)
         if action == "users":
             return json.dumps({"ok": True, "people": _people(home, opener)}, ensure_ascii=False)
         if action == "schema":
@@ -770,7 +938,13 @@ def handle(config: Any, home: Path, args: dict[str, Any], opener: Any = None, fi
                 body["start_cursor"] = str(args["cursor"])
             data = request(home, "POST", f"databases/{object_id(args['database_id'])}/query", body, opener=opener)
             return json.dumps({"ok": True, "rows": [row(page) for page in data.get("results", [])],
-                               "next_cursor": data.get("next_cursor")}, ensure_ascii=False)
+                               **pagination(data, args.get('cursor'))}, ensure_ascii=False)
+        if action == 'children':
+            size = min(int(args.get('page_size') or 50), MAX_BLOCKS)
+            path = 'blocks/' + object_id(args['block_id']) + '/children?' + urllib.parse.urlencode(
+                {'page_size':size, **({'start_cursor':args['cursor']} if args.get('cursor') else {})})
+            data = request(home, 'GET', path, opener=opener)
+            return json.dumps({'ok':True, 'results':data['results'], **pagination(data, args.get('cursor'))}, ensure_ascii=False)
         if action == "page":
             page_id = object_id(args["page_id"])
             page = request(home, "GET", "pages/" + page_id, opener=opener)
@@ -786,7 +960,7 @@ def note(config: Any) -> str:
         return ""
     if writable(config) == set():
         return (_owner_text("[Notion] 이 프로필은 Notion을 보기만 할 수 있다. 연결에 지정된 페이지에만 접근한다. "
-                "읽기: databases(목록), schema(열과 선택지), query(행 조회), page(한 항목의 속성과 본문), search, users. "
+                "읽기: databases(목록), schema(열과 선택지), query(DB 행 조회), page(속성과 본문 요약), children(block_id, cursor/page_size로 직접 자식 목록; has_more/next_cursor로 계속), search, users. "
                 "<<personal_skill_prefix>>-work-sources를 열어 조회 범위와 근거를 확인한다."))
     if config.get('full_api') is True:
         return (_owner_text(
@@ -794,7 +968,7 @@ def note(config: Any) -> str:
                 'api_help:공식 API 46개·입력 스키마(operation=이름:경로·쿼리 인수·본문 형식;schema_ref=$ref:참조 형식). 실행:api(operation,params,body). '
                 '페이지·DB·데이터 소스·모든 열 종류·보기·블록·마크다운·이동·댓글·파일 업로드(upload-file(file_path,part_number?,offset?,length?):PDF/PPTX/XLSX 등 첨부) 지원. '
                 '열:retrieve-database의 data_sources→retrieve-a-data-source/update-a-data-source. '
-                'databases/schema/query/page/search/users/create/update/append/edit/batch/trash 지원. '
+                'databases/schema/query/page/search/users/create/update/append/edit/batch/trash 지원. page는 본문 요약, children(block_id,cursor/page_size)은 직접 자식 목록과 has_more/next_cursor, DB 행은 query로 조회한다. '
                 '원본부터 조회·요청분만 수정;report·verification·rollback_available·limitations 확인:변경 항목·복원 가능 여부 보고. '
                 'rollback:같은 대화 최근 변경을 30분내 복원, 이후 24시간내 확인 후. 삭제 수반 시 승인. '
                 '동시 수정 덮어쓰기·미확인 쓰기/비동기 작업 성공 보고·반복 금지. '
@@ -805,7 +979,7 @@ def note(config: Any) -> str:
                " 만들거나 고칠 수 있는 곳은 설정에 지정된 표와 그 하위 항목뿐이고, 나머지는 보기만 한다. 범위 밖 변경은 도구가 거부하니 시도하지 말고 사용자에게 알린다.")
     approval_note = '변경 결과의 report·verification·되돌리기 가능 여부를 답변에 적는다. '
     return limited.strip() + (' ' if limited else '') + (
-        '[Notion] 읽기: databases, schema(열·선택지), query(filter·sorts), page(속성·본문 id·서식·children), search, users. '
+        '[Notion] 읽기: databases, schema(열·선택지), query(filter·sorts), page(속성·본문 요약), children(block_id, cursor/page_size로 직접 자식 목록; has_more/next_cursor로 계속), search, users. DB 행은 query로 조회한다. '
         '쓰기 전 schema와 page를 읽는다. create(새 항목), update(속성), append(본문 추가), edit(기존 글·체크·색), trash(휴지통). '
         '여러 변경은 batch(title, operations 1~10개). ' + approval_note +
         'paragraphs의 text는 문자열 또는 [{text,bold,italic,underline,strike,code,color,link}] 조각 목록이다. '
@@ -822,14 +996,15 @@ def note(config: Any) -> str:
 SCHEMA = {
     "name": "notion",
     "description": (
-        "Read/write Notion. batch(title, operations): multiple changes in one call; rollback(key?) restores this conversation's latest change: immediate within 30 minutes, confirmed key within 24 hours. Preserve text and attachments, including original text below the last line with 5+ ━. replace_all=true requires an explicit full rewrite request. Pass page.last_edited as seen_last_edited for plaintext edits of nonempty text. update text accepts {append: text} or {replace: {find: text, with: text}}. Check report, verification and content_loss. Read reachable pages/databases; Writes follow shared app policy; prepare undo first. Reads: databases, search(query), schema(database_id), query(database_id, filter?, sorts?, page_size<=50, cursor?), page(page_id), users. Writes: create(database_id+properties or parent_page_id+title; paragraphs?), update(page_id+properties), append(page_id+paragraphs, after? top-level block id), edit(page_id+blocks, max20 text/checked/color changes), trash(page_id). IDs accept Notion links. paragraphs documents rich text, images/files(max10), nesting and spans. Use heading_2/heading_3 for text size. Properties: text, number, option name(s), YYYY-MM-DD or {start,end}, boolean, people names."),
+        "Read/write Notion. batch(title, operations): multiple changes in one call; rollback(key?) restores this conversation's latest change: immediate within 30 minutes, confirmed key within 24 hours. Preserve text and attachments, including original text below the last line with 5+ ━. replace_all=true requires an explicit full rewrite request. Pass page.last_edited as seen_last_edited for plaintext edits of nonempty text. update text accepts {append: text} or {replace: {find: text, with: text}}. Check report, verification and content_loss. Read reachable pages/databases; Writes follow shared app policy; prepare undo first. Reads: databases, search(query), schema(database_id), query(database_id, filter?, sorts?, page_size<=50, cursor?), page(page_id; bounded body summary), children(block_id, cursor?, page_size?; direct children with has_more/next_cursor), users. DB rows use query, not children. Writes: create(database_id+properties or parent_page_id+title; paragraphs?), update(page_id+properties), append(page_id+paragraphs, after? top-level block id), edit(page_id+blocks, max20 text/checked/color changes), trash(page_id). IDs accept Notion links. paragraphs documents rich text, images/files(max10), nesting and spans. Use heading_2/heading_3 for text size. Properties: text, number, option name(s), YYYY-MM-DD or {start,end}, boolean, people names."),
     "parameters": {"type": "object", "properties": {
         "action": {"type": "string", "enum": sorted(READ | WRITE)},
+        "block_id": {"type":"string", "description":"children: page/block ID. Follow has_more and next_cursor to list child pages/blocks."},
         "database_id": {"type": "string"}, "page_id": {"type": "string"}, "parent_page_id": {"type": "string"},
         "query": {"type": "string"}, "title": {"type": "string"},
         "operations": {"type": "array", "minItems": 1, "maxItems": 10, "items": {"type": "object"}, "description": "Existing create/update/append/edit/trash arguments, in order; no nested batch."},
         "key": {"type": "string", "description": "Return the rollback preview key only after the user confirms."},
-        "common_id": {"type":"string","description":"연결 업무의 공통 ID. private 업무는 노션 조회·생성·수정·파일 첨부가 거부된다."},
+        "common_id": {"type":"string","description":"연결 업무의 공통 ID. work 역할의 children/raw block 읽기에 필요하다. private 업무는 노션 조회·생성·수정·파일 첨부가 거부된다."},
         "replace_all": {"type": "boolean", "description": "update only: explicit full rewrite authorized by the user for this item; never bypass a preservation refusal."},
         "seen_last_edited": {"type": "string", "description": "page/query last_edited; required for plaintext update of nonempty text, optional for partial update/append/edit/trash."},
         "properties": {"type": "object", "description": "Property name to plain value."},
@@ -1661,7 +1836,7 @@ def change(config, home, args, files_config, opener):
         for index, op in enumerate(ops, 1):
             if halted:
                 results.append({'index': index, 'status': 'skipped'}); continue
-            pending = None
+            pending = None; result = None; inverse = None
             try:
                 # Re-read immediately before mutation; snapshots include earlier successful operations.
                 if reason := outside(config, home, op, opener=opener): raise NotionError(reason)
@@ -1726,13 +1901,18 @@ def change(config, home, args, files_config, opener):
                             losses[name] = {'missing_lines': len(missing), 'preview': [line[:160] for line in missing[:5]], 'verified': True}
                     result['content_loss'] = losses
                 from hermes_governance import notion_undo
-                if who:
+                if who and not result['verification'].get('error'):
                     notion_undo.capture(api_context(),home,inverse,opener)
                     save()
                 result['report'] = report(op, plan, result)
                 results.append({'index': index, 'status': 'done', **result})
-                halted = result.get('ok') is not True
+                halted = result.get('ok') is not True or bool(result['verification'].get('error'))
             except (NotionError, OSError, ValueError, KeyError, TypeError) as exc:
+                if result is not None and inverse is not None:
+                    result.setdefault('verification', {})['error'] = safe_error(exc)
+                    results.append({'index':index, 'status':'unverified', **result})
+                    halted = True
+                    continue
                 unknown = getattr(exc, 'unknown', False)
                 # A journal error after a mutation may also leave a durable pending record; never replay blindly.
                 if isinstance(exc, OSError) and pending is not None: unknown = True
@@ -1743,7 +1923,7 @@ def change(config, home, args, files_config, opener):
         if who:
             if entry in data['entries'] and not entry['operations']: data['entries'].remove(entry)
             save()
-        available = bool(who and any(o['action'] != 'unknown' and (o['action'] != 'edit' or any(b['status'] == 'done' for b in o['blocks'])) for o in entry['operations']))
+        available = bool(who and any(o['action'] != 'unknown' and (o['action'] not in ('create','append') or 'app_after' in o) and (o['action'] != 'edit' or any(b['status'] == 'done' for b in o['blocks'])) for o in entry['operations']))
         meta = {'approval_required': required, 'rollback_available': available, 'rollback_key': entry['key'] if available else None}
         from hermes_governance import notion_undo
         entry['app_ready']=bool(available and not halted and all(notion_undo.complete(r) for r in results))
@@ -1991,7 +2171,7 @@ def remember_snapshot(home, args, plans, call_id):
         for key, token in list(_SNAPSHOT_CALLS.items()):
             if token not in _SNAPSHOTS: del _SNAPSHOT_CALLS[key]
         token = uuid.uuid4().hex; pages = snapshot_values(plans)
-        _SNAPSHOTS[token] = {'home': str(home), 'digest': call_digest(args), 'pages': pages, 'time': time.time()}
+        _SNAPSHOTS[token] = {'home': str(home), 'digest': call_digest(args), 'pages': pages, 'time': time.time(), 'budget': _BUDGET.get()}
         _SNAPSHOT_CALLS[(str(home), call_id or id(args))] = token
 
 

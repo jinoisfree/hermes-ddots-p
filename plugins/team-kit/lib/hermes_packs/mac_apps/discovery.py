@@ -142,9 +142,12 @@ def installed_apps(root, roots=None, self_id=None):
     profiles = {p: (h, cfg) for p, h, _, cfg in connections.profile_contexts(root)}
     groups = {p: dict(profile=p,role_hint=app_registry.role_hint(root,p),connected=[],connectable=[],unavailable=[]) for p in profiles}
     result = []
-    discovered = scan(roots)
-    if not any(a['bundle_id'] == 'md.obsidian' for a in discovered): discovered.append(catalog.obsidian_service())
-    for app in discovered:
+    discovered = {catalog.connection_key(a['bundle_id']): dict(a) for a in scan(roots)}
+    discovered.setdefault('service:obsidian-notes', catalog.obsidian_service())
+    for bundle in catalog.load_catalog():
+        remote = catalog.remote_app(bundle)
+        if remote is not None: discovered.setdefault(catalog.connection_key(bundle), remote)
+    for app in discovered.values():
         app.update(catalog.entry(app, self_id))
         app['connection_key'] = catalog.connection_key(app['bundle_id'])
         service = app['service']
@@ -169,7 +172,8 @@ def installed_apps(root, roots=None, self_id=None):
     installed = {catalog.connection_key(a['bundle_id']) for a in result}
     for profile, (home, config) in profiles.items():
         for bundle in sorted(app_registry.grants(root, profile, config) - installed):
-            groups[profile]['connected'].append(dict(bundle_id=bundle, name=bundle, state='app_missing',
-                route='none', can_do='', rules=[], reason='앱이 없어요. 다시 설치하면 연결을 이어가요.'))
+            item = dict(bundle_id=bundle, name=bundle, state='app_missing',
+                route='none', can_do='', rules=[], reason='앱이 없어요. 다시 설치하면 연결을 이어가요.')
+            groups[profile]['connected'].append(item)
     return dict(schema='hermes-installed-apps/1', scanned_at=datetime.now(timezone.utc).isoformat(), apps=[a for a in result if a.get('group') != 'service'],
                 services=[a for a in result if a.get('group') == 'service'], agents=list(groups.values()))

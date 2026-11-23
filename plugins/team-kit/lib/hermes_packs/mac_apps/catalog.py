@@ -35,6 +35,19 @@ def entry(app, self_id=None):
                 can_do=app.get('script_description') or ('앱이 공개한 항목을 읽고 다룰 수 있어요.' if scripting else ''),
                 rules=[], reason=None if scripting else '이 앱은 다른 프로그램이 쓸 수 있는 방법을 열어 두지 않았어요.')
 
+def remote_app(bundle):
+    """A registered capability available without a local app installation.
+
+    Unspecified installation requirements remain local. This metadata offers
+    connection setup; employee grants and selected scopes still govern use.
+    """
+    bundle = connection_key(bundle)
+    configured = load_catalog().get(bundle)
+    if configured is None or configured.get('local_install_required', True) is not False:
+        return None
+    return dict(configured, bundle_id=bundle, name=configured.get('name', bundle), group='service', has_sdef=False)
+
+
 def connection_key(bundle):
     return 'service:obsidian-notes' if bundle == 'md.obsidian' else bundle
 

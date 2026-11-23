@@ -84,6 +84,8 @@ def settings_for(app, selected, home):
         first=Path(str(choices[0])).name or str(choices[0])
         add('values','계정' if app.get('scope')=='mail_accounts' else '쓸 곳',
             first+(' 외 '+str(len(choices)-1)+'개' if len(choices)>1 else ''))
+    elif app.get('scope')=='notion_pages':
+        add('values','쓸 곳','선택 필요')
     return result
 
 
@@ -118,6 +120,8 @@ def wait(result, step, kind, reason, **extra):
     error = failure_hint(service,reason)
     if error and 'input_error' not in extra: extra['input_error'] = error
     result.update(outcome='waiting', reason=reason, next=dict(kind=kind, **extra))
+    if len(json.dumps(result).encode()) >= 1_000_000:
+        return response(result['profile'], result['app'], reason='CONNECTIONS_READ_FAILED')
     return result
 
 
@@ -527,6 +531,8 @@ def run(root, action, profile, bundle, *, account=None, scopes=None, default=Non
     bundle = catalog.connection_key(bundle)
     app = next((a for a in adapters.apps() if catalog.connection_key(a['bundle_id']) == bundle), None)
     if app is None and bundle == 'service:obsidian-notes': app = catalog.obsidian_service()
+    if app is None and (action == 'connect' or bundle in registry.grants(root,profile)):
+        app = catalog.remote_app(bundle)
     if app is None and action == 'connect': return response(profile, bundle, reason='APP_MISSING')
     app = dict(app or {'bundle_id': bundle, 'has_sdef': False})
     app.update(catalog.entry(app))
@@ -649,7 +655,7 @@ def run(root, action, profile, bundle, *, account=None, scopes=None, default=Non
                                 **({'hint':'넣었던 주소가 맞지 않아 서버가 찾은 주소로 바꿨어요'}
                                    if app.get('service')=='synology' and address_invalid and complete
                                    and not any(k in (values or {}) for k in ('api_base','link_host')) else {}))
-            checkpoint()
+            if app.get('service')!='notion':checkpoint()
             if app.get('service')=='synology':
                 saved_root=selected.get('sync_root')
                 if change=='sync_root' and not (values or {}).get('sync_root'):selected.pop('sync_root',None)
@@ -676,17 +682,32 @@ def run(root, action, profile, bundle, *, account=None, scopes=None, default=Non
             if app.get('scope'):
                 selected['_requested_scope'] = scopes or []
                 try:options = adapters.scopes(home, app, selected, config)
-                except ValueError as error:
-                    if app.get('service')!='synology':raise
+                except Exception as error:
+                    if app.get('service') != 'notion':
+                        # Preserve the existing NAS-specific error conversion below.
+                        if app.get('service') != 'synology' or not isinstance(error, ValueError): raise
+                    else:
+                        reason = ('PERMISSION_REQUIRED' if str(error)=='PRIVATE_WORK_NOTION_REFUSED' or getattr(error,'code',None)==403 else
+                                  'TOKEN_INVALID' if getattr(error,'code',None)==401 else
+                                  str(error) if str(error) in ('AUTH_FAILED','NETWORK','TOKEN_INVALID') else 'CONNECTIONS_READ_FAILED')
+                        return wait(result, 'values', 'choose_scope', reason,
+                                    input_error='공유·접근 범위를 확인하고 다시 조회해 주세요.' if reason=='PERMISSION_REQUIRED' else '목록을 확인하지 못했어요. 기존 설정은 유지돼요.')
                     from hermes_facility.synology_setup import LoginError, scope_failure_hint
                     return wait(result,'login' if str(error)=='AUTH_FAILED' else 'values','secret_set' if str(error)=='AUTH_FAILED' else 'choose_scope',str(error),selected=[],hint=scope_failure_hint(error),
                                 **(error.details if isinstance(error,LoginError) else {}))
+                mapped,complete=selected_options(options,selected.get('scope',[]))
                 choice_fields=dict(scope=app['scope'],
                     options=[{k:v for k,v in o.items() if k in ('id','label','server_path','mac_path','disabled','needs_user','hint')} for o in options],
-                    selected=selected_options(options,selected.get('scope',[]))[0],multi=True,select_all=True,needs_default=app['scope']=='calendars',
+                    selected=mapped,multi=True,select_all=True,needs_default=app['scope']=='calendars',
                     account_settings=mac_account_settings(app))
+                if (app.get('service')=='notion' and scopes is None
+                        and selected.get('scope') and not complete):
+                    return wait(result,'values','choose_scope','SCOPE_INVALID',
+                                input_error='기존에 선택한 항목을 현재 목록에서 모두 확인할 수 없어요. 기존 설정은 유지돼요.',
+                                hint='목록에 표시된 선택 후보는 저장된 전체 범위와 다를 수 있어요.',
+                                **choice_fields)
+                if app.get('service')=='notion':checkpoint()
                 if scopes is None and change!='values' and selected.get('scope'):
-                    mapped,complete=selected_options(options,selected['scope'])
                     if complete:
                         scopes=mapped
                         if default is None and selected.get('default'):

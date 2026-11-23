@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -153,8 +154,34 @@ def safe_path(home, relative):
 
 def signature(path):
     if path.is_symlink(): return {'link': os.readlink(path)}
-    if path.is_file(): return {'sha256': hashlib.sha256(path.read_bytes()).hexdigest()}
+    if path.is_file():
+        result = {'sha256': hashlib.sha256(path.read_bytes()).hexdigest()}
+        if path.name == 'hermes-connections' and path.parent.name == 'bin':
+            result['mode'] = path.stat().st_mode & 0o777
+        return result
     return None
+
+
+def connection_launcher(root, home):
+    """Bind a generic public template to the installer-selected local runtime."""
+    template = root / 'commands/hermes-connections.py'
+    if not template.is_file() or template.is_symlink():
+        raise SetupError('연결 실행기 배포 파일이 없습니다. 공개판을 다시 받으세요.')
+    python = runtime_python(home)
+    command = shlex.quote(str(python)) + ' -I -B -c ' + shlex.quote(template.read_text()) + ' "$0" "$@"'
+    # Supervise only this invocation: suppress loader diagnostics, preserve stdout
+    # and stdin, and reap the child before exiting on gate cancellation.
+    return ('#!/bin/sh\n'
+            + 'if [ ! -x ' + shlex.quote(str(python)) + ' ]; then\n'
+            + '  echo "CONNECTION_RUNTIME_UNAVAILABLE: reinstall or update" >&2\n  exit 1\nfi\n'
+            + "trap 'kill -KILL \"$!\" 2>/dev/null; wait \"$!\" 2>/dev/null; exit 143' TERM\n"
+            + "trap 'kill -KILL \"$!\" 2>/dev/null; wait \"$!\" 2>/dev/null; exit 130' INT\n"
+            + "trap 'kill -KILL \"$!\" 2>/dev/null; wait \"$!\" 2>/dev/null; exit 129' HUP\n"
+            + command + ' <&0 2>/dev/null &\n'
+            + 'wait "$!" 2>/dev/null\nresult=$?\n'
+            + 'if [ "$result" -ne 0 ]; then\n'
+            + '  echo "CONNECTION_COMMAND_FAILED: check response; reinstall or update if unavailable" >&2\nfi\n'
+            + 'exit "$result"\n').encode()
 
 
 def validate_distribution(root):
@@ -213,7 +240,7 @@ def apply_files(home, files, links, *, managed, previous, update=False, dry_run=
             raise SetupError('설치 대상에 기존 폴더가 있습니다. 내용을 보존하고 중단합니다.')
         if name in managed or name in obsolete:
             if before and (name not in previous or before != previous[name]):
-                desired = {'link': links[name]} if name in links else {'sha256': hashlib.sha256(files[name]).hexdigest()} if name in files else None
+                desired = managed.get(name) or ({'link': links[name]} if name in links else {'sha256': hashlib.sha256(files[name]).hexdigest()} if name in files else None)
                 if before != desired: raise SetupError('직접 고친 플러그인 코드가 있습니다. 변경을 보존한 뒤 업데이트하세요.')
         elif path.is_symlink() and (name not in links or before != {'link': links[name]}):
             raise SetupError('사용자 파일의 링크를 덮어쓰지 않습니다.')
@@ -221,7 +248,7 @@ def apply_files(home, files, links, *, managed, previous, update=False, dry_run=
         ensure_stopped(home)
     if update:
         # Unknown files inside managed plugin trees may be user work: never remove them.
-        roots = {Path(name).parts[1] for name in managed}
+        roots = {Path(name).parts[1] for name in managed if Path(name).parts[0] == 'plugin-store'}
         for plugin in roots:
             for path in (home / 'plugin-store' / plugin).rglob('*'):
                 if '__pycache__' in path.parts or path.suffix == '.pyc': continue
@@ -235,7 +262,7 @@ def apply_files(home, files, links, *, managed, previous, update=False, dry_run=
     try:
         for name in sorted(set(files) | set(links) | obsolete, key=lambda n: n in links):
             path = safe_path(home, name)
-            desired = {'link': links[name]} if name in links else {'sha256': hashlib.sha256(files[name]).hexdigest()} if name in files else None
+            desired = managed.get(name) or ({'link': links[name]} if name in links else {'sha256': hashlib.sha256(files[name]).hexdigest()} if name in files else None)
             if signature(path) == desired: continue
             saved[name] = (os.readlink(path), None, None) if path.is_symlink() else (None, path.read_bytes(), path.stat().st_mode & 0o777) if path.is_file() else None
             if path.is_symlink(): path.unlink()
@@ -247,7 +274,7 @@ def apply_files(home, files, links, *, managed, previous, update=False, dry_run=
                 fd, temporary = tempfile.mkstemp(prefix='.install-', dir=path.parent)
                 try:
                     with os.fdopen(fd, 'wb') as stream: stream.write(files[name]); stream.flush(); os.fsync(stream.fileno())
-                    os.chmod(temporary, 0o755 if path.suffix == ".sh" else 0o644 if name in managed else 0o600)
+                    os.chmod(temporary, managed.get(name, {}).get("mode", 0o755 if path.suffix == ".sh" else 0o644 if name in managed else 0o600))
                     os.replace(temporary, path)
                 finally:
                     if os.path.exists(temporary): os.unlink(temporary)
@@ -411,7 +438,9 @@ def modern_main(root, argv=None):
             if removed: print('이 운영체제에서 사용할 수 없어 제외: ' + ', '.join(removed))
     validate_distribution(root)
     files, links = code_payload(root, plugins)
+    files['bin/hermes-connections'] = connection_launcher(root, home)
     managed = {name: {'sha256': hashlib.sha256(body).hexdigest()} for name, body in files.items()}
+    managed['bin/hermes-connections']['mode'] = 0o755
     managed.update({name: {'link': target} for name, target in links.items()})
     if not args.update:
         profiles = {slug: 'default' if slug == default else slug for slug in selected}
